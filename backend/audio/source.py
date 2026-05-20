@@ -69,16 +69,20 @@ class AudioSource(ABC):
     # ---- 通用机制 ----
     def __enter__(self) -> "AudioSource":
         native_rate, source_channels = self._open()
-        self._n_channels = min(source_channels, self._config.max_channels)
-        if source_channels > self._n_channels:
-            logger.info(
-                "输入 %d 声道，处理前 %d 路，丢弃 %d 路",
-                source_channels, self._n_channels,
-                source_channels - self._n_channels,
-            )
-        self._processors = [
-            ChannelProcessor(native_rate) for _ in range(self._n_channels)
-        ]
+        try:
+            self._n_channels = min(source_channels, self._config.max_channels)
+            if source_channels > self._n_channels:
+                logger.info(
+                    "输入 %d 声道，处理前 %d 路，丢弃 %d 路",
+                    source_channels, self._n_channels,
+                    source_channels - self._n_channels,
+                )
+            self._processors = [
+                ChannelProcessor(native_rate) for _ in range(self._n_channels)
+            ]
+        except Exception:
+            self._close()
+            raise
         return self
 
     def __exit__(self, *exc: object) -> None:
