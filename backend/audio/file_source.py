@@ -17,7 +17,10 @@ class FileSource(AudioSource):
         self._block_frames = 0
 
     def _open(self) -> tuple[int, int]:
-        self._sf = sf.SoundFile(self._path)
+        try:
+            self._sf = sf.SoundFile(self._path)
+        except Exception as exc:
+            raise OSError(f"无法打开音频文件 {self._path!r}: {exc}") from exc
         self._block_frames = self._sf.samplerate * self._config.chunk_ms // 1000
         return self._sf.samplerate, self._sf.channels
 
