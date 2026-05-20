@@ -51,6 +51,7 @@ class AudioSource(ABC):
         self._start_frame = 0
         self._n_channels = 0
         self._processors: list[ChannelProcessor] = []
+        self._flushed = False
 
     # ---- 子类钩子 ----
     @abstractmethod
@@ -94,11 +95,24 @@ class AudioSource(ABC):
     def __next__(self) -> AudioChunk:
         raw = self._read_raw_block()
         if raw is None:
-            raise StopIteration
+            return self._drain()
         out_channels = [
             self._processors[i].process(raw[:, i])
             for i in range(self._n_channels)
         ]
+        return self._emit(out_channels)
+
+    def _drain(self) -> AudioChunk:
+        """源耗尽：排出每声道重采样器尾部，作为最后一个 chunk 吐出。"""
+        if self._flushed:
+            raise StopIteration
+        self._flushed = True
+        out_channels = [proc.flush() for proc in self._processors]
+        if not out_channels or len(out_channels[0]) == 0:
+            raise StopIteration
+        return self._emit(out_channels)
+
+    def _emit(self, out_channels: list[np.ndarray]) -> AudioChunk:
         n_frames = len(out_channels[0])
         chunk = AudioChunk(
             seq=self._seq,

@@ -20,10 +20,21 @@ class ChannelProcessor:
             in_rate, OUTPUT_SAMPLE_RATE, 1, dtype="float32"
         )
 
+    @staticmethod
+    def _to_int16(resampled: np.ndarray) -> np.ndarray:
+        scaled = np.round(resampled * 32767.0)
+        return np.clip(scaled, -32768.0, 32767.0).astype(np.int16)
+
     def process(self, mono_block: np.ndarray) -> np.ndarray:
         """重采样一块 float32 单声道到 16kHz，返回 int16 一维数组。"""
         resampled = self._resampler.resample_chunk(
             np.ascontiguousarray(mono_block, dtype=np.float32)
         )
-        scaled = np.round(resampled * 32767.0)
-        return np.clip(scaled, -32768.0, 32767.0).astype(np.int16)
+        return self._to_int16(resampled)
+
+    def flush(self) -> np.ndarray:
+        """排出重采样器尾部缓冲的滤波延迟样本，返回 int16。流结束时调用一次。"""
+        resampled = self._resampler.resample_chunk(
+            np.zeros(0, dtype=np.float32), last=True
+        )
+        return self._to_int16(resampled)
