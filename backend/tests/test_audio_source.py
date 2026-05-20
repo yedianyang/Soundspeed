@@ -103,3 +103,11 @@ def test_source_closes_on_context_exit():
     with src as s:
         list(s)
     assert src.closed is True
+
+
+def test_public_api_reexported():
+    import backend.audio as audio
+
+    for name in ("AudioConfig", "AudioChunk", "AudioSource", "ChannelProcessor",
+                 "FileSource", "DeviceSource", "DeviceError", "OUTPUT_SAMPLE_RATE"):
+        assert hasattr(audio, name), name
