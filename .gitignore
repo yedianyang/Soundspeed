@@ -57,8 +57,9 @@ data/*
 *.db-shm
 *.db-journal
 
-# 导出产物 / 日志 / 临时
+# 导出产物 / 实验产物 / 日志 / 临时
 exports/
+experiments/**/artifacts/
 logs/
 tmp/
 *.log
