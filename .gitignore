@@ -1,0 +1,64 @@
+# Soundspeed — git ignore
+
+# 系统 / 编辑器
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Claude Code（本地 AI 助手配置，不入库）
+CLAUDE.md
+.claude/
+
+# 密钥 / 环境变量
+.env
+.env.*
+!.env.example
+
+# Python (backend)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+
+# Node (frontend，待落地)
+node_modules/
+dist/
+.vite/
+.next/
+
+# 模型权重 —— 不进 git，靠 models/ 下的下载脚本获取
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.ckpt
+models/*
+!models/.gitkeep
+!models/*.md
+!models/*.sh
+
+# 数据 / 录音 —— 全部忽略（现场录音、隐私）
+# 测试夹具放 backend/tests/fixtures/，不受此影响
+data/*
+!data/.gitkeep
+
+# SQLite 运行库（schema / 迁移脚本是源码，正常进 git）
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.db-journal
+
+# 导出产物 / 日志 / 临时
+exports/
+logs/
+tmp/
+*.log
