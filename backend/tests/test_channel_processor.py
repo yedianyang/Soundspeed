@@ -49,7 +49,9 @@ def test_process_preserves_amplitude():
 def test_flush_returns_int16():
     proc = ChannelProcessor(in_rate=48000)
     proc.process(_sine(440, 48000, 9600))
-    assert proc.flush().dtype == np.int16
+    tail = proc.flush()
+    assert tail.dtype == np.int16
+    assert len(tail) > 0
 
 
 def test_flush_recovers_resampler_tail():
