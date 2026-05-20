@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from backend.audio.constants import OUTPUT_SAMPLE_RATE
-from backend.audio.source import AudioChunk, AudioConfig
+from backend.audio.source import AudioChunk, AudioConfig, AudioSource
 
 
 def test_output_sample_rate_is_16k():
@@ -30,9 +30,6 @@ def test_audio_chunk_is_frozen():
     chunk = AudioChunk(seq=0, channels=[], n_frames=0, start_frame=0)
     with pytest.raises(dataclasses.FrozenInstanceError):
         chunk.seq = 1
-
-
-from backend.audio.source import AudioSource
 
 
 class _FakeSource(AudioSource):
