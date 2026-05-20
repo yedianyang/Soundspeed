@@ -51,6 +51,9 @@ class DeviceSource(AudioSource):
             )
             self._stream.start()
         except sd.PortAudioError as exc:
+            if self._stream is not None:
+                self._stream.close()
+                self._stream = None
             raise DeviceError(f"打开设备 {self._device!r} 失败：{exc}") from exc
         return rate, channels
 
