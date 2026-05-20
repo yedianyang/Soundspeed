@@ -108,6 +108,8 @@ def test_source_closes_on_context_exit():
 def test_public_api_reexported():
     import backend.audio as audio
 
-    for name in ("AudioConfig", "AudioChunk", "AudioSource", "ChannelProcessor",
-                 "FileSource", "DeviceSource", "DeviceError", "OUTPUT_SAMPLE_RATE"):
+    expected = {"AudioConfig", "AudioChunk", "AudioSource", "ChannelProcessor",
+                "FileSource", "DeviceSource", "DeviceError", "OUTPUT_SAMPLE_RATE"}
+    for name in expected:
         assert hasattr(audio, name), name
+    assert set(audio.__all__) == expected
