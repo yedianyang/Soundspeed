@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from backend.audio.file_source import FileSource
 from backend.audio.source import AudioConfig
@@ -40,3 +41,9 @@ def test_file_source_odd_rate_resamples(odd_rate_wav):
     with FileSource(odd_rate_wav, AudioConfig()) as src:
         chunks = list(src)
     assert all(c.sample_rate == 16000 for c in chunks)
+
+
+def test_file_source_missing_file_raises():
+    with pytest.raises(OSError):
+        with FileSource("/nonexistent/path_xyz.wav", AudioConfig()) as src:
+            list(src)
