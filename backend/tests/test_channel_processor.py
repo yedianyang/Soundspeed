@@ -43,4 +43,4 @@ def test_process_preserves_amplitude():
     proc = ChannelProcessor(in_rate=48000)
     out = np.concatenate([proc.process(_sine(440, 48000, 9600)) for _ in range(5)])
     peak = int(np.max(np.abs(out)))
-    assert 8000 < peak < 20000  # 半幅 ~16384 附近
+    assert 12000 < peak < 20000  # 半幅 ~16384 附近
