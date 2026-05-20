@@ -44,3 +44,22 @@ def test_process_preserves_amplitude():
     out = np.concatenate([proc.process(_sine(440, 48000, 9600)) for _ in range(5)])
     peak = int(np.max(np.abs(out)))
     assert 12000 < peak < 20000  # 半幅 ~16384 附近
+
+
+def test_flush_returns_int16():
+    proc = ChannelProcessor(in_rate=48000)
+    proc.process(_sine(440, 48000, 9600))
+    assert proc.flush().dtype == np.int16
+
+
+def test_flush_recovers_resampler_tail():
+    """处理 N 块后 flush，累计输出帧数应非常接近输入的 1/3（尾巴已排出）。"""
+    proc = ChannelProcessor(in_rate=48000)
+    total_in = 0
+    total_out = 0
+    for _ in range(10):
+        block = _sine(440, 48000, 9600)
+        total_in += len(block)
+        total_out += len(proc.process(block))
+    total_out += len(proc.flush())
+    assert abs(total_out / total_in - 1 / 3) < 0.005

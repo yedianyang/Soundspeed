@@ -64,7 +64,7 @@ def test_source_yields_chunks_with_truncated_channels():
                       n_blocks=5, block_frames=9600)
     with src as s:
         chunks = list(s)
-    assert len(chunks) == 5
+    assert len(chunks) >= 5  # 5 个数据 chunk，可能再加一个尾部排出 chunk
     for chunk in chunks:
         assert len(chunk.channels) == 2
 
@@ -82,7 +82,7 @@ def test_source_seq_and_start_frame_accumulate():
                       n_blocks=4, block_frames=3200)
     with src as s:
         chunks = list(s)
-    assert [c.seq for c in chunks] == [0, 1, 2, 3]
+    assert [c.seq for c in chunks] == list(range(len(chunks)))
     expected = 0
     for chunk in chunks:
         assert chunk.start_frame == expected
