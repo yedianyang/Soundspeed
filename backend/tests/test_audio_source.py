@@ -113,3 +113,16 @@ def test_public_api_reexported():
     for name in expected:
         assert hasattr(audio, name), name
     assert set(audio.__all__) == expected
+
+
+def test_source_closes_when_processor_init_fails(monkeypatch):
+    """_open 成功后 ChannelProcessor 构造失败 -> _close 仍被调用，不泄漏句柄。"""
+    def _boom(*args, **kwargs):
+        raise RuntimeError("resampler init failed")
+
+    monkeypatch.setattr("backend.audio.source.ChannelProcessor", _boom)
+    src = _FakeSource(AudioConfig(), rate=48000, channels=2,
+                      n_blocks=1, block_frames=9600)
+    with pytest.raises(RuntimeError):
+        src.__enter__()
+    assert src.closed is True
