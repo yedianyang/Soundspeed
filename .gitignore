@@ -59,7 +59,8 @@ data/*
 
 # 导出产物 / 实验产物 / 日志 / 临时
 exports/
-experiments/**/artifacts/
+experiments/*
+!experiments/.gitkeep
 logs/
 tmp/
 *.log
