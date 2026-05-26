@@ -8,7 +8,12 @@
 
 # Claude Code（本地 AI 助手配置，不入库）
 CLAUDE.md
+AGENTS.md
+KIMI_SETUP.md
 .claude/
+.kimi/
+.playwright-mcp/
+.superpowers/
 
 # 密钥 / 环境变量
 .env
@@ -64,3 +69,4 @@ experiments/*
 logs/
 tmp/
 *.log
+admin-*.png
