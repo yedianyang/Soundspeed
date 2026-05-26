@@ -1,6 +1,6 @@
 # 前端 Admin UI 对接说明
 
-更新时间：2026-05-26
+更新时间：2026-05-26（v2：底部控制条与可访问性修订）
 
 ## 本地运行
 
@@ -17,6 +17,8 @@ pnpm dev
 - Admin 主界面：`http://localhost:5173/admin`
 - 根路径：`http://localhost:5173/`，会自动跳转到 `/admin`
 - 共享视图占位页：`http://localhost:5173/view`
+
+`vite.config.ts` 已配 `server.host: true`，dev server 默认监听所有网卡。终端会同时打印 `Network: http://<本机 IP>:5173/`，同 Wi-Fi 下手机/平板直接打开该地址即可调试移动视图。如果连不上，先排查 macOS 防火墙是否拦 node、路由器是否启用 AP 隔离。
 
 如果本机没有 `pnpm`：
 
@@ -83,6 +85,7 @@ pnpm lint
 - `md` 以下：主内容合并为一个卡片，用顶部 tabs 切换四个视图。
 - `md` 及以上：左侧固定显示 Live Transcript，右侧固定宽度 `420px` 显示剧本、历史、LLM 反馈 tabs。
 - 底部控制条始终固定在页面底部区域，不跟随主内容滚动。
+- 底部 Scene / Shot / Take / Mark 四个 chip 在 `sm` 以下用 `flex-1` 等分宽度强制不换行；`sm` 及以上恢复紧凑左对齐。REC 圆采用 `absolute right-3 sm:right-5 bottom-2`，独立于左侧 chip 行的高度变化。
 
 ## 当前已接入页面和组件
 
@@ -102,7 +105,7 @@ pnpm lint
 |---|---|---|
 | 全屏工作台 | `h-dvh w-screen overflow-hidden` | 现场使用时避免页面整体滚动，主内容和底部控制区稳定。 |
 | 低噪音背景 | 页面背景 `bg-muted/50`，卡片白底 | 让 transcript 和控制按钮优先，而不是做营销式视觉。 |
-| 圆角胶囊控件 | 顶部状态 chip、底部 Scene/Shot/Take、Mark、REC | 适合触屏和现场快速点击，减少小控件误触。 |
+| 圆角胶囊控件 | 顶部状态 chip、底部 Scene/Shot/Take、Mark、REC | 适合触屏和现场快速点击，减少小控件误触。底部 chip 加淡色外框（`border-border/60`），与背景区分更清晰。 |
 | 单屏高密度信息 | 头部状态、双栏主内容、底部控制 | 录音现场需要扫视，不适合多页跳转。 |
 | 状态颜色 | 绿色 keeper/input ok，红色 recording/ng，主色 hold/pass/LLM warn | 用颜色承担状态识别，文字只做确认。 |
 | 等宽数字 | 时间、take 编号、状态日志使用 `font-mono` | 场记编号和时间更容易纵向扫描。 |
@@ -117,10 +120,10 @@ pnpm lint
 | 控件 | 图标 / 文案 | 当前行为 | 设计意图 | 后端对接目标 |
 |---|---|---|---|---|
 | 导入已录制文件 | `Folder` 图标 | 只有按钮和 title，没有绑定逻辑 | 允许导入已有录音进行离线分析或补录处理 | 打开文件选择器，进入 file source 流程 |
-| Input 状态 chip | 绿色点 + `Input` + `MacBook Microphone` | 展示 mock 输入设备 | 告诉用户当前录音输入源是否正常 | 显示真实设备名、采样率、声道数、错误状态 |
+| Input 状态 chip | 绿色点 + `Input` + `MacBook Microphone` | 展示 mock 输入设备（无 onClick 时渲染为 `<div>`） | 告诉用户当前录音输入源是否正常 | 显示真实设备名、采样率、声道数、错误状态 |
 | Ch1 电平 | 绿色小电平柱 | mock 随机跳动 | 表示主收音声道有输入 | 接入实时 RMS/峰值电平 |
 | Ch2 电平 | 主色小电平柱 | mock 随机跳动 | 表示第二声道或辅助输入状态 | 接入 Ch2/boom/lav 等通道电平 |
-| LLM 状态 chip | 状态点 + `LLM` + detail | 点击后在 `Idle/L1/L2/L3/Voice/Photo/Script` 间循环 | 演示 pipeline 状态可视化和异常提示入口 | 显示真实 LLM/ASR/脚本/照片上下文队列状态 |
+| LLM 状态 chip | 状态点 + `LLM` + detail | 点击后在 `Idle/L1/L2/L3/Voice/Photo/Script` 间循环（带 onClick 时渲染为 `<button>`，可键盘聚焦） | 演示 pipeline 状态可视化和异常提示入口 | 显示真实 LLM/ASR/脚本/照片上下文队列状态 |
 | 观察者人数 | `Eye` 图标 + `3` | 静态展示 | 表示当前有 3 个旁观端或共享视图连接 | 接入 websocket/session observer 数 |
 | 导出 | `Upload` 图标 | 只有按钮和 title | 场记单、字幕、LLM 汇总导出入口 | 导出 CSV/PDF/SRT/场记单 |
 | 设置 | `Settings` 图标 | 只有按钮 | 设备、模型、项目设置入口 | 打开设置面板或路由 |
@@ -164,7 +167,7 @@ pnpm lint
 
 位置：桌面右侧 `History` tab；移动端 `History` tab。
 
-每张历史 take 卡片本身是一个按钮样式容器，当前没有整体点击逻辑。卡片内的 badge 下拉有本地 state override。
+每张历史 take 卡片是一个 `<div>` 容器（视觉上保留 hover/rounded 样式），当前没有整体点击逻辑。卡片内部的 badge 是真正的 Radix DropdownMenuTrigger，避免嵌套交互。badge 下拉用本地 state override。
 
 | 控件 | 当前行为 | 设计意图 | 后端对接目标 |
 |---|---|---|---|
@@ -212,19 +215,13 @@ pnpm lint
 |---|---|---|---|---|
 | Next take | `Plus` 图标 + `Next take` | 只有按钮样式 | 结束当前条并准备下一条 | finalize 当前 take，创建下一条 |
 | Delete last | `Trash2` 图标 | 只有按钮和 title | 删除上一条误触或错误 take | 删除或软删除最后 take，需二次确认策略 |
-| REC 圆形按钮 | `0:42` 或 `REC` | 点击切换本地 `isRecording`；录制中显示计时 `0:42` | 最大、最醒目的主操作，适合现场快速开始/停止 | 控制真实录音 session，显示真实时长 |
+| REC 圆形按钮 | `m:ss` 或 `REC` | 点击切换本地 `isRecording`：录制中按 `Date.now` 基线每 250ms 刷新经过秒数（防 setInterval 漂移），停止后归零；样式上用 `absolute right-3 sm:right-5 bottom-2` 固定到底栏右下，不受左侧 chip 行高度变化影响 | 最大、最醒目的主操作，适合现场快速开始/停止 | 控制真实录音 session，显示真实时长 |
 
 ### 状态日志
 
-底部最下方是横向滚动的运行日志摘要：
+底部最下方目前是 `debug log` 占位（绿色点 + 文字），等接入真实指标前先压缩到最低视觉权重。
 
-- 绿色点：系统健康。
-- `ASR ch1 latency 0.6s`：ASR 延迟。
-- `LLM queue: 0`：LLM 队列长度。
-- `ch1 -12 dB` / `ch2 -48 dB`：通道电平。
-- `conn 3 observers`：观察者连接数。
-
-设计意图是让现场问题可见，但不占据主工作区。后端对接时建议只放低频关键指标，不放长日志。
+历史方案里曾包含横向滚动的指标条（ASR 延迟、LLM 队列、Ch1/Ch2 电平、observer 数），后端对接时建议沿用这个思路：只放低频关键指标，不放长日志。
 
 ## 图标清单
 
@@ -253,7 +250,8 @@ pnpm lint
 | `shotOverrides` | `AdminHome.tsx` | 历史 take shot 覆盖 | 否 |
 | `noOverrides` | `AdminHome.tsx` | 历史 take 编号覆盖 | 否 |
 | `isRecording` | `BottomControlBar.tsx` | REC 圆形按钮本地切换 | 否 |
-| `mark` | `BottomControlBar.tsx` | 当前 mark 在 NG/KEEP/PASS 间循环 | 否 |
+| `elapsed` / `startRef` | `BottomControlBar.tsx` | REC 录制时长（基于 `Date.now`，每 250ms 刷新；停止归零） | 否 |
+| `mark` | `BottomControlBar.tsx` | 当前 mark 在 NG/KEEP/PASS 间循环（类型为 `Status`，非 string） | 否 |
 
 ## 与后端/同事对接时需要补的契约
 
@@ -274,7 +272,8 @@ pnpm lint
 
 - 所有业务数据都是 mock 常量或本地 state，刷新页面会丢失。
 - 顶部导入、导出、设置、Next take、Delete last、语音 memo 尚未绑定真实业务逻辑。
-- REC 只是切换按钮显示，不控制真实录音。
+- REC 只是切换按钮显示与本地计时，不控制真实录音；计时不持久化，刷新归零。
+- 底部状态日志是 `debug log` 占位，未对接 ASR / LLM / 电平 / observer 真实指标。
 - `/view` 只是占位页，尚未实现共享视图。
 
 ## 建议下一步
