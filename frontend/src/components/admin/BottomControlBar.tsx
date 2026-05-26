@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   Mic,
   Plus,
@@ -6,7 +6,6 @@ import {
   ChevronDown,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Separator } from "@/components/ui/separator"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -35,12 +34,44 @@ const STATUS_LABEL: Record<Status, string> = {
 
 const MARK_ORDER: Status[] = ["ng", "keeper", "hold"]
 
+function formatElapsed(seconds: number) {
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  return `${m}:${s.toString().padStart(2, "0")}`
+}
+
 export default function BottomControlBar() {
   const [isRecording, setIsRecording] = useState(true)
-  const [mark, setMark] = useState<string>("ng")
+  const [mark, setMark] = useState<Status>("ng")
+  const [elapsed, setElapsed] = useState(0)
+  const startRef = useRef<number | null>(null)
 
-  const currentMark = (MARK_ORDER.includes(mark as Status) ? mark : "") as Status
+  useEffect(() => {
+    if (!isRecording) {
+      startRef.current = null
+      return
+    }
+    startRef.current = Date.now() - elapsed * 1000
+    const id = setInterval(() => {
+      if (startRef.current != null) {
+        setElapsed(Math.floor((Date.now() - startRef.current) / 1000))
+      }
+    }, 250)
+    return () => clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRecording])
+
+  const currentMark = mark
   const nextMark = MARK_ORDER[(MARK_ORDER.indexOf(currentMark) + 1) % MARK_ORDER.length]
+
+  const handleToggleRecording = () => {
+    if (isRecording) {
+      setIsRecording(false)
+    } else {
+      setElapsed(0)
+      setIsRecording(true)
+    }
+  }
 
   return (
     <div className="flex-shrink-0 border-t bg-background">
@@ -62,17 +93,18 @@ export default function BottomControlBar() {
         </div>
       </div>
 
-      {/* Controls: left stack + right REC */}
-      <div className="px-3 sm:px-5 pb-2 mt-1 flex items-start justify-between gap-3">
-        <div className="flex flex-col gap-2">
+      {/* Controls: left stack + right REC (absolute) */}
+      <div className="px-3 sm:px-5 pb-2 mt-1 relative">
+        <div className="flex flex-col gap-2 pr-24 sm:pr-28">
           {/* Row 1: Scene / Shot / Take / Mark */}
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5 sm:gap-2">
             <SceneShotTakeButton label="Scene" value="3" />
             <SceneShotTakeButton label="Shot" value="2" />
             <SceneShotTakeButton label="Take" value="5" highlight />
             <button
+              type="button"
               onClick={() => setMark(nextMark)}
-              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-full bg-background shadow-sm active:scale-95 transition-transform"
+              className="flex-1 sm:flex-none min-w-0 inline-flex items-center justify-center gap-1 sm:gap-1.5 h-9 px-2.5 sm:px-3 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform"
             >
               <span className={cn("size-1.5 rounded-full", STATUS_DOT[currentMark] || "bg-muted-foreground")} />
               <span className="text-sm font-medium text-foreground">{STATUS_LABEL[currentMark]}</span>
@@ -96,36 +128,27 @@ export default function BottomControlBar() {
 
         {/* REC button */}
         <button
-          onClick={() => setIsRecording(!isRecording)}
+          type="button"
+          onClick={handleToggleRecording}
           className={cn(
-            "size-20 rounded-full flex items-center justify-center text-white shadow-lg transition-all active:scale-95 flex-shrink-0",
+            "absolute right-3 sm:right-5 bottom-2 size-20 rounded-full flex items-center justify-center text-white shadow-lg transition-all active:scale-95",
             isRecording
               ? "bg-red-600 ring-4 ring-red-500/20"
               : "bg-red-500 ring-2 ring-red-500/10"
           )}
           title={isRecording ? "停止录制" : "开始录制"}
         >
-          {isRecording ? (
-            <span className="text-xs font-mono tracking-wider font-semibold">0:42</span>
-          ) : (
-            <span className="text-xs font-mono tracking-wider font-semibold">REC</span>
-          )}
+          <span className="text-xs font-mono tracking-wider font-semibold">
+            {isRecording ? formatElapsed(elapsed) : "REC"}
+          </span>
         </button>
       </div>
 
       {/* Log */}
       <div className="px-3 sm:px-5 pb-1.5 pt-0.5 border-t">
-        <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground overflow-x-auto whitespace-nowrap py-1">
+        <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap py-1">
           <span className="size-1.5 rounded-full bg-emerald-500 flex-shrink-0" />
-          <span>ASR ch1 latency 0.6s</span>
-          <Separator orientation="vertical" className="h-3" />
-          <span>LLM queue: 0</span>
-          <Separator orientation="vertical" className="h-3" />
-          <span>ch1 −12 dB</span>
-          <Separator orientation="vertical" className="h-3" />
-          <span>ch2 −48 dB</span>
-          <Separator orientation="vertical" className="h-3" />
-          <span>conn 3 observers</span>
+          <span>debug log</span>
         </div>
       </div>
     </div>
@@ -145,8 +168,9 @@ function SceneShotTakeButton({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
+          type="button"
           className={cn(
-            "inline-flex items-center gap-1 h-9 px-2.5 rounded-full text-xs active:scale-95 transition-transform",
+            "flex-1 sm:flex-none min-w-0 inline-flex items-center justify-center gap-1 h-9 px-2 sm:px-2.5 rounded-full text-xs border border-border/60 active:scale-95 transition-transform",
             highlight ? "bg-background shadow-sm" : "bg-muted/60"
           )}
         >
@@ -154,7 +178,7 @@ function SceneShotTakeButton({
             {label}
           </span>
           <span className="font-semibold text-sm text-foreground">{value}</span>
-          <ChevronDown className="size-3 text-muted-foreground" />
+          <ChevronDown className="size-2.5 sm:size-3 text-muted-foreground" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-44">

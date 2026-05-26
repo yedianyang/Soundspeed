@@ -239,14 +239,12 @@ function StatusChip({
 }) {
   const dotColor =
     tone === "ok" ? "bg-emerald-500" : tone === "warn" ? "bg-primary" : "bg-destructive"
-  return (
-    <div
-      className={cn(
-        "flex items-center gap-1.5 h-9 px-4 rounded-full bg-muted/70 whitespace-nowrap sm:min-w-[5.5rem]",
-        onClick && "cursor-pointer active:scale-95 transition-transform"
-      )}
-      onClick={onClick}
-    >
+  const className = cn(
+    "flex items-center gap-1.5 h-9 px-4 rounded-full bg-muted/70 whitespace-nowrap sm:min-w-[5.5rem]",
+    onClick && "cursor-pointer active:scale-95 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+  )
+  const content = (
+    <>
       <span className={cn("size-1.5 rounded-full flex-shrink-0", dotColor)} />
       <span className="hidden sm:inline text-xs font-medium text-foreground">{label}</span>
       {detail && (
@@ -255,8 +253,17 @@ function StatusChip({
         </span>
       )}
       {children}
-    </div>
+    </>
   )
+
+  if (onClick) {
+    return (
+      <button type="button" className={className} onClick={onClick} aria-label={`${label} ${detail ?? ""}`.trim()}>
+        {content}
+      </button>
+    )
+  }
+  return <div className={className}>{content}</div>
 }
 
 function LevelMeter({
@@ -542,7 +549,7 @@ function HistoryTakes() {
         History
       </h3>
       {HISTORY_TAKES.map((take) => (
-        <button
+        <div
           key={take.id}
           className="w-full text-left rounded-3xl bg-muted/50 hover:bg-muted p-4 transition-colors space-y-2"
         >
@@ -618,7 +625,7 @@ function HistoryTakes() {
           <p className="text-sm text-muted-foreground line-clamp-2">
             {take.lines.map((l) => l.text).join("  ")}
           </p>
-        </button>
+        </div>
       ))}
     </div>
   )
