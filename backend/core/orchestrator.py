@@ -3,11 +3,16 @@
 内置 handler（asr.final.ch1 / asr.final.ch2）在构造时通过 subscribe 注册，
 直接写入 DAL transcript_segments 表。
 任一 handler 抛异常时记 ERROR 日志并继续调用剩余 handler，不向 publish 调用方传播。
+
+工厂函数 create_orchestrator 支持依赖注入（llm_service / l2_runner），
+供 1.H take handler 使用。老签名 Orchestrator(dal, session) 零改动。
 """
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
 from backend.core.events import ASR_FINAL_CH1, ASR_FINAL_CH2, AsrFinalPayload
 from backend.core.session import SessionState
@@ -18,12 +23,32 @@ Handler = Callable[[object], None]
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class Dependencies:
+    """Orchestrator 可选外部依赖，用于 1.H take handler。
+
+    llm_service: LLMService 实例，注入到 l2_runner。
+    l2_runner: 异步可调用，签名 (L2Input, LLMService) -> Awaitable[L2Output]。
+    """
+
+    llm_service: Any = field(default=None)
+    l2_runner: Any = field(default=None)
+
+
 class Orchestrator:
     """同步事件总线，持有 DAL 与 SessionState，内置 ASR segment handler。"""
 
-    def __init__(self, dal: DAL, session: SessionState | None = None) -> None:
+    def __init__(
+        self,
+        dal: DAL,
+        session: SessionState | None = None,
+        *,
+        llm_service: Any = None,
+        l2_runner: Any = None,
+    ) -> None:
         self.dal = dal
         self.session: SessionState = session if session is not None else SessionState()
+        self._deps = Dependencies(llm_service=llm_service, l2_runner=l2_runner)
         self._handlers: dict[str, list[Handler]] = {}
         self._register_builtin_handlers()
 
@@ -102,3 +127,17 @@ class Orchestrator:
             start_frame=payload.start_frame,
             end_frame=payload.end_frame,
         )
+
+
+def create_orchestrator(
+    dal: DAL,
+    session: SessionState | None = None,
+    *,
+    llm_service: Any = None,
+    l2_runner: Any = None,
+) -> Orchestrator:
+    """模块级工厂函数，供生产代码与测试注入依赖。
+
+    老签名 Orchestrator(dal, session) 零改动，此函数提供更明确的依赖注入入口。
+    """
+    return Orchestrator(dal, session, llm_service=llm_service, l2_runner=l2_runner)
