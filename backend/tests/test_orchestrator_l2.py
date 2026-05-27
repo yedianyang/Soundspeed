@@ -199,6 +199,7 @@ async def test_take_end_writes_line_matches(tmp_dal: DAL) -> None:
     assert take_id is not None
 
     orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
     await orch._l2_task  # type: ignore[attr-defined]
 
     matches = tmp_dal.list_take_line_matches(take_id)
@@ -240,6 +241,7 @@ async def test_take_end_assembles_previous_notes(tmp_dal: DAL) -> None:
 
     orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
     orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
     await orch._l2_task  # type: ignore[attr-defined]
 
     assert len(captured_inputs) == 1

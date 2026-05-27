@@ -549,7 +549,12 @@ class DAL:
 
         dict 走 json.dumps，None 写 NULL。
         """
-        raise NotImplementedError
+        script_diff_json = json.dumps(script_diff) if script_diff is not None else None
+        with self._write_tx() as conn:
+            conn.execute(
+                f"UPDATE takes SET script_diff = ?, updated_at = {_NOW_TS_SQL} WHERE take_id = ?;",
+                (script_diff_json, take_id),
+            )
 
     def insert_take_line_matches(
         self,
@@ -559,11 +564,27 @@ class DAL:
         """批量写入 take_line_matches。
 
         过滤 line_no==-1 的 insertion（按 l2-pipeline §D5 决策）。
-        matches 每项需含：line_no / diff_type / detail（可选）/ segment_id（可选）。
-        line_no 对应 script_lines.line_id 的查询由 caller 在组装时完成。
+        matches 每项需含：line_no / line_id / diff_type / detail（可选）。
+        line_id 为 FK to script_lines，caller 负责在传入前做 line_no → line_id 映射。
         """
-        raise NotImplementedError
+        rows_to_insert = [m for m in matches if m.get("line_no") != -1]
+        if not rows_to_insert:
+            return
+        with self._write_tx() as conn:
+            for m in rows_to_insert:
+                detail = m.get("detail")
+                payload_json = json.dumps({"detail": detail}) if detail is not None else "{}"
+                conn.execute(
+                    "INSERT INTO take_line_matches (take_id, line_id, diff_type, payload) "
+                    "VALUES (?, ?, ?, ?);",
+                    (take_id, m["line_id"], m["diff_type"], payload_json),
+                )
 
     def list_script_lines(self, script_id: int) -> list[dict]:
         """返回剧本行列表，含 line_no / line_id / character / text，按 line_no ASC。"""
-        raise NotImplementedError
+        rows = self._conn.execute(
+            "SELECT line_id, line_no, character, text FROM script_lines "
+            "WHERE script_id = ? ORDER BY line_no ASC;",
+            (script_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]

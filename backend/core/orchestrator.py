@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,9 +18,13 @@ from typing import Any
 from backend.core.events import (
     ASR_FINAL_CH1,
     ASR_FINAL_CH2,
+    TAKE_CHANGED,
     TAKE_END,
     TAKE_START,
     AsrFinalPayload,
+    TakeChangedPayload,
+    TakeEndPayload,
+    TakeStartPayload,
 )
 from backend.core.session import SessionState
 from backend.db.dal import DAL
@@ -56,6 +61,7 @@ class Orchestrator:
         self.session: SessionState = session if session is not None else SessionState()
         self._deps = Dependencies(llm_service=llm_service, l2_runner=l2_runner)
         self._handlers: dict[str, list[Handler]] = {}
+        self._l2_task: asyncio.Task[None] | None = None  # 最近一次 L2 后台 task，供测试 await
         self._register_builtin_handlers()
 
     def subscribe(self, event_type: str, handler: Handler) -> None:
@@ -138,19 +144,198 @@ class Orchestrator:
 
     def _on_take_start(self, payload: object) -> None:
         """处理 take.start 事件：写 DAL + 更新 SessionState + publish take.changed。"""
-        raise NotImplementedError
+        assert isinstance(payload, TakeStartPayload)
+
+        scene_id = payload.scene_id
+        # take_number = 当前 scene 已有 take 数量 + 1
+        existing = self.dal.list_takes(scene_id)
+        take_number = len(existing) + 1
+
+        take_id = self.dal.start_take(
+            scene_id=scene_id,
+            take_number=take_number,
+            start_ts=payload.start_ts,
+            shot=payload.shot,
+        )
+        self.session.take_start(
+            take_id=take_id,
+            take_number=take_number,
+            start_ts=payload.start_ts,
+            shot=payload.shot,
+        )
+
+        self.publish(
+            TAKE_CHANGED,
+            TakeChangedPayload(
+                take_id=take_id,
+                scene_id=scene_id,
+                take_number=take_number,
+                status="tbd",
+                script_diff=None,
+            ),
+        )
 
     def _on_take_end(self, payload: object) -> None:
-        """处理 take.end 事件：写 DAL + publish take.changed（同步）+ fire-and-forget L2。"""
-        raise NotImplementedError
+        """处理 take.end 事件：写 DAL + publish take.changed（同步）+ fire-and-forget L2。
+
+        同步阶段 publish 第一次 take.changed（script_diff=None）。
+        异步阶段 L2 完成后（或失败后）publish 第二次。
+        """
+        assert isinstance(payload, TakeEndPayload)
+
+        take_id = self.session.take_id
+        if take_id is None:
+            logger.warning("take.end: session.take_id is None, skipping")
+            return
+
+        self.session.take_end()
+        self.dal.end_take(take_id=take_id, end_ts=payload.end_ts, status="tbd")
+
+        # 第一次 publish（同步，script_diff=None）
+        self.publish(
+            TAKE_CHANGED,
+            TakeChangedPayload(
+                take_id=take_id,
+                scene_id=self.session.scene_id or 0,
+                take_number=self.session.take_number,
+                status="tbd",
+                script_diff=None,
+            ),
+        )
+
+        # fire-and-forget L2（需要 event loop）
+        loop = asyncio.get_running_loop()  # 无 loop 时抛 RuntimeError，不降级
+        scene_id = self.session.scene_id or 0
+        take_number = self.session.take_number
+        self._l2_task = loop.create_task(self._run_l2_async(take_id))
+        # callback 用闭包绑定 take_id/scene_id/take_number，避免 session 被后续 take.start 覆盖
+        self._l2_task.add_done_callback(
+            lambda t: self._l2_done_callback(t, take_id=take_id, scene_id=scene_id, take_number=take_number)
+        )
 
     async def _run_l2_async(self, take_id: int) -> None:
-        """后台异步 L2 Pipeline：组装 L2Input → 调 l2_runner → 写库 → publish take.changed。"""
-        raise NotImplementedError
+        """后台异步 L2 Pipeline：组装 L2Input → 调 l2_runner → 写库 → publish take.changed。
 
-    def _l2_done_callback(self, task: Any) -> None:
-        """L2 task done callback：仅在异常时 log + publish 降级 take.changed。"""
-        raise NotImplementedError
+        L2ParseError / asyncio.TimeoutError 等异常不在此捕获，传到 task.exception() 由 callback 处理。
+        """
+        from backend.pipelines.l2_take import L2Input
+
+        take = self.dal.get_take(take_id)
+        if take is None:
+            raise RuntimeError(f"_run_l2_async: take_id={take_id} not found in DB")
+
+        # 收集 ch1 转录记录
+        segments = self.dal.list_segments(take_id, ch=1)
+        transcript_segments = [
+            {
+                "speaker": s.speaker,
+                "text": s.text,
+                "start_frame": s.start_frame,
+                "end_frame": s.end_frame,
+            }
+            for s in segments
+        ]
+
+        # 收集剧本行（如果 session 有活跃 script）
+        script_lines: list[dict] = []
+        if self.session.scene_id is not None:
+            script_info = self.dal.get_latest_script(self.session.scene_id)
+            if script_info is not None:
+                script_lines = self.dal.list_script_lines(script_info["script_id"])
+
+        # 从历史 take 提取 previous_notes
+        previous_notes: list[str] = []
+        if self.session.scene_id is not None:
+            history = self.dal.list_takes(self.session.scene_id)
+            for t in history:
+                if t.take_id == take_id:
+                    continue  # 跳过当前 take
+                if t.script_diff and isinstance(t.script_diff, dict):
+                    summary = t.script_diff.get("script_diff_summary")
+                    if summary:
+                        previous_notes.append(str(summary))
+
+        input_data = L2Input(
+            take_id=take_id,
+            scene_id=take.scene_id,
+            take_number=take.take_number,
+            transcript_segments=transcript_segments,
+            script_lines=script_lines,
+            previous_notes=previous_notes,
+        )
+
+        l2_output = await self._deps.l2_runner(input_data, self._deps.llm_service)
+
+        # 写库：script_diff
+        script_diff_dict = {
+            "script_diff_summary": l2_output.script_diff_summary,
+            "line_matches": [
+                {"line_no": m.line_no, "diff_type": m.diff_type, "detail": m.detail}
+                for m in l2_output.line_matches
+            ],
+        }
+        self.dal.update_take_l2_output(take_id, script_diff_dict)
+
+        # 写库：take_line_matches（需要 line_no → line_id 映射）
+        line_no_to_id: dict[int, int] = {
+            ln["line_no"]: ln["line_id"] for ln in script_lines
+        }
+        matches_for_dal: list[dict] = []
+        for m in l2_output.line_matches:
+            if m.line_no == -1:
+                continue  # insertion，跳过（DAL 会再过滤，双重保险）
+            line_id = line_no_to_id.get(m.line_no)
+            if line_id is None:
+                logger.warning(
+                    "_run_l2_async: line_no=%d not found in script_lines, skipping",
+                    m.line_no,
+                )
+                continue
+            matches_for_dal.append(
+                {"line_no": m.line_no, "line_id": line_id, "diff_type": m.diff_type, "detail": m.detail}
+            )
+        if matches_for_dal:
+            self.dal.insert_take_line_matches(take_id, matches_for_dal)
+
+        # 第二次 publish（含 script_diff）
+        self.publish(
+            TAKE_CHANGED,
+            TakeChangedPayload(
+                take_id=take_id,
+                scene_id=take.scene_id,
+                take_number=take.take_number,
+                status="tbd",
+                script_diff=script_diff_dict,
+            ),
+        )
+
+    def _l2_done_callback(
+        self, task: Any, *, take_id: int, scene_id: int, take_number: int
+    ) -> None:
+        """L2 task done callback：仅在异常时 log + publish 降级 take.changed。
+
+        成功路径：_run_l2_async 已 publish 第二次 take.changed，callback 无需操作。
+        失败路径：记 WARNING + publish 降级 take.changed（script_diff=None）。
+
+        take_id / scene_id / take_number 由 add_done_callback lambda 闭包绑定，
+        避免 session 被后续 take.start 覆盖（race condition 防护）。
+        """
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return  # 成功路径，_run_l2_async 已处理
+        logger.warning("L2 pipeline failed for task, publishing degraded take.changed: %r", exc)
+        self.publish(
+            TAKE_CHANGED,
+            TakeChangedPayload(
+                take_id=take_id,
+                scene_id=scene_id,
+                take_number=take_number,
+                status="tbd",
+                script_diff=None,
+            ),
+        )
 
 
 def create_orchestrator(
