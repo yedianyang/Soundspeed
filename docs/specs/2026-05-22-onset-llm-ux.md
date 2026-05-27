@@ -1,10 +1,12 @@
 # Spec: 拍摄现场 LLM 用例与 UX 流程
 
-版本：v1.1
-日期：2026-05-22
-状态：草稿，待审批
+版本：v1.2.1
+日期：2026-05-27
+状态：已同步 Notion「与AI头脑风暴的UX形态」v0.2
 
 变更记录：
+- v1.2.1（2026-05-27 Lead 复核修补）：VAD 节点声道命名 ch0/ch1 → ch1/ch2 对齐 architecture 声道约定；前端技术栈引用 §B8 → §9 前端结构。
+- v1.2：同步 Notion v0.2 流程图；删独立 L1 Pipeline 节点（职责并入 L2）；补 speaker diarization 节点；新增 UI 结构图与交互子流程
 - v1.1：补充 ASR 引擎选型结论（依据 framework benchmark）
 - v1.0：初稿
 
@@ -133,70 +135,246 @@ LLM 在已加载剧本中定位该台词，返回对应场次 / 镜次编号。
 
 ## UX 流程
 
+### 单 Take 循环流程
+
 ```mermaid
-flowchart TD
-    START([系统启动]) --> I1
+flowchart LR
+     subgraph AUDIO["Audio 输入层"]
+         A1["Ch1 对白语音"]
+         A2["Ch2 备注语音"]
+     end
+ 
+     subgraph VAD["Voice Activity Layer"]
+         V1["VAD · ch1"]
+         V2["VAD · ch2"]
+     end
+ 
+     subgraph PRE["ASR 层"]
+         ASR1["whisper.cpp · Ch1"]
+         ASR2["whisper.cpp · Ch2"]
+     end
+ 
+     subgraph DIAR["说话人分离层"]
+         SD["Speaker Diarization · Ch1"]
+     end
+ 
+     subgraph LLMLAYER["LLM 处理层（Gemma 4 E4B 共享实例）"]
+         BUFFER[("per-take ASR buffer (Orchestrator 内存)")]
+         L2["L2 per-take 整合\nASR 清洗 / 剧本 diff / take 摘要\n（含原 L1 per-segment 清洗职责）"]
+         BUFFER --> L2
+     end
+ 
+     TBOUND(("Take 边界信号 开始 / 结束 (手动按钮)"))
+ 
+     subgraph STORE["存储层"]
+         DB[("SQLite + FTS5 索引 (scripts 表)")]
+     end
+ 
+     UI["前端 / 共享视图"]
+ 
+     A1 --> V1 --> ASR1
+     A2 --> V2 --> ASR2
+     ASR1 --> SD
+     SD -->|"final segment + ch1"| BUFFER
+     ASR2 -->|"final segment + ch2"| BUFFER
+     ASR1 -.->|"partial"| UI
+     ASR2 -.->|"partial"| UI
+ 
+     TBOUND -.->|"开始 → INSERT take row 占位"| DB
+     TBOUND -.->|"结束 → 触发 L2"| L2
+ 
+     DB -->|"读 scripts (FTS5)"| L2
+     L2 -->|"批写入：UPDATE take row\n(transcript + diff + 摘要)"| DB
+     DB --> UI
+```
 
-    subgraph INIT[初始化]
-        I1[检测 Ch1 / Ch2 音频输入] --> I2[加载剧本（可选）]
+### Note 输入流程
+
+```mermaid
+flowchart LR
+    subgraph IN["Note input"]
+        N1["录音师对麦输入"]
+        N2["录音师打字文字输入"]
     end
 
-    I2 --> IDLE[待机]
-    IDLE -->|Roll / Speed| TS[Take 开始\n自动记时间戳]
-
-    TS --> CH1
-    TS --> CH2
-    TS --> MANUAL
-
-    subgraph CH1[Ch1 对白通道]
-        R1[ASR 实时转录] --> R2[前端流式显示]
+    subgraph CTXSRC["上下文来源"]
+        ORCH["Orchestrator 会话状态 current_scene_no（由 UI / slate / 剧本导入写入）"]
+        QUERY[("SQLite 查询 latest_take_no = MAX(take_no) WHERE scene = current")]
     end
 
-    subgraph CH2[Ch2 录音师备注]
-        R3[ASR 转录] --> R4[LLM 解析 → 结构化字段]
+    CTX["inject prompt{current_scene_no, latest_take_no}"]
+
+    NOTEPROC["Gemma 4 多模态 音频 / 文本 + 上下文 → JSON"]
+
+    SQLITE[("SQLite takes.notes 字段")]
+    UIERR["UI 弹错 / 提示重试"]
+
+    ORCH --> CTX
+    QUERY --> CTX
+    CTX --> NOTEPROC
+
+    N1 --> NOTEPROC
+    N2 --> NOTEPROC
+    NOTEPROC -->|"成功"| SQLITE
+    NOTEPROC -.->|"失败"| UIERR
+```
+
+### Take 状态标注流程
+
+```mermaid
+flowchart LR
+    M1["前端 UI 按钮点击 Keeper / NG / Hold"]
+
+    DISPATCH{"Orchestrator 检查 active_take_id"}
+
+    subgraph DBOP["DB 写入"]
+        D1["UPDATE takes SET status = ? WHERE id = active_take_id"]
+        D2["INSERT take_events (audit log)"]
     end
 
-    subgraph MANUAL[录音师手动输入]
-        R5[触屏 mark：Keeper / NG / Hold]
-        R6[文字输入：导演指令转述]
-    end
+    UIERR["UI 弹错 （无 active take）"]
 
-    CH1 --> MERGE
-    CH2 --> MERGE
-    MANUAL --> MERGE
+    DB[("SQLite")]
+    UI_OUT["前端 / 共享视图"]
 
-    subgraph PROCESS[Take 结束处理]
-        MERGE[LLM 整合\nCh1 转录 + Ch2 备注 + 手动 mark]
-        MERGE --> HASDOC{有剧本？}
-        HASDOC -->|是| DIFF[diff 转录 vs 剧本\n标记漏词 / 改词 / 加词]
-        HASDOC -->|否| TAKEREC[生成结构化 Take 记录]
-        DIFF --> TAKEREC
-    end
+    M1 --> DISPATCH
+    DISPATCH -->|"存在"| D1 & D2
+    DISPATCH -.->|"无"| UIERR
+    D1 & D2 --> DB
+    DB --> UI_OUT
+```
 
-    TAKEREC --> DB[(SQLite)]
-    DB --> AGAIN{下一条？}
-    AGAIN -->|是| IDLE
-    AGAIN -->|否| EXPORT[导出场记单 / PDF]
+### 查询流程
 
-    subgraph POSTNOTE[候补 note（随时可输入）]
-        PN1[录音师打字输入\n例：第三条结尾好，可以用]
-        PN2[LLM 解析\n识别 take 编号 + 提取 note 内容]
-        PN3[追加写入对应 Take 记录]
-        PN1 --> PN2 --> PN3
-    end
+```mermaid
+flowchart LR
+      subgraph IN["查询输入（多设备发起）"]
+          Q1["UI 文本输入"]
+          Q2["UI 语音输入"]
+      end
+  
+      subgraph QPSESS["Query mini-session（per-query · max 3 轮 tool_call）"]
+          SESS[("Session messages [system, user, tool_call, tool_result, ...]")]
+          LLM["Gemma 4 E4B 多模态 意图解析 / tool_call / 答案整理"]
+          SESS <--> LLM
+      end
+  
+      subgraph TOOLS["Tools (read-only)"]
+          T1["query_takes(filters)"]
+          T2["get_scene_takes(scene_no)"]
+          T3["search_script(query)"]
+      end
+  
+      DB[("SQLite")]
+      SDB[("剧本文本")]
+      UI_OUT["前端答案输出 自然语言 + 结构化结果列表（录音师主机 / 共享视图 · 手机 · iPad）"]
+  
+      Q1 -->|"文本"| SESS
+      Q2 -->|"音频"| SESS
+      LLM -->|"tool_call ≤ 3"| T1 & T2 & T3
+      T1 -.->|"SQL"| DB
+      T2 -.->|"SQL"| DB
+      T3 -.->|"FTS"| SDB
+      T1 & T2 & T3 -->|"tool_result"| SESS
+      LLM -->|"final answer"| UI_OUT
+```
 
-    PN3 --> DB
+### 录音师（Admin）用户界面
 
-    subgraph SHARED[导演 / 场记只读视图\n局域网浏览器]
-        V1[实时转录显示]
-        V2[Take 状态列表]
-        V3[自然语言查询] --> V4[LLM 检索并返回结果]
-    end
+```mermaid
+flowchart TB
+      subgraph RECUI["录音师 UI · 主操作者"]
+          STATUS["状态栏\n当前场次 / take 编号 / 录制状态\n在线观察者: N 人"]
+  
+          subgraph TRANSCRIPT["实时转录面板（双通道）"]
+              T1["Ch1 对白\npartial 灰 / final 黑"]
+              T2["Ch2 备注\npartial 灰 / final 黑"]
+          end
+  
+          subgraph TAKEOPS["Take 操作区"]
+              TO1["开始 take / 结束 take（边界触发）"]
+              TO2["mark: Keeper / NG / Hold"]
+              TO3["Note 录音（按麦）"]
+              TO4["Note 打字"]
+          end
+  
+          subgraph SCENEMGR["场次管理"]
+              SM1["切换 / 新建场次"]
+              SM2["剧本导入：粘贴 / 拍照"]
+          end
+  
+          subgraph TAKELIST["Take 列表（本场）"]
+              TL1["take 编号 + status + 简要 note"]
+              TL2["点击 → 展开编辑面板"]
+          end
+  
+          subgraph EDIT["编辑面板"]
+              E1["改字段：status / notes /\nperformer_issues / audio_quality"]
+              E2["改 ASR 转录文本（人工纠错）"]
+          end
+  
+          subgraph QUERY["查询入口（私有 session）"]
+              Q1["文本输入"]
+              Q2["语音输入"]
+          end
+  
+          EXPORT["导出场记单 / PDF\n（仅录音师 UI）"]
+      end
+  
+      BACKEND["后端 Orchestrator"]
+  
+      TO1 -->|"边界事件"| BACKEND
+      TO2 -->|"mark 事件"| BACKEND
+      TO3 & TO4 -->|"Note pipeline"| BACKEND
+      SM1 -->|"切场 → 更新 SessionState"| BACKEND
+      SM2 -->|"剧本 pipeline"| BACKEND
+      E1 & E2 -->|"修改事件 + audit_log"| BACKEND
+      Q1 & Q2 -->|"查询 pipeline（私有）"| BACKEND
+      EXPORT -->|"导出请求"| BACKEND
+  
+      BACKEND -.->|"ASR partial 推送"| TRANSCRIPT
+      BACKEND -.->|"DB 同步广播"| TAKELIST
+      BACKEND -.->|"答案仅返回给发起者"| QUERY
+      BACKEND -.->|"presence 在线观察者数"| STATUS
+```
 
-    R1 -.->|实时推送| V1
-    DB -.->|状态同步| V2
-    DB -.->|查询数据源| V4
-    PN3 -.->|触发更新| V2
+### 导演 / 场记（共享视图）用户界面
+
+```mermaid
+flowchart TB
+      Y1["浏览器访问\n局域网 IP : 端口"]
+      Y2["填写名字（必填）\n例：导演 A · 场记 B"]
+      Y3["WebSocket 连接\n注册 {connection_id, name}"]
+      SHARED["共享视图\n（只读 + 查询）"]
+  
+      Y1 --> Y2 --> Y3 --> SHARED
+      subgraph SHAREDUI["共享视图 · 只读 + 查询"]
+          STATUS2["状态栏\n当前场次 / take 编号 / 录制状态"]
+  
+          subgraph TRANSCRIPT2["实时转录显示"]
+              T1["Ch1 对白流\npartial 灰 / final 黑\n（不显示 Ch2）"]
+          end
+  
+          subgraph TAKELIST2["Take 状态列表"]
+              TL1["take 编号 + status + 公开 note"]
+              TL2["（只读，不可编辑）"]
+          end
+  
+          subgraph QUERY2["查询入口（私有 session）"]
+              Q1["文本输入"]
+              Q2["语音输入"]
+          end
+  
+          HISTORY["历史浏览\n过往场次 + take"]
+      end
+  
+      BACKEND2["后端 Orchestrator\n/api/shared/*（read-only + query）"]
+  
+      BACKEND2 -.->|"ASR partial 推送"| TRANSCRIPT2
+      BACKEND2 -.->|"DB 同步广播"| TAKELIST2
+      BACKEND2 -.->|"DB 同步"| HISTORY
+      Q1 & Q2 -->|"查询 pipeline（私有 session）"| BACKEND2
+      BACKEND2 -.->|"答案仅返回给发起者"| QUERY2
 ```
 
 ---
@@ -211,7 +389,7 @@ flowchart TD
 | shot | 上下文 | 镜次编号 |
 | take_number | 自动递增 | 本场第几条 |
 | start_ts / end_ts | 系统时间戳 | Take 起止时间 |
-| transcript_ch1 | ASR | Ch1 对白转录全文 |
+| transcript_ch1 | ASR + Diarization | Ch1 对白转录全文（含说话人标签） |
 | status | 手动 mark / Ch2 解析 | Keeper / NG / Hold / TBD |
 | performer_issues | Ch2 解析 | 涉及哪个演员、什么问题 |
 | audio_quality | Ch2 解析 | clean / noisy / clipped 等 |
@@ -226,7 +404,7 @@ flowchart TD
 
 - 音频采集与 ASR 的具体实现（归 backend-asr）
 - SQLite schema 详细定义（归 backend-agent）
-- 前端 UI 设计与交互细节（前端技术栈待定）
+- 前端 UI 设计与交互细节（前端技术栈见 `docs/specs/2026-05-26-system-architecture.md` §9 前端结构）
 - BWF / iXML 元数据联动（P3 阶段）
 - 导演音频直接采集（第三通道，设计成本较高，当前不纳入）
 
