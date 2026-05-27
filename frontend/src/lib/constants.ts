@@ -4,6 +4,7 @@ export const STATUS_DOT: Record<Status, string> = {
   keeper: "bg-emerald-500",
   ng: "bg-destructive",
   hold: "bg-primary",
+  tbd: "bg-muted-foreground",
   recording: "bg-red-500 animate-pulse",
 }
 
@@ -11,6 +12,7 @@ export const STATUS_LABEL: Record<Status, string> = {
   keeper: "KEEP",
   ng: "NG",
   hold: "PASS",
+  tbd: "TBD",
   recording: "REC",
 }
 

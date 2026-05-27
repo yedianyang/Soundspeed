@@ -1,4 +1,4 @@
-export type Status = "keeper" | "ng" | "hold" | "recording"
+export type Status = "keeper" | "ng" | "hold" | "tbd" | "recording"
 
 export interface Line {
   speaker: string

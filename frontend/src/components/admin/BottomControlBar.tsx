@@ -15,9 +15,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { STATUS_DOT, STATUS_LABEL } from "@/lib/constants"
-import { cn } from "@/lib/utils"
+import { cn, formatElapsed } from "@/lib/utils"
 import type { Status } from "@/types/take"
-import { formatElapsed } from "@/data/mock"
 
 interface BottomControlBarProps {
   isRecording: boolean

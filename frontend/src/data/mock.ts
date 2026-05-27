@@ -88,9 +88,3 @@ export const LLM_FEEDBACK = [
   { kind: "diff", text: "L102 改词：『再卷进来』→『卷进来』" },
   { kind: "note", text: "Ch2 提示：T2 二号最后一句漏词，先 hold。" },
 ]
-
-export function formatElapsed(seconds: number) {
-  const m = Math.floor(seconds / 60)
-  const s = seconds % 60
-  return `${m}:${s.toString().padStart(2, "0")}`
-}
