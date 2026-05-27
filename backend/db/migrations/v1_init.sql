@@ -1,6 +1,8 @@
 -- Soundspeed 迁移 v1：初始化全量 schema
 -- 内容与 backend/db/schema.sql 相同，供 migration runner 执行。
--- SQLite >= 3.42 required (unixepoch 含小数秒自 3.42 起支持)
+-- timestamp DEFAULT 使用 CAST(strftime('%s', 'now') AS REAL)（整数秒精度），
+-- 兼容 Python 3.11 自带的 SQLite 3.39.4。
+-- 若运行环境 sqlite3.sqlite_version >= 3.42，可改为 unixepoch('now', 'subsec') 获得小数秒精度。
 -- per-connection PRAGMA 由 Python 代码管理，不放此文件。
 
 -- ── scenes 表 ────────────────────────────────────────────────────────────────
