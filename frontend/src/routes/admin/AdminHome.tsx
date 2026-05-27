@@ -552,7 +552,7 @@ function LongPressDropdown({
   children: ReactNode
 }) {
   const [open, setOpen] = useState(false)
-  const timerRef = useRef<NodeJS.Timeout | null>(null)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [pressing, setPressing] = useState(false)
 
   const startPress = () => {
