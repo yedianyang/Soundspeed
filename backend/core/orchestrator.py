@@ -46,61 +46,58 @@ class Orchestrator:
 
     def _register_builtin_handlers(self) -> None:
         """注册内置 handler（asr.final.ch1 / asr.final.ch2）。"""
-        self.subscribe(ASR_FINAL_CH1, self._on_asr_final_ch1)
-        self.subscribe(ASR_FINAL_CH2, self._on_asr_final_ch2)
-
-    def _resolve_take_id(self, payload_take_id: int | None, event_label: str) -> int | None:
-        """P1 review 修订：payload.take_id 优先用，None 时回退 session.take_id。
-
-        两者都非 None 且不匹配时记 warning 日志（跨 take 边界迟到 segment），仍按 payload 写库。
-        """
-        session_take_id = self.session.take_id
-        if payload_take_id is not None:
-            if session_take_id is not None and payload_take_id != session_take_id:
-                logger.warning(
-                    "%s: payload.take_id=%d != session.take_id=%d, using payload (cross-take boundary)",
-                    event_label,
-                    payload_take_id,
-                    session_take_id,
-                )
-            return payload_take_id
-        return session_take_id
-
-    def _on_asr_final_ch1(self, payload: object) -> None:
-        """处理 asr.final.ch1 事件：take_active 时写 transcript_segments（ch=1）。"""
-        assert isinstance(payload, AsrFinalPayload)
-        if not self.session.take_active:
-            logger.debug("asr.final.ch1: take inactive, skipping segment write")
-            return
-
-        target_take_id = self._resolve_take_id(payload.take_id, "asr.final.ch1")
-        if target_take_id is None:
-            return
-
-        self.dal.insert_segment(
-            take_id=target_take_id,
-            ch=1,
-            speaker=payload.speaker,
-            text=payload.text,
-            start_frame=payload.start_frame,
-            end_frame=payload.end_frame,
+        self.subscribe(
+            ASR_FINAL_CH1,
+            lambda p: self._on_asr_final(p, ch=1, force_speaker_none=False),
+        )
+        self.subscribe(
+            ASR_FINAL_CH2,
+            lambda p: self._on_asr_final(p, ch=2, force_speaker_none=True),
         )
 
-    def _on_asr_final_ch2(self, payload: object) -> None:
-        """处理 asr.final.ch2 事件：take_active 时写 transcript_segments（ch=2，speaker=None）。"""
+    def _resolve_take_id(self, payload_take_id: int | None, event_label: str) -> int | None:
+        """payload.take_id 优先用，None 时回退 session.take_id。
+
+        payload 与 session 都非 None 且不匹配时记 warning（跨 take 边界迟到 segment），仍按 payload 写库。
+        """
+        session_take_id = self.session.take_id
+        if payload_take_id is None:
+            return session_take_id
+
+        if session_take_id is not None and payload_take_id != session_take_id:
+            logger.warning(
+                "%s: payload.take_id=%d != session.take_id=%d, using payload (cross-take boundary)",
+                event_label,
+                payload_take_id,
+                session_take_id,
+            )
+        return payload_take_id
+
+    def _on_asr_final(
+        self,
+        payload: object,
+        *,
+        ch: int,
+        force_speaker_none: bool,
+    ) -> None:
+        """处理 asr.final.chN 事件：take_active 时写 transcript_segments。
+
+        ch1 保留 payload.speaker；ch2 强制 speaker=None（diarization 只跑 ch1）。
+        """
         assert isinstance(payload, AsrFinalPayload)
+        event_label = f"asr.final.ch{ch}"
         if not self.session.take_active:
-            logger.debug("asr.final.ch2: take inactive, skipping segment write")
+            logger.debug("%s: take inactive, skipping segment write", event_label)
             return
 
-        target_take_id = self._resolve_take_id(payload.take_id, "asr.final.ch2")
+        target_take_id = self._resolve_take_id(payload.take_id, event_label)
         if target_take_id is None:
             return
 
         self.dal.insert_segment(
             take_id=target_take_id,
-            ch=2,
-            speaker=None,
+            ch=ch,
+            speaker=None if force_speaker_none else payload.speaker,
             text=payload.text,
             start_frame=payload.start_frame,
             end_frame=payload.end_frame,

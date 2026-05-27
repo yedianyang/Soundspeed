@@ -24,6 +24,7 @@ class SessionState:
 
     def take_start(
         self,
+        *,
         take_id: int,
         take_number: int,
         start_ts: float,

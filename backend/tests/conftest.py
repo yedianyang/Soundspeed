@@ -1,7 +1,11 @@
 """测试夹具：用 soundfile 合成临时 WAV。"""
+from collections.abc import Iterator
+
 import numpy as np
 import pytest
 import soundfile as sf
+
+from backend.db.dal import DAL
 
 
 def _sine(freq, rate, seconds):
@@ -42,3 +46,16 @@ def four_channel_wav(tmp_path):
     chans = [_sine(f, 48000, 1.0) for f in (440, 550, 660, 770)]
     data = np.stack(chans, axis=1)
     return _write(tmp_path / "four_ch_48k.wav", data, 48000)
+
+
+@pytest.fixture
+def tmp_dal(tmp_path) -> Iterator[DAL]:
+    """每个测试一个临时 sqlite DAL，自动 close。
+
+    用 tmp_path（pytest 内置）而非 :memory:（DAL 双连接 migrations 不兼容）。
+    """
+    d = DAL(tmp_path / "test.db")
+    try:
+        yield d
+    finally:
+        d.close()
