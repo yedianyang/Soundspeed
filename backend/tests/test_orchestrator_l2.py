@@ -387,3 +387,212 @@ async def test_activate_scene_end_to_end(tmp_dal: DAL) -> None:
     # 6. take_line_matches 有 ≥1 条（line_no=1 的 match）
     matches = tmp_dal.list_take_line_matches(take_id)
     assert len(matches) >= 1
+
+
+# ---------------------------------------------------------------------------
+# P1 #1：无 deps 时跳过 L2 schedule（降级路径）
+# ---------------------------------------------------------------------------
+
+
+def test_take_end_without_l2_runner_skips_schedule(tmp_dal: DAL) -> None:
+    """不传 l2_runner，publish TAKE_END → 只 publish 一次 take.changed（tbd, script_diff=None），不 schedule L2。"""
+    scene_id = tmp_dal.create_scene("scene_p1a")
+    session = SessionState()
+    session.activate_scene(scene_id)
+    stub_svc = _make_stub_llm_service()
+
+    # 不传 l2_runner
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc)
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=1.0))
+    assert session.take_id is not None
+
+    received_changed: list[TakeChangedPayload] = []
+    orch.subscribe(TAKE_CHANGED, lambda p: received_changed.append(p))  # type: ignore[arg-type]
+
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=2.0))
+
+    # 只 publish 一次 take.changed，无 background task
+    assert len(received_changed) == 1
+    assert received_changed[0].status == "tbd"
+    assert received_changed[0].script_diff is None
+    assert orch._l2_task is None  # type: ignore[attr-defined]
+
+
+def test_take_end_without_llm_service_skips_schedule(tmp_dal: DAL) -> None:
+    """不传 llm_service，publish TAKE_END → 只 publish 一次 take.changed，不 schedule L2。"""
+    scene_id = tmp_dal.create_scene("scene_p1b")
+    session = SessionState()
+    session.activate_scene(scene_id)
+    stub_runner = _make_stub_l2_runner()
+
+    # 不传 llm_service
+    orch = create_orchestrator(tmp_dal, session, l2_runner=stub_runner)
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=1.0))
+    assert session.take_id is not None
+
+    received_changed: list[TakeChangedPayload] = []
+    orch.subscribe(TAKE_CHANGED, lambda p: received_changed.append(p))  # type: ignore[arg-type]
+
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=2.0))
+
+    assert len(received_changed) == 1
+    assert received_changed[0].script_diff is None
+    assert orch._l2_task is None  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# P1 #2：take.start 调 activate_scene
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_take_start_activates_scene(tmp_dal: DAL) -> None:
+    """publish TAKE_START → session.scene_id 被设为 payload.scene_id。"""
+    scene_id = tmp_dal.create_scene("scene_p2a")
+    session = SessionState()
+    # 故意不预先 activate_scene，让 take.start handler 来设
+
+    orch = create_orchestrator(tmp_dal, session)
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=1.0))
+
+    assert session.scene_id == scene_id
+
+
+@pytest.mark.asyncio
+async def test_take_end_uses_session_scene(tmp_dal: DAL) -> None:
+    """take.start 设定 scene_id，take.end 后 L2 用到的 scene_id 与 take.start 一致。"""
+    scene_id = tmp_dal.create_scene("scene_p2b")
+    session = SessionState()
+    # 不预先设置 scene_id
+
+    captured_inputs: list = []
+
+    async def capturing_runner(input_data, llm_service):  # type: ignore[no-untyped-def]
+        captured_inputs.append(input_data)
+        return L2Output(script_diff_summary=None, line_matches=[])
+
+    stub_svc = _make_stub_llm_service()
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=capturing_runner)
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=1.0))
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=2.0))
+
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
+    await orch._l2_task  # type: ignore[attr-defined]
+
+    assert len(captured_inputs) == 1
+    assert captured_inputs[0].scene_id == scene_id
+
+
+# ---------------------------------------------------------------------------
+# P2 #1：L2 后台 task 用闭包绑定 scene_id，不读 session
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_take_end_l2_uses_take_scene_not_session(tmp_dal: DAL) -> None:
+    """L2 后台 task 使用 take.start 时的 scene_id，不受后续 take.start 修改 session.scene_id 影响。"""
+    scene_id_1 = tmp_dal.create_scene("scene_race1")
+    scene_id_2 = tmp_dal.create_scene("scene_race2")
+
+    # 给 scene_1 和 scene_2 各插入不同 script
+    script_id_1 = tmp_dal.insert_script(scene_id_1, "剧本场次一")
+    tmp_dal.insert_script_line(script_id_1, line_no=1, character="A", text="台词一")
+    script_id_2 = tmp_dal.insert_script(scene_id_2, "剧本场次二")
+    tmp_dal.insert_script_line(script_id_2, line_no=1, character="B", text="台词二")
+
+    captured_script_ids: list[int | None] = []
+
+    async def capturing_runner(input_data, llm_service):  # type: ignore[no-untyped-def]
+        # 从 script_lines 的 line text 内容推断用了哪个 scene 的 script
+        # （或者直接看 input_data.scene_id 就够了）
+        captured_script_ids.append(input_data.scene_id)
+        return L2Output(script_diff_summary=None, line_matches=[])
+
+    stub_svc = _make_stub_llm_service()
+    session = SessionState()
+
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=capturing_runner)
+
+    # take A：scene_1
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id_1, shot=None, start_ts=1.0))
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=2.0))
+    l2_task_a = orch._l2_task  # type: ignore[attr-defined]
+
+    # 不等 L2 完成，立即 take B：scene_2
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id_2, shot=None, start_ts=3.0))
+    # take A 的 L2 task 现在执行，session.scene_id 已是 scene_id_2
+
+    assert l2_task_a is not None
+    await l2_task_a
+
+    # take A 的 L2 应使用 scene_id_1，不是 scene_id_2
+    assert len(captured_script_ids) == 1
+    assert captured_script_ids[0] == scene_id_1
+
+
+# ---------------------------------------------------------------------------
+# P2 #3：previous_notes 限长（5 条 / 800 字符）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_previous_notes_caps_at_5_takes(tmp_dal: DAL) -> None:
+    """10 条历史 take → previous_notes 只取最近 5 条。"""
+    scene_id = tmp_dal.create_scene("scene_pn5")
+
+    # 插入 10 条带 summary 的历史 take
+    for i in range(1, 11):
+        tid = tmp_dal.start_take(scene_id, take_number=i, start_ts=float(i))
+        tmp_dal.update_take_l2_output(tid, {"script_diff_summary": f"summary_{i:02d}", "line_matches": []})
+
+    captured_inputs: list = []
+
+    async def capturing_runner(input_data, llm_service):  # type: ignore[no-untyped-def]
+        captured_inputs.append(input_data)
+        return L2Output(script_diff_summary=None, line_matches=[])
+
+    stub_svc = _make_stub_llm_service()
+    session = SessionState()
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=capturing_runner)
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=11.0))
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=12.0))
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
+    await orch._l2_task  # type: ignore[attr-defined]
+
+    notes = captured_inputs[0].previous_notes
+    assert len(notes) <= 5
+
+
+@pytest.mark.asyncio
+async def test_previous_notes_caps_total_chars(tmp_dal: DAL) -> None:
+    """5 条 take，每条 summary 400 字符 → previous_notes 总字符 ≤ 800。"""
+    scene_id = tmp_dal.create_scene("scene_pn_chars")
+
+    long_summary = "X" * 400
+    for i in range(1, 6):
+        tid = tmp_dal.start_take(scene_id, take_number=i, start_ts=float(i))
+        tmp_dal.update_take_l2_output(tid, {"script_diff_summary": long_summary, "line_matches": []})
+
+    captured_inputs: list = []
+
+    async def capturing_runner(input_data, llm_service):  # type: ignore[no-untyped-def]
+        captured_inputs.append(input_data)
+        return L2Output(script_diff_summary=None, line_matches=[])
+
+    stub_svc = _make_stub_llm_service()
+    session = SessionState()
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=capturing_runner)
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=6.0))
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=7.0))
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
+    await orch._l2_task  # type: ignore[attr-defined]
+
+    notes = captured_inputs[0].previous_notes
+    total_chars = sum(len(n) for n in notes)
+    assert total_chars <= 800

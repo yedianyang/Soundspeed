@@ -147,6 +147,9 @@ class Orchestrator:
         assert isinstance(payload, TakeStartPayload)
 
         scene_id = payload.scene_id
+        # P1 #2：先同步 session.scene_id，确保 take.end 时 scene_id 已就绪
+        self.session.activate_scene(scene_id)
+
         # take_number = 当前 scene 已有 take 数量 + 1
         existing = self.dal.list_takes(scene_id)
         take_number = len(existing) + 1
@@ -203,19 +206,73 @@ class Orchestrator:
             ),
         )
 
+        # P1 #1：deps 检查在 get_running_loop 之前——无 LLM 依赖时降级跳过 L2
+        if self._deps.llm_service is None or self._deps.l2_runner is None:
+            return
+
         # fire-and-forget L2（需要 event loop）
         loop = asyncio.get_running_loop()  # 无 loop 时抛 RuntimeError，不降级
+
+        # P2 #1：闭包绑定 scene_id/take_number，避免 session 被后续 take 覆盖
+        # session 在此处仍是当前 take 的值（同步执行，take.start 尚未触发）
         scene_id = self.session.scene_id or 0
         take_number = self.session.take_number
-        self._l2_task = loop.create_task(self._run_l2_async(take_id))
-        # callback 用闭包绑定 take_id/scene_id/take_number，避免 session 被后续 take.start 覆盖
+
+        self._l2_task = loop.create_task(self._run_l2_async(take_id, scene_id, take_number))
         self._l2_task.add_done_callback(
             lambda t: self._l2_done_callback(t, take_id=take_id, scene_id=scene_id, take_number=take_number)
         )
 
-    async def _run_l2_async(self, take_id: int) -> None:
+    @staticmethod
+    def _truncate_script_lines(lines: list[dict], max_chars: int = 1000) -> list[dict]:
+        """截断 script_lines 使总字符数不超过 max_chars。
+
+        保留前 N 行（剧本按行号顺序，靠前的行优先）。
+        """
+        result: list[dict] = []
+        accumulated = 0
+        for item in lines:
+            text_len = len(item.get("text", ""))
+            if accumulated + text_len > max_chars:
+                break
+            result.append(item)
+            accumulated += text_len
+        return result
+
+    @staticmethod
+    def _assemble_previous_notes(
+        takes: list[Any],
+        current_take_id: int,
+        max_count: int = 5,
+        max_total_chars: int = 800,
+    ) -> list[str]:
+        """从历史 take 提取 script_diff_summary，限制最近 max_count 条且总字符 ≤ max_total_chars。
+
+        takes 假设按 take_number ASC 排序，取最后 max_count 条历史 take（排除当前 take）。
+        """
+        # 排除当前 take，取最近 max_count 条（ASC 顺序下取尾部）
+        history = [t for t in takes if t.take_id != current_take_id]
+        recent = history[-max_count:]
+
+        notes: list[str] = []
+        total_chars = 0
+        for t in recent:
+            if not (t.script_diff and isinstance(t.script_diff, dict)):
+                continue
+            summary = t.script_diff.get("script_diff_summary")
+            if not summary:
+                continue
+            summary_str = str(summary)
+            if total_chars + len(summary_str) > max_total_chars:
+                break
+            notes.append(summary_str)
+            total_chars += len(summary_str)
+        return notes
+
+    async def _run_l2_async(self, take_id: int, scene_id: int, take_number: int) -> None:
         """后台异步 L2 Pipeline：组装 L2Input → 调 l2_runner → 写库 → publish take.changed。
 
+        scene_id / take_number 由 caller 闭包传入（P2 #1 race condition 防护）。
         L2ParseError / asyncio.TimeoutError 等异常不在此捕获，传到 task.exception() 由 callback 处理。
         """
         from backend.pipelines.l2_take import L2Input
@@ -236,29 +293,21 @@ class Orchestrator:
             for s in segments
         ]
 
-        # 收集剧本行（如果 session 有活跃 script）
+        # 收集剧本行（P2 #2：截断到 1000 字符）
         script_lines: list[dict] = []
-        if self.session.scene_id is not None:
-            script_info = self.dal.get_latest_script(self.session.scene_id)
-            if script_info is not None:
-                script_lines = self.dal.list_script_lines(script_info["script_id"])
+        script_info = self.dal.get_latest_script(scene_id)
+        if script_info is not None:
+            raw_lines = self.dal.list_script_lines(script_info["script_id"])
+            script_lines = self._truncate_script_lines(raw_lines)
 
-        # 从历史 take 提取 previous_notes
-        previous_notes: list[str] = []
-        if self.session.scene_id is not None:
-            history = self.dal.list_takes(self.session.scene_id)
-            for t in history:
-                if t.take_id == take_id:
-                    continue  # 跳过当前 take
-                if t.script_diff and isinstance(t.script_diff, dict):
-                    summary = t.script_diff.get("script_diff_summary")
-                    if summary:
-                        previous_notes.append(str(summary))
+        # 从历史 take 提取 previous_notes（P2 #3：限 5 条 / 800 字符）
+        history = self.dal.list_takes(scene_id)
+        previous_notes = self._assemble_previous_notes(history, current_take_id=take_id)
 
         input_data = L2Input(
             take_id=take_id,
-            scene_id=take.scene_id,
-            take_number=take.take_number,
+            scene_id=scene_id,
+            take_number=take_number,
             transcript_segments=transcript_segments,
             script_lines=script_lines,
             previous_notes=previous_notes,
@@ -297,13 +346,13 @@ class Orchestrator:
         if matches_for_dal:
             self.dal.insert_take_line_matches(take_id, matches_for_dal)
 
-        # 第二次 publish（含 script_diff）
+        # 第二次 publish（含 script_diff）；用闭包参数保持与 L2Input 一致
         self.publish(
             TAKE_CHANGED,
             TakeChangedPayload(
                 take_id=take_id,
-                scene_id=take.scene_id,
-                take_number=take.take_number,
+                scene_id=scene_id,
+                take_number=take_number,
                 status="tbd",
                 script_diff=script_diff_dict,
             ),

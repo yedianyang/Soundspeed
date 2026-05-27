@@ -335,3 +335,42 @@ async def test_run_l2_take_uses_priority_2(l2_input: L2Input) -> None:
         "task_type"
     ) == "l2_take"
     assert call_kwargs.kwargs.get("priority") == 2 or call_kwargs[1].get("priority") == 2
+
+
+# ---------------------------------------------------------------------------
+# P2 #2：script_lines 截断 1000 字符（orchestrator helper）
+# ---------------------------------------------------------------------------
+
+
+def test_truncate_script_lines_caps_at_1000_chars() -> None:
+    """50 行各 50 字符，_truncate_script_lines 截断后总字符 <= 1000，超出的行被丢弃。"""
+    from backend.core.orchestrator import Orchestrator
+
+    lines = [
+        {"line_no": i, "character": "A", "text": "X" * 50}
+        for i in range(1, 51)
+    ]
+    result = Orchestrator._truncate_script_lines(lines, max_chars=1000)
+    total_chars = sum(len(item["text"]) for item in result)
+    assert total_chars <= 1000
+    # 50 行总共 2500 字符，截断后应只有 20 行
+    assert len(result) < 50
+
+
+# ---------------------------------------------------------------------------
+# P2 #4：单 segment > 2500 字符保留 tail
+# ---------------------------------------------------------------------------
+
+
+def test_truncate_segments_keeps_tail_of_oversized_segment() -> None:
+    """单 segment 4000 字符 -> 截断后返回 1 个 segment，text 长度 <= 2500。"""
+    from backend.pipelines.l2_take import _truncate_segments
+
+    segments = [{"speaker": "A", "text": "Y" * 4000, "start_frame": 0, "end_frame": 1}]
+    result, was_truncated = _truncate_segments(segments)
+    assert was_truncated is True
+    assert len(result) == 1
+    assert len(result[0]["text"]) <= 2500
+    # 其他字段保持原值
+    assert result[0]["speaker"] == "A"
+    assert result[0]["start_frame"] == 0

@@ -169,6 +169,11 @@ def _truncate_segments(segments: list[dict]) -> tuple[list[dict], bool]:
     for seg in reversed(segments):
         text_len = len(seg["text"])
         if accumulated + text_len > _TRANSCRIPT_CHAR_LIMIT:
+            # P2 #4：如果第一段（result 为空）就超长，保留 tail 而非跳过
+            if not result:
+                tail_text = seg["text"][-_TRANSCRIPT_CHAR_LIMIT:]
+                tail_seg = {**seg, "text": tail_text}
+                result.insert(0, tail_seg)
             break
         result.insert(0, seg)
         accumulated += text_len
