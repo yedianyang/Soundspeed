@@ -205,12 +205,18 @@ def test_asr_final_ch1_writes_to_payload_take_id_on_mismatch(
     # take5 收到这段，take6 不收
     assert len(dal.list_segments(take5, ch=1)) == 1
     assert len(dal.list_segments(take6, ch=1)) == 0
-    # warning 日志含关键词
-    assert any(
-        "cross-take" in r.message.lower() or "take_id" in r.message
-        for r in caplog.records
-        if r.levelno == logging.WARNING
-    )
+
+    # warning 断言：锁 logger + event_label + 两个 take_id 值 + cross-take 关键词
+    orch_warn_records = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "backend.core.orchestrator"
+    ]
+    assert len(orch_warn_records) >= 1, "应至少有一条 backend.core.orchestrator WARNING 记录"
+    warn_msg = orch_warn_records[0].getMessage()
+    assert "asr.final.ch1" in warn_msg, f"warning 应含 event_label 'asr.final.ch1'，实际：{warn_msg!r}"
+    assert str(payload.take_id) in warn_msg, f"warning 应含 payload.take_id={payload.take_id}，实际：{warn_msg!r}"
+    assert str(session.take_id) in warn_msg, f"warning 应含 session.take_id={session.take_id}，实际：{warn_msg!r}"
+    assert "cross-take" in warn_msg.lower(), f"warning 应含 'cross-take'，实际：{warn_msg!r}"
 
 
 def test_asr_final_ch2_writes_segment_when_take_active(dal: DAL) -> None:
@@ -301,3 +307,154 @@ def test_session_register_unregister_observer() -> None:
     session.unregister_observer("conn-1")
     assert "conn-1" not in session.active_connections
     assert "conn-2" in session.active_connections
+
+
+# ── §7.4 补强测试（codex rescue 诊断后）────────────────────────────────────────
+
+
+def test_asr_final_ch1_skipped_when_both_take_ids_null(dal: DAL) -> None:
+    """payload.take_id=None、session.take_id=None 时 handler 跳过写库。
+
+    覆盖：_resolve_take_id 返回 None → handler line 77-78 early return。
+    take_active=True 但两者都 None 是非法状态，handler 应静默跳过。
+    """
+    scene_id = dal.create_scene("scene_null")
+    take_id = dal.start_take(scene_id, take_number=1, start_ts=time.time())
+
+    session = SessionState()
+    session.take_id = None  # 强制 None（非法状态模拟）
+    session.take_active = True
+    orch = Orchestrator(dal, session=session)
+
+    orch.publish(ASR_FINAL_CH1, _asr_final_payload(take_id=None, text="should not be written"))
+
+    assert len(dal.list_segments(take_id, ch=1)) == 0
+
+
+def test_asr_final_ch1_writes_to_payload_when_session_take_id_null(
+    dal: DAL, caplog: pytest.LogCaptureFixture
+) -> None:
+    """session.take_id=None、payload.take_id 有值时按 payload 写库，不产生 mismatch warning。
+
+    _resolve_take_id 逻辑：payload_take_id is not None，但 session_take_id is None，
+    不进入 mismatch 分支（只有两者都非 None 且不等才 warn），所以无 WARNING 日志。
+    """
+    scene_id = dal.create_scene("scene_payload")
+    take5 = dal.start_take(scene_id, take_number=5, start_ts=time.time())
+
+    session = SessionState()
+    session.take_id = None
+    session.take_active = True
+    orch = Orchestrator(dal, session=session)
+
+    payload = _asr_final_payload(take_id=take5, text="payload 有值 session None")
+
+    with caplog.at_level(logging.WARNING, logger="backend.core.orchestrator"):
+        orch.publish(ASR_FINAL_CH1, payload)
+
+    # take5 收到这段
+    assert len(dal.list_segments(take5, ch=1)) == 1
+
+    # 不应产生 mismatch warning
+    orch_warn_records = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "backend.core.orchestrator"
+    ]
+    assert len(orch_warn_records) == 0, (
+        f"session.take_id=None 时不应产生 mismatch WARNING，实际记录：{[r.getMessage() for r in orch_warn_records]}"
+    )
+
+
+def test_asr_final_ch2_writes_to_payload_take_id_on_mismatch(
+    dal: DAL, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ch2 mismatch：payload.take_id 与 session.take_id 不匹配时按 payload 写库，
+    且 ch2 speaker 强制为 None（对称 ch1 已有的 mismatch 测试）。
+    """
+    scene_id = dal.create_scene("scene_ch2_mismatch")
+    take5 = dal.start_take(scene_id, take_number=5, start_ts=time.time())
+    take6 = dal.start_take(scene_id, take_number=6, start_ts=time.time())
+
+    session = SessionState()
+    session.take_id = take6
+    session.take_active = True
+    orch = Orchestrator(dal, session=session)
+
+    payload = _asr_final_payload(take_id=take5, text="录音师跨边界备注", speaker="录音师")
+
+    with caplog.at_level(logging.WARNING, logger="backend.core.orchestrator"):
+        orch.publish(ASR_FINAL_CH2, payload)
+
+    # take5 收到这段，take6 不收
+    assert len(dal.list_segments(take5, ch=2)) == 1
+    assert len(dal.list_segments(take6, ch=2)) == 0
+
+    # ch2 speaker 强制为 None
+    seg = dal.list_segments(take5, ch=2)[0]
+    assert seg.speaker is None
+
+    # warning 断言：锁 logger + event_label + 两个 take_id 值 + cross-take 关键词
+    orch_warn_records = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "backend.core.orchestrator"
+    ]
+    assert len(orch_warn_records) >= 1, "应至少有一条 backend.core.orchestrator WARNING 记录"
+    warn_msg = orch_warn_records[0].getMessage()
+    assert "asr.final.ch2" in warn_msg, f"warning 应含 event_label 'asr.final.ch2'，实际：{warn_msg!r}"
+    assert str(payload.take_id) in warn_msg, f"warning 应含 payload.take_id={payload.take_id}，实际：{warn_msg!r}"
+    assert str(session.take_id) in warn_msg, f"warning 应含 session.take_id={session.take_id}，实际：{warn_msg!r}"
+    assert "cross-take" in warn_msg.lower(), f"warning 应含 'cross-take'，实际：{warn_msg!r}"
+
+
+def test_builtin_handler_assertion_error_does_not_block_publish(dal: DAL) -> None:
+    """内置 handler 内 AssertionError（payload 类型错误）不阻断后续 spy handler。
+
+    publish 顺序：内置 ch1 handler（先注册，AssertionError）→ spy handler（后注册，应被调）。
+    publish 本身不抛；spy 仍被调；库里无记录（内置 handler 因 assert 失败未写库）。
+    """
+    scene_id = dal.create_scene("scene_assert")
+    take_id = dal.start_take(scene_id, take_number=1, start_ts=time.time())
+    session = _make_active_session(take_id)
+    orch = Orchestrator(dal, session=session)
+
+    spy_called: list[object] = []
+    orch.subscribe(ASR_FINAL_CH1, lambda p: spy_called.append(p))
+
+    # 故意传非 AsrFinalPayload，触发内置 handler 里的 assert isinstance(...) 失败
+    orch.publish(ASR_FINAL_CH1, "not a payload")  # type: ignore[arg-type]
+
+    # publish 本身不抛（已验证上面一行执行完毕）
+    # spy 仍被调
+    assert len(spy_called) == 1
+    # 内置 handler 因 assert 失败未写库
+    assert len(dal.list_segments(take_id, ch=1)) == 0
+
+
+def test_builtin_handler_insert_segment_error_does_not_block_publish(dal: DAL) -> None:
+    """内置 handler insert_segment 抛 sqlite3.IntegrityError 时不阻断 spy handler。
+
+    构造：session.take_id 设为数据库里不存在的 ID（外键约束失败）。
+    payload.take_id=None → handler 回退用 session.take_id=99999 → insert 触发外键错误。
+    publish 本身不抛；spy 仍被调；库里没有 take_id=99999 的记录。
+    """
+    scene_id = dal.create_scene("scene_fk_fail")
+    dal.start_take(scene_id, take_number=1, start_ts=time.time())  # 确保 scene 存在
+
+    PHANTOM_TAKE_ID = 99999
+
+    session = SessionState()
+    session.take_id = PHANTOM_TAKE_ID  # 不存在于 DB
+    session.take_active = True
+    orch = Orchestrator(dal, session=session)
+
+    spy_called: list[object] = []
+    orch.subscribe(ASR_FINAL_CH1, lambda p: spy_called.append(p))
+
+    # payload.take_id=None → 回退到 session.take_id=99999 → 外键约束失败
+    orch.publish(ASR_FINAL_CH1, _asr_final_payload(take_id=None, text="phantom take"))
+
+    # publish 本身不抛
+    # spy 仍被调
+    assert len(spy_called) == 1
+    # 没有 phantom 记录写进库（事务回滚或 insert 失败）
+    assert len(dal.list_segments(PHANTOM_TAKE_ID, ch=1)) == 0
