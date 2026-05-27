@@ -596,3 +596,34 @@ async def test_previous_notes_caps_total_chars(tmp_dal: DAL) -> None:
     notes = captured_inputs[0].previous_notes
     total_chars = sum(len(n) for n in notes)
     assert total_chars <= 800
+
+
+# ---------------------------------------------------------------------------
+# create_orchestrator 工厂自动绑定 l2_runner
+# ---------------------------------------------------------------------------
+
+
+def test_create_orchestrator_auto_binds_l2_runner_when_llm_service_provided(
+    tmp_dal: DAL,
+) -> None:
+    """create_orchestrator(llm_service=svc) 不传 l2_runner，自动绑定 run_l2_take。"""
+    stub_svc = _make_stub_llm_service()
+    session = SessionState()
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc)
+    assert orch._deps.l2_runner is run_l2_take  # type: ignore[attr-defined]
+
+
+def test_create_orchestrator_keeps_explicit_l2_runner(tmp_dal: DAL) -> None:
+    """显式传 l2_runner 时不被 run_l2_take 覆盖。"""
+    stub_svc = _make_stub_llm_service()
+    stub_runner = _make_stub_l2_runner()
+    session = SessionState()
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=stub_runner)
+    assert orch._deps.l2_runner is stub_runner  # type: ignore[attr-defined]
+
+
+def test_create_orchestrator_no_llm_service_keeps_l2_runner_none(tmp_dal: DAL) -> None:
+    """不传 llm_service 时 l2_runner 不自动绑定，保持 None。"""
+    session = SessionState()
+    orch = create_orchestrator(tmp_dal, session)
+    assert orch._deps.l2_runner is None  # type: ignore[attr-defined]

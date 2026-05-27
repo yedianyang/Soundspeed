@@ -277,10 +277,6 @@ class Orchestrator:
         """
         from backend.pipelines.l2_take import L2Input
 
-        take = self.dal.get_take(take_id)
-        if take is None:
-            raise RuntimeError(f"_run_l2_async: take_id={take_id} not found in DB")
-
         # 收集 ch1 转录记录
         segments = self.dal.list_segments(take_id, ch=1)
         transcript_segments = [
@@ -397,5 +393,9 @@ def create_orchestrator(
     """模块级工厂函数，供生产代码与测试注入依赖。
 
     老签名 Orchestrator(dal, session) 零改动，此函数提供更明确的依赖注入入口。
+    llm_service 不为 None 且 l2_runner 未显式传时，自动绑定 run_l2_take（spec §3.1）。
     """
+    if llm_service is not None and l2_runner is None:
+        from backend.pipelines.l2_take import run_l2_take
+        l2_runner = run_l2_take
     return Orchestrator(dal, session, llm_service=llm_service, l2_runner=l2_runner)
