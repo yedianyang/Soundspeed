@@ -6,12 +6,13 @@
 .vscode/
 *.swp
 
-# Claude Code（本地 AI 助手配置，不入库）
+# AI 助手本地配置（Reasonix / Claude Code / Kimi CLI 等，不入库）
 CLAUDE.md
 AGENTS.md
 KIMI_SETUP.md
 .claude/
 .kimi/
+.reasonix/
 .playwright-mcp/
 .superpowers/
 
@@ -70,3 +71,6 @@ logs/
 tmp/
 *.log
 admin-*.png
+
+# AI 会话导出包（Kimi CLI 等）
+session-*.zip
