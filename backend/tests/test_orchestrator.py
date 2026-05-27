@@ -1,7 +1,7 @@
-"""test_orchestrator.py：覆盖 spec §7 全部 13 条测试。
+"""test_orchestrator.py：覆盖 spec §7 全部 15 条测试。
 
 §7.1 pub/sub 基础（4 条）
-§7.2 内置 handler asr.final.ch1 / asr.final.ch2（6 条）
+§7.2 内置 handler asr.final.ch1 / asr.final.ch2（8 条）
 §7.3 SessionState 行为（3 条）
 """
 from __future__ import annotations
@@ -151,21 +151,66 @@ def test_asr_final_ch1_skipped_when_take_inactive(dal: DAL) -> None:
     assert len(segments) == 0
 
 
-def test_asr_final_ch1_reads_take_id_from_session_not_payload(dal: DAL) -> None:
-    """payload.take_id 给一个错误值，handler 仍按 session.take_id 写库。"""
+def test_asr_final_ch1_falls_back_to_session_take_id_when_payload_null(dal: DAL) -> None:
+    """payload.take_id=None 时 handler 回退用 session.take_id 写库。"""
     scene_id = dal.create_scene("scene_test")
-    real_take_id = dal.start_take(scene_id, take_number=1, start_ts=time.time())
-    session = _make_active_session(real_take_id)
+    take_id = dal.start_take(scene_id, take_number=2, start_ts=time.time())
+    session = _make_active_session(take_id)
     orch = Orchestrator(dal, session=session)
 
-    # payload.take_id 故意给一个不存在的 ID（9999）
-    payload = _asr_final_payload(take_id=9999, text="应该写到正确的 take")
+    # payload.take_id=None，handler 应用 session.take_id
+    payload = _asr_final_payload(take_id=None, text="回退到 session take")
     orch.publish(ASR_FINAL_CH1, payload)
 
-    # 应写到 real_take_id 对应的 segments，而不是 9999
-    segments = dal.list_segments(real_take_id, ch=1)
+    segments = dal.list_segments(take_id, ch=1)
     assert len(segments) == 1
-    assert segments[0].text == "应该写到正确的 take"
+    assert segments[0].text == "回退到 session take"
+
+
+def test_asr_final_ch1_uses_payload_take_id_when_provided(dal: DAL) -> None:
+    """payload.take_id=session.take_id 时 handler 用 payload 路径写库（验证非纯回退）。"""
+    scene_id = dal.create_scene("scene_test")
+    take_id = dal.start_take(scene_id, take_number=3, start_ts=time.time())
+    session = _make_active_session(take_id)
+    orch = Orchestrator(dal, session=session)
+
+    # payload.take_id 与 session.take_id 相同，走 payload 路径
+    payload = _asr_final_payload(take_id=take_id, text="payload 路径写库")
+    orch.publish(ASR_FINAL_CH1, payload)
+
+    segments = dal.list_segments(take_id, ch=1)
+    assert len(segments) == 1
+    assert segments[0].text == "payload 路径写库"
+
+
+def test_asr_final_ch1_writes_to_payload_take_id_on_mismatch(
+    dal: DAL, caplog: pytest.LogCaptureFixture
+) -> None:
+    """payload.take_id 与 session.take_id 不匹配时按 payload 写库，且记 warning 日志。"""
+    scene_id = dal.create_scene("scene_test")
+    take5 = dal.start_take(scene_id, take_number=5, start_ts=time.time())
+    take6 = dal.start_take(scene_id, take_number=6, start_ts=time.time())
+
+    session = SessionState()
+    session.take_id = take6
+    session.take_active = True
+    orch = Orchestrator(dal, session=session)
+
+    # 跨 take 边界迟到 segment：payload 属于 take5，session 已切到 take6
+    payload = _asr_final_payload(take_id=take5, text="迟到的 Cut")
+
+    with caplog.at_level(logging.WARNING, logger="backend.core.orchestrator"):
+        orch.publish(ASR_FINAL_CH1, payload)
+
+    # take5 收到这段，take6 不收
+    assert len(dal.list_segments(take5, ch=1)) == 1
+    assert len(dal.list_segments(take6, ch=1)) == 0
+    # warning 日志含关键词
+    assert any(
+        "cross-take" in r.message.lower() or "take_id" in r.message
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+    )
 
 
 def test_asr_final_ch2_writes_segment_when_take_active(dal: DAL) -> None:
