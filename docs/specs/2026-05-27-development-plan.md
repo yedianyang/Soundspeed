@@ -5,7 +5,7 @@
 状态：定稿，进入开发
 
 变更记录：
-- v0.2（定稿 2026-05-27）：按「经纬整条音频生产链 + 境熙 L2 基座/Orchestrator」重排第一阶段；新增 speaker diarization spike + 实现 ticket；TranscriptSegment 与 DAL 接口加 speaker 字段；第二阶段及以后留白等第一阶段跑通后再拆。境熙起手 ticket 锁 0.E（schema spec），先解锁 1.D 实现路径；0.C/0.D/0.F 在 0.E 提交后再启。
+- v0.2（定稿 2026-05-27）：按「经纬整条音频生产链 + 境熙 L2 基座/Orchestrator」重排第一阶段；新增 speaker diarization spike + 实现 ticket；TranscriptSegment 与 DAL 接口加 speaker 字段；第二阶段及以后留白等第一阶段跑通后再拆。境熙起手 ticket 锁 0.E（schema spec），先解锁 1.D 实现路径；0.C/0.D/0.F 在 0.E 提交后再启。新增 P3 优先级语义（设计预留 / 未来可能性 / 不进 MVP），同步 Notion 任务清单 database。
 - v0.1：初稿
 
 依赖 spec：
@@ -116,7 +116,7 @@ Soundspeed 必须在 Windows 和 macOS 上行为一致。所有 ticket 的实现
 |---|---|---|
 | Name | 见命名格式 | ticket 标题 |
 | Owner | multi_select：境熙 / 经纬 | 谁负责。跨人 ticket 两个都勾，正文写明各自分工 |
-| 优先级 | P0 / P1 / P2 | P0 = 阶段 0 + 阶段 1；P1 = 第二阶段；P2 = 第三阶段及以后 |
+| 优先级 | P0 / P1 / P2 / P3 | P0 = 阶段 0 + 阶段 1；P1 = 第二阶段；P2 = 第三阶段及以后；P3 = 设计预留 / 未来可能性 / 不进 MVP |
 | 状态 | Backlog / Todo / Test / Done | Backlog 未排上 → Todo 本周做 → Test 开发完待联调/审查 → Done 合到 main |
 | Date | 可选 | 计划完成日期 |
 
