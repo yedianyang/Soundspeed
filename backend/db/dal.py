@@ -9,11 +9,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.db.lifecycle import _configure_connection
 from backend.db.migrations.runner import apply_migrations
+
+# SQLite 3.39.4 不支持 unixepoch('now', 'subsec')，用 strftime 兼容写法
+_NOW_TS_SQL = "CAST(strftime('%s', 'now') AS REAL)"
 
 
 # ── 数据类（read 方法的返回类型）────────────────────────────────────────────
@@ -147,9 +153,28 @@ class DAL:
         apply_migrations(db_path)
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON;")
-        self._conn.execute("PRAGMA journal_mode = WAL;")
-        self._conn.execute("PRAGMA busy_timeout = 5000;")
+        _configure_connection(self._conn)
+
+    # ── 内部事务 helper ───────────────────────────────────────────────────────
+
+    @contextmanager
+    def _write_tx(self) -> Iterator[sqlite3.Connection]:
+        """写事务 context manager：BEGIN IMMEDIATE 显式加锁，避免 WAL 下隐式事务竞争。"""
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE;")
+            yield self._conn
+
+    # ── 资源管理 ──────────────────────────────────────────────────────────────
+
+    def close(self) -> None:
+        """关闭底层 sqlite 连接。"""
+        self._conn.close()
+
+    def __enter__(self) -> "DAL":
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        self.close()
 
     # ── scenes ──────────────────────────────────────────────────────────────
 
@@ -160,9 +185,8 @@ class DAL:
         shoot_date: str | None = None,
     ) -> int:
         """创建场次，返回 scene_id。"""
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            cur = self._conn.execute(
+        with self._write_tx() as conn:
+            cur = conn.execute(
                 "INSERT INTO scenes (scene_code, description, shoot_date) VALUES (?, ?, ?);",
                 (scene_code, description, shoot_date),
             )
@@ -170,10 +194,9 @@ class DAL:
 
     def set_active_scene(self, scene_id: int) -> None:
         """将指定 scene_id 设为活跃场次，清除其他场次的 is_active。"""
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            self._conn.execute("UPDATE scenes SET is_active = 0;")
-            self._conn.execute(
+        with self._write_tx() as conn:
+            conn.execute("UPDATE scenes SET is_active = 0;")
+            conn.execute(
                 "UPDATE scenes SET is_active = 1 WHERE scene_id = ?;", (scene_id,)
             )
 
@@ -202,9 +225,8 @@ class DAL:
         shot: str | None = None,
     ) -> int:
         """新建 take 行，返回 take_id。"""
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            cur = self._conn.execute(
+        with self._write_tx() as conn:
+            cur = conn.execute(
                 "INSERT INTO takes (scene_id, take_number, start_ts, shot) "
                 "VALUES (?, ?, ?, ?);",
                 (scene_id, take_number, start_ts, shot),
@@ -224,12 +246,11 @@ class DAL:
         script_diff 传 dict，DAL 内部 json.dumps 后存库；读取时 json.loads 还原。
         """
         script_diff_json = json.dumps(script_diff) if script_diff is not None else None
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            self._conn.execute(
-                "UPDATE takes SET end_ts = ?, status = ?, script_diff = ?, notes = ?, "
-                "updated_at = CAST(strftime('%s', 'now') AS REAL) "
-                "WHERE take_id = ?;",
+        with self._write_tx() as conn:
+            conn.execute(
+                f"UPDATE takes SET end_ts = ?, status = ?, script_diff = ?, notes = ?, "
+                f"updated_at = {_NOW_TS_SQL} "
+                f"WHERE take_id = ?;",
                 (end_ts, status, script_diff_json, notes, take_id),
             )
 
@@ -248,13 +269,12 @@ class DAL:
         performer_issues_json = (
             json.dumps(performer_issues) if performer_issues is not None else None
         )
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            self._conn.execute(
-                "UPDATE takes SET performer_issues = ?, audio_quality = ?, "
-                "status = COALESCE(?, status), "
-                "updated_at = CAST(strftime('%s', 'now') AS REAL) "
-                "WHERE take_id = ?;",
+        with self._write_tx() as conn:
+            conn.execute(
+                f"UPDATE takes SET performer_issues = ?, audio_quality = ?, "
+                f"status = COALESCE(?, status), "
+                f"updated_at = {_NOW_TS_SQL} "
+                f"WHERE take_id = ?;",
                 (performer_issues_json, audio_quality, status, take_id),
             )
 
@@ -289,9 +309,8 @@ class DAL:
     ) -> int:
         """写入 take 事件行，返回 event_id。"""
         payload_json = json.dumps(payload)
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            cur = self._conn.execute(
+        with self._write_tx() as conn:
+            cur = conn.execute(
                 "INSERT INTO take_events (take_id, event_type, payload, ts) "
                 "VALUES (?, ?, ?, ?);",
                 (take_id, event_type, payload_json, ts),
@@ -329,9 +348,8 @@ class DAL:
         end_frame: int,
     ) -> int:
         """写入一条转录片段，返回 segment_id。ch 必须为 1 或 2。"""
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            cur = self._conn.execute(
+        with self._write_tx() as conn:
+            cur = conn.execute(
                 "INSERT INTO transcript_segments "
                 "(take_id, ch, speaker, text, start_frame, end_frame) "
                 "VALUES (?, ?, ?, ?, ?, ?);",
@@ -373,16 +391,15 @@ class DAL:
         插入剧本原文，返回 script_id。
         version=None 时自动取该场次最大版本 +1。
         """
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
+        with self._write_tx() as conn:
             if version is None:
-                row = self._conn.execute(
+                row = conn.execute(
                     "SELECT COALESCE(MAX(version), 0) AS max_v FROM scripts "
                     "WHERE scene_id = ?;",
                     (scene_id,),
                 ).fetchone()
                 version = row["max_v"] + 1
-            cur = self._conn.execute(
+            cur = conn.execute(
                 "INSERT INTO scripts (scene_id, raw_text, version) VALUES (?, ?, ?);",
                 (scene_id, raw_text, version),
             )
@@ -407,9 +424,8 @@ class DAL:
         text: str,
     ) -> int:
         """插入一行台词，返回 line_id。FTS5 触发器自动同步。"""
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            cur = self._conn.execute(
+        with self._write_tx() as conn:
+            cur = conn.execute(
                 "INSERT INTO script_lines (script_id, line_no, character, text) "
                 "VALUES (?, ?, ?, ?);",
                 (script_id, line_no, character, text),
@@ -457,9 +473,8 @@ class DAL:
     ) -> int:
         """写入 take-剧本行比对结果，返回 match_id。"""
         payload_json = json.dumps(payload)
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            cur = self._conn.execute(
+        with self._write_tx() as conn:
+            cur = conn.execute(
                 "INSERT INTO take_line_matches (take_id, line_id, diff_type, payload) "
                 "VALUES (?, ?, ?, ?);",
                 (take_id, line_id, diff_type, payload_json),
@@ -484,9 +499,8 @@ class DAL:
 
     def upsert_observer(self, connection_id: str, name: str) -> None:
         """插入或更新观察者记录（INSERT OR REPLACE）。"""
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            self._conn.execute(
+        with self._write_tx() as conn:
+            conn.execute(
                 "INSERT OR REPLACE INTO active_observers (connection_id, name) "
                 "VALUES (?, ?);",
                 (connection_id, name),
@@ -494,9 +508,8 @@ class DAL:
 
     def remove_observer(self, connection_id: str) -> None:
         """删除观察者记录。"""
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            self._conn.execute(
+        with self._write_tx() as conn:
+            conn.execute(
                 "DELETE FROM active_observers WHERE connection_id = ?;",
                 (connection_id,),
             )
@@ -518,9 +531,8 @@ class DAL:
     ) -> int:
         """追加一条审计日志，返回 log_id。"""
         payload_json = json.dumps(payload)
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE;")
-            cur = self._conn.execute(
+        with self._write_tx() as conn:
+            cur = conn.execute(
                 "INSERT INTO audit_log (actor, action, payload) VALUES (?, ?, ?);",
                 (actor, action, payload_json),
             )

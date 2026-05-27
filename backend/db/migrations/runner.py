@@ -9,6 +9,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from backend.db.lifecycle import _configure_connection
+
 MIGRATIONS_DIR = Path(__file__).parent
 
 # 每个版本对应一个 .sql 文件
@@ -28,9 +30,7 @@ def apply_migrations(db_path: Path) -> None:
     """
     conn = sqlite3.connect(db_path)
     try:
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
+        _configure_connection(conn)
 
         current_version: int = conn.execute("PRAGMA user_version;").fetchone()[0]
 

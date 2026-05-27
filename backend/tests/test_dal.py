@@ -584,3 +584,24 @@ def test_audit_payload_check_constraint(tmp_path: Path) -> None:
             "VALUES ('orchestrator', 'take.start', 'not-valid-json');"
         )
     conn.close()
+
+
+# ── DAL 资源管理 ──────────────────────────────────────────────────────────────
+
+
+def test_dal_close_releases_connection(tmp_path: Path) -> None:
+    """DAL.close() 后再操作触发 sqlite3.ProgrammingError。"""
+    dal = DAL(tmp_path / "test.db")
+    dal.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        dal.list_scenes()
+
+
+def test_dal_as_context_manager(tmp_path: Path) -> None:
+    """with DAL(...) as dal 块退出后，连接自动关闭。"""
+    with DAL(tmp_path / "test.db") as dal:
+        scene_id = dal.create_scene("S01")
+        assert isinstance(scene_id, int)
+    # 块已退出，连接已关闭
+    with pytest.raises(sqlite3.ProgrammingError):
+        dal.list_scenes()

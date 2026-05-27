@@ -9,6 +9,17 @@ import sqlite3
 from pathlib import Path
 
 
+def _configure_connection(conn: sqlite3.Connection) -> None:
+    """统一设置每个 sqlite3 连接的必备 PRAGMA。
+
+    所有打开连接的地方（DAL 构造、apply_migrations、purge_volatile_tables）
+    都必须调用此函数，避免 PRAGMA 散落造成不一致（如 WAL/busy_timeout 漏设）。
+    """
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
+
+
 def purge_volatile_tables(db_path: Path) -> None:
     """清空跨重启不保留的 volatile 表。
 
@@ -19,7 +30,7 @@ def purge_volatile_tables(db_path: Path) -> None:
     """
     conn = sqlite3.connect(db_path)
     try:
-        conn.execute("PRAGMA foreign_keys = ON;")
+        _configure_connection(conn)
         conn.execute("DELETE FROM active_observers;")
         conn.commit()
     finally:
