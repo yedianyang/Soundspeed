@@ -18,6 +18,7 @@ ASR_FINAL_CH2 = "asr.final.ch2"
 # Take 事件（contract C3：FastAPI 调用 publish）
 TAKE_START = "take.start"
 TAKE_END = "take.end"
+TAKE_CHANGED = "take.changed"
 
 # 其他事件（本 ticket 只定义常量，不注册 handler）
 MANUAL_MARK = "manual.mark"
@@ -91,3 +92,18 @@ class ScriptUploadPayload:
 
     scene_id: int
     raw_text: str
+
+
+@dataclass(frozen=True)
+class TakeChangedPayload:
+    """take.changed 的 payload（1.H L2 pipeline 完成后 publish）。
+
+    status 取值与 takes.status 一致：'keeper' | 'ng' | 'hold' | 'tbd'。
+    script_diff=None 表示 L2 未完成或失败（降级状态）。
+    """
+
+    take_id: int
+    scene_id: int
+    take_number: int
+    status: str
+    script_diff: dict | None

@@ -3,13 +3,29 @@
 内置 handler（asr.final.ch1 / asr.final.ch2）在构造时通过 subscribe 注册，
 直接写入 DAL transcript_segments 表。
 任一 handler 抛异常时记 ERROR 日志并继续调用剩余 handler，不向 publish 调用方传播。
+
+工厂函数 create_orchestrator 支持依赖注入（llm_service / l2_runner），
+供 1.H take handler 使用。老签名 Orchestrator(dal, session) 零改动。
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
-from backend.core.events import ASR_FINAL_CH1, ASR_FINAL_CH2, AsrFinalPayload
+from backend.core.events import (
+    ASR_FINAL_CH1,
+    ASR_FINAL_CH2,
+    TAKE_CHANGED,
+    TAKE_END,
+    TAKE_START,
+    AsrFinalPayload,
+    TakeChangedPayload,
+    TakeEndPayload,
+    TakeStartPayload,
+)
 from backend.core.session import SessionState
 from backend.db.dal import DAL
 
@@ -18,13 +34,34 @@ Handler = Callable[[object], None]
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class Dependencies:
+    """Orchestrator 可选外部依赖，用于 1.H take handler。
+
+    llm_service: LLMService 实例，注入到 l2_runner。
+    l2_runner: 异步可调用，签名 (L2Input, LLMService) -> Awaitable[L2Output]。
+    """
+
+    llm_service: Any = field(default=None)
+    l2_runner: Any = field(default=None)
+
+
 class Orchestrator:
     """同步事件总线，持有 DAL 与 SessionState，内置 ASR segment handler。"""
 
-    def __init__(self, dal: DAL, session: SessionState | None = None) -> None:
+    def __init__(
+        self,
+        dal: DAL,
+        session: SessionState | None = None,
+        *,
+        llm_service: Any = None,
+        l2_runner: Any = None,
+    ) -> None:
         self.dal = dal
         self.session: SessionState = session if session is not None else SessionState()
+        self._deps = Dependencies(llm_service=llm_service, l2_runner=l2_runner)
         self._handlers: dict[str, list[Handler]] = {}
+        self._l2_task: asyncio.Task[None] | None = None  # 最近一次 L2 后台 task，供测试 await
         self._register_builtin_handlers()
 
     def subscribe(self, event_type: str, handler: Handler) -> None:
@@ -45,7 +82,7 @@ class Orchestrator:
                 logger.exception("handler error for event %r", event_type)
 
     def _register_builtin_handlers(self) -> None:
-        """注册内置 handler（asr.final.ch1 / asr.final.ch2）。"""
+        """注册内置 handler（asr.final.ch1 / asr.final.ch2 / take.start / take.end）。"""
         self.subscribe(
             ASR_FINAL_CH1,
             lambda p: self._on_asr_final(p, ch=1, force_speaker_none=False),
@@ -54,6 +91,8 @@ class Orchestrator:
             ASR_FINAL_CH2,
             lambda p: self._on_asr_final(p, ch=2, force_speaker_none=True),
         )
+        self.subscribe(TAKE_START, self._on_take_start)
+        self.subscribe(TAKE_END, self._on_take_end)
 
     def _resolve_take_id(self, payload_take_id: int | None, event_label: str) -> int | None:
         """payload.take_id 优先用，None 时回退 session.take_id。
@@ -102,3 +141,261 @@ class Orchestrator:
             start_frame=payload.start_frame,
             end_frame=payload.end_frame,
         )
+
+    def _on_take_start(self, payload: object) -> None:
+        """处理 take.start 事件：写 DAL + 更新 SessionState + publish take.changed。"""
+        assert isinstance(payload, TakeStartPayload)
+
+        scene_id = payload.scene_id
+        # P1 #2：先同步 session.scene_id，确保 take.end 时 scene_id 已就绪
+        self.session.activate_scene(scene_id)
+
+        # take_number = 当前 scene 已有 take 数量 + 1
+        existing = self.dal.list_takes(scene_id)
+        take_number = len(existing) + 1
+
+        take_id = self.dal.start_take(
+            scene_id=scene_id,
+            take_number=take_number,
+            start_ts=payload.start_ts,
+            shot=payload.shot,
+        )
+        self.session.take_start(
+            take_id=take_id,
+            take_number=take_number,
+            start_ts=payload.start_ts,
+            shot=payload.shot,
+        )
+
+        self.publish(
+            TAKE_CHANGED,
+            TakeChangedPayload(
+                take_id=take_id,
+                scene_id=scene_id,
+                take_number=take_number,
+                status="tbd",
+                script_diff=None,
+            ),
+        )
+
+    def _on_take_end(self, payload: object) -> None:
+        """处理 take.end 事件：写 DAL + publish take.changed（同步）+ fire-and-forget L2。
+
+        同步阶段 publish 第一次 take.changed（script_diff=None）。
+        异步阶段 L2 完成后（或失败后）publish 第二次。
+        """
+        assert isinstance(payload, TakeEndPayload)
+
+        take_id = self.session.take_id
+        if take_id is None:
+            logger.warning("take.end: session.take_id is None, skipping")
+            return
+
+        self.session.take_end()
+        self.dal.end_take(take_id=take_id, end_ts=payload.end_ts, status="tbd")
+
+        # 第一次 publish（同步，script_diff=None）
+        self.publish(
+            TAKE_CHANGED,
+            TakeChangedPayload(
+                take_id=take_id,
+                scene_id=self.session.scene_id or 0,
+                take_number=self.session.take_number,
+                status="tbd",
+                script_diff=None,
+            ),
+        )
+
+        # P1 #1：deps 检查在 get_running_loop 之前——无 LLM 依赖时降级跳过 L2
+        if self._deps.llm_service is None or self._deps.l2_runner is None:
+            return
+
+        # fire-and-forget L2（需要 event loop）
+        loop = asyncio.get_running_loop()  # 无 loop 时抛 RuntimeError，不降级
+
+        # P2 #1：闭包绑定 scene_id/take_number，避免 session 被后续 take 覆盖
+        # session 在此处仍是当前 take 的值（同步执行，take.start 尚未触发）
+        scene_id = self.session.scene_id or 0
+        take_number = self.session.take_number
+
+        self._l2_task = loop.create_task(self._run_l2_async(take_id, scene_id, take_number))
+        self._l2_task.add_done_callback(
+            lambda t: self._l2_done_callback(t, take_id=take_id, scene_id=scene_id, take_number=take_number)
+        )
+
+    @staticmethod
+    def _truncate_script_lines(lines: list[dict], max_chars: int = 1000) -> list[dict]:
+        """截断 script_lines 使总字符数不超过 max_chars。
+
+        保留前 N 行（剧本按行号顺序，靠前的行优先）。
+        """
+        result: list[dict] = []
+        accumulated = 0
+        for item in lines:
+            text_len = len(item.get("text", ""))
+            if accumulated + text_len > max_chars:
+                break
+            result.append(item)
+            accumulated += text_len
+        return result
+
+    @staticmethod
+    def _assemble_previous_notes(
+        takes: list[Any],
+        current_take_id: int,
+        max_count: int = 5,
+        max_total_chars: int = 800,
+    ) -> list[str]:
+        """从历史 take 提取 script_diff_summary，限制最近 max_count 条且总字符 ≤ max_total_chars。
+
+        takes 假设按 take_number ASC 排序，取最后 max_count 条历史 take（排除当前 take）。
+        """
+        # 排除当前 take，取最近 max_count 条（ASC 顺序下取尾部）
+        history = [t for t in takes if t.take_id != current_take_id]
+        recent = history[-max_count:]
+
+        notes: list[str] = []
+        total_chars = 0
+        for t in recent:
+            if not (t.script_diff and isinstance(t.script_diff, dict)):
+                continue
+            summary = t.script_diff.get("script_diff_summary")
+            if not summary:
+                continue
+            summary_str = str(summary)
+            if total_chars + len(summary_str) > max_total_chars:
+                break
+            notes.append(summary_str)
+            total_chars += len(summary_str)
+        return notes
+
+    async def _run_l2_async(self, take_id: int, scene_id: int, take_number: int) -> None:
+        """后台异步 L2 Pipeline：组装 L2Input → 调 l2_runner → 写库 → publish take.changed。
+
+        scene_id / take_number 由 caller 闭包传入（P2 #1 race condition 防护）。
+        L2ParseError / asyncio.TimeoutError 等异常不在此捕获，传到 task.exception() 由 callback 处理。
+        """
+        from backend.pipelines.l2_take import L2Input
+
+        # 收集 ch1 转录记录
+        segments = self.dal.list_segments(take_id, ch=1)
+        transcript_segments = [
+            {
+                "speaker": s.speaker,
+                "text": s.text,
+                "start_frame": s.start_frame,
+                "end_frame": s.end_frame,
+            }
+            for s in segments
+        ]
+
+        # 收集剧本行（P2 #2：截断到 1000 字符）
+        script_lines: list[dict] = []
+        script_info = self.dal.get_latest_script(scene_id)
+        if script_info is not None:
+            raw_lines = self.dal.list_script_lines(script_info["script_id"])
+            script_lines = self._truncate_script_lines(raw_lines)
+
+        # 从历史 take 提取 previous_notes（P2 #3：限 5 条 / 800 字符）
+        history = self.dal.list_takes(scene_id)
+        previous_notes = self._assemble_previous_notes(history, current_take_id=take_id)
+
+        input_data = L2Input(
+            take_id=take_id,
+            scene_id=scene_id,
+            take_number=take_number,
+            transcript_segments=transcript_segments,
+            script_lines=script_lines,
+            previous_notes=previous_notes,
+        )
+
+        l2_output = await self._deps.l2_runner(input_data, self._deps.llm_service)
+
+        # 写库：script_diff
+        script_diff_dict = {
+            "script_diff_summary": l2_output.script_diff_summary,
+            "line_matches": [
+                {"line_no": m.line_no, "diff_type": m.diff_type, "detail": m.detail}
+                for m in l2_output.line_matches
+            ],
+        }
+        self.dal.update_take_l2_output(take_id, script_diff_dict)
+
+        # 写库：take_line_matches（需要 line_no → line_id 映射）
+        line_no_to_id: dict[int, int] = {
+            ln["line_no"]: ln["line_id"] for ln in script_lines
+        }
+        matches_for_dal: list[dict] = []
+        for m in l2_output.line_matches:
+            if m.line_no == -1:
+                continue  # insertion，跳过（DAL 会再过滤，双重保险）
+            line_id = line_no_to_id.get(m.line_no)
+            if line_id is None:
+                logger.warning(
+                    "_run_l2_async: line_no=%d not found in script_lines, skipping",
+                    m.line_no,
+                )
+                continue
+            matches_for_dal.append(
+                {"line_no": m.line_no, "line_id": line_id, "diff_type": m.diff_type, "detail": m.detail}
+            )
+        if matches_for_dal:
+            self.dal.insert_take_line_matches(take_id, matches_for_dal)
+
+        # 第二次 publish（含 script_diff）；用闭包参数保持与 L2Input 一致
+        self.publish(
+            TAKE_CHANGED,
+            TakeChangedPayload(
+                take_id=take_id,
+                scene_id=scene_id,
+                take_number=take_number,
+                status="tbd",
+                script_diff=script_diff_dict,
+            ),
+        )
+
+    def _l2_done_callback(
+        self, task: Any, *, take_id: int, scene_id: int, take_number: int
+    ) -> None:
+        """L2 task done callback：仅在异常时 log + publish 降级 take.changed。
+
+        成功路径：_run_l2_async 已 publish 第二次 take.changed，callback 无需操作。
+        失败路径：记 WARNING + publish 降级 take.changed（script_diff=None）。
+
+        take_id / scene_id / take_number 由 add_done_callback lambda 闭包绑定，
+        避免 session 被后续 take.start 覆盖（race condition 防护）。
+        """
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return  # 成功路径，_run_l2_async 已处理
+        logger.warning("L2 pipeline failed for task, publishing degraded take.changed: %r", exc)
+        self.publish(
+            TAKE_CHANGED,
+            TakeChangedPayload(
+                take_id=take_id,
+                scene_id=scene_id,
+                take_number=take_number,
+                status="tbd",
+                script_diff=None,
+            ),
+        )
+
+
+def create_orchestrator(
+    dal: DAL,
+    session: SessionState | None = None,
+    *,
+    llm_service: Any = None,
+    l2_runner: Any = None,
+) -> Orchestrator:
+    """模块级工厂函数，供生产代码与测试注入依赖。
+
+    老签名 Orchestrator(dal, session) 零改动，此函数提供更明确的依赖注入入口。
+    llm_service 不为 None 且 l2_runner 未显式传时，自动绑定 run_l2_take（spec §3.1）。
+    """
+    if llm_service is not None and l2_runner is None:
+        from backend.pipelines.l2_take import run_l2_take
+        l2_runner = run_l2_take
+    return Orchestrator(dal, session, llm_service=llm_service, l2_runner=l2_runner)
