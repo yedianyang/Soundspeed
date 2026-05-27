@@ -1,4 +1,3 @@
-import { useEffect, useRef, useState } from "react"
 import {
   Mic,
   Plus,
@@ -6,6 +5,7 @@ import {
   ChevronDown,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,73 +14,34 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { STATUS_DOT, STATUS_LABEL } from "@/lib/constants"
 import { cn } from "@/lib/utils"
+import type { Status } from "@/types/take"
+import { formatElapsed } from "@/data/mock"
 
-type Status = "keeper" | "ng" | "hold" | "recording"
-
-const STATUS_DOT: Record<Status, string> = {
-  keeper: "bg-emerald-500",
-  ng: "bg-destructive",
-  hold: "bg-primary",
-  recording: "bg-red-500 animate-pulse",
+interface BottomControlBarProps {
+  isRecording: boolean
+  onToggleRecording: () => void
+  mark: Status
+  onCycleMark: () => void
+  elapsed: number
 }
 
-const STATUS_LABEL: Record<Status, string> = {
-  keeper: "KEEP",
-  ng: "NG",
-  hold: "PASS",
-  recording: "REC",
-}
-
-const MARK_ORDER: Status[] = ["ng", "keeper", "hold"]
-
-function formatElapsed(seconds: number) {
-  const m = Math.floor(seconds / 60)
-  const s = seconds % 60
-  return `${m}:${s.toString().padStart(2, "0")}`
-}
-
-export default function BottomControlBar() {
-  const [isRecording, setIsRecording] = useState(false)
-  const [mark, setMark] = useState<Status>("ng")
-  const [elapsed, setElapsed] = useState(0)
-  const startRef = useRef<number | null>(null)
-
-  useEffect(() => {
-    if (!isRecording) {
-      startRef.current = null
-      return
-    }
-    startRef.current = Date.now() - elapsed * 1000
-    const id = setInterval(() => {
-      if (startRef.current != null) {
-        setElapsed(Math.floor((Date.now() - startRef.current) / 1000))
-      }
-    }, 250)
-    return () => clearInterval(id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isRecording])
-
-  const currentMark = mark
-  const nextMark = MARK_ORDER[(MARK_ORDER.indexOf(currentMark) + 1) % MARK_ORDER.length]
-
-  const handleToggleRecording = () => {
-    if (isRecording) {
-      setIsRecording(false)
-    } else {
-      setElapsed(0)
-      setIsRecording(true)
-    }
-  }
-
+export default function BottomControlBar({
+  isRecording,
+  onToggleRecording,
+  mark,
+  onCycleMark,
+  elapsed,
+}: BottomControlBarProps) {
   return (
     <div className="flex-shrink-0 border-t bg-background">
       {/* Memo input */}
       <div className="px-3 sm:px-5 pt-2 pb-1.5">
         <div className="flex items-center gap-2 h-11 px-4 rounded-4xl bg-muted/60 focus-within:bg-muted transition-colors">
-          <input
+          <Input
             placeholder="Typing memo · 例：第三条结尾好，可以用"
-            className="flex-1 bg-transparent text-sm focus:outline-none placeholder:text-muted-foreground/70"
+            className="flex-1 bg-transparent border-0 ring-0 rounded-none text-sm focus:outline-none placeholder:text-muted-foreground/70 focus-visible:ring-0"
           />
           <Button
             variant="ghost"
@@ -100,48 +61,54 @@ export default function BottomControlBar() {
           <div className="flex items-center gap-1.5 sm:gap-2">
             <SceneShotTakeButton label="Scene" value="3" />
             <SceneShotTakeButton label="Shot" value="2" />
-            <SceneShotTakeButton label="Take" value="5" highlight />
-            <button
-              type="button"
-              onClick={() => setMark(nextMark)}
-              className="flex-1 sm:flex-none min-w-0 inline-flex items-center justify-center gap-1 sm:gap-1.5 h-9 px-2.5 sm:px-3 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform"
+            <SceneShotTakeButton label="Take" value="6" highlight />
+            <Button
+              variant="ghost"
+              size="default"
+              onClick={onCycleMark}
+              className="flex-1 sm:flex-none min-w-0 gap-1 sm:gap-1.5 h-9 px-2.5 sm:px-3 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform"
             >
-              <span className={cn("size-1.5 rounded-full", STATUS_DOT[currentMark] || "bg-muted-foreground")} />
-              <span className="text-sm font-medium text-foreground">{STATUS_LABEL[currentMark]}</span>
-            </button>
+              <span className={cn("size-1.5 rounded-full", STATUS_DOT[mark] || "bg-muted-foreground")} />
+              <span className="text-sm font-medium text-foreground">{STATUS_LABEL[mark]}</span>
+            </Button>
           </div>
 
           {/* Row 2: Next take + Delete */}
           <div className="flex items-center gap-3">
-            <button className="inline-flex items-center gap-1.5 h-10 px-5 rounded-full bg-muted/60 active:bg-muted/80 active:scale-95 transition-all text-foreground text-sm font-medium">
+            <Button
+              variant="ghost"
+              className="gap-1.5 h-10 px-5 rounded-full bg-muted/60 hover:bg-muted/80 active:bg-muted/80 active:scale-95 transition-all text-foreground text-sm font-medium"
+            >
               <Plus className="size-4" />
               Next take
-            </button>
-            <button
-              className="inline-flex items-center justify-center h-10 w-10 text-destructive active:scale-95 transition-transform"
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-10 w-10 text-destructive hover:text-destructive active:scale-95 transition-transform"
               title="Delete last"
             >
               <Trash2 className="size-5" />
-            </button>
+            </Button>
           </div>
         </div>
 
         {/* REC button */}
-        <button
-          type="button"
-          onClick={handleToggleRecording}
+        <Button
+          variant="ghost"
+          onClick={onToggleRecording}
           className={cn(
-            "absolute right-3 sm:right-5 bottom-2 size-20 rounded-full flex items-center justify-center text-white shadow-lg transition-all active:scale-95",
+            "absolute right-3 sm:right-5 bottom-2 size-20 rounded-full text-white shadow-lg transition-all active:scale-95 border-0",
             isRecording
-              ? "bg-red-600 ring-4 ring-red-500/20"
-              : "bg-red-500 ring-2 ring-red-500/10"
+              ? "bg-red-600 hover:bg-red-600 ring-4 ring-red-500/20"
+              : "bg-red-500 hover:bg-red-500 ring-2 ring-red-500/10"
           )}
           title={isRecording ? "停止录制" : "开始录制"}
         >
           <span className="text-xs font-mono tracking-wider font-semibold">
             {isRecording ? formatElapsed(elapsed) : "REC"}
           </span>
-        </button>
+        </Button>
       </div>
 
       {/* Log */}
@@ -172,10 +139,11 @@ function SceneShotTakeButton({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="default"
           className={cn(
-            "flex-1 sm:flex-none min-w-0 inline-flex items-center justify-center gap-1 h-9 px-2 sm:px-2.5 rounded-full text-xs border border-border/60 active:scale-95 transition-transform",
+            "flex-1 sm:flex-none min-w-0 gap-1 h-9 px-2 sm:px-2.5 rounded-full text-xs border border-border/60 active:scale-95 transition-transform",
             highlight ? "bg-background shadow-sm" : "bg-muted/60"
           )}
         >
@@ -184,7 +152,7 @@ function SceneShotTakeButton({
           </span>
           <span className="font-semibold text-sm text-foreground">{value}</span>
           <ChevronDown className="size-2.5 sm:size-3 text-muted-foreground" />
-        </button>
+        </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-44">
         <DropdownMenuLabel>{label}</DropdownMenuLabel>
