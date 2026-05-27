@@ -182,12 +182,12 @@ async def test_priority_order():
 
     await asyncio.gather(t_p3, t_p1, t_p2)
 
-    # P3 执行时 P1/P2 应已入队，所以 worker 下一次取的是 P1，再 P2，最后 P3 只剩自己
-    # 实际完成顺序：P3 先完成（worker 当前正在执行）→ P1 → P2
-    # 因此 order[0]=3, order[1]=1, order[2]=2
-    # 关键断言：P1 在 P2 之前，P2 在 P3 之前（此时 P3 已是第一个完成的）
+    # P3 是 worker 第一个取到并执行的，所以第一个完成。
+    # 等 P3 执行期间 P1/P2 已入队，worker 下一次取优先级最高的 P1，再取 P2。
+    # 期望完成顺序：P3(第一个) → P1 → P2
+    # 关键断言：P3 第一个完成，且 P1 在 P2 之前完成（验证优先级排队生效）
+    assert order[0] == 3, f"P3 应第一个完成（它先被 worker 取到）: {order}"
     assert order.index(1) < order.index(2), f"P1 应在 P2 之前: {order}"
-    assert order.index(2) < order.index(3), f"P2 应在 P3 之前: {order}"
 
     _reset_service()
 

@@ -9,7 +9,20 @@ StubClient：确定性 stub（测试用）。
 
 from __future__ import annotations
 
+import os
+import time
 from typing import Protocol, runtime_checkable
+
+# 默认模型路径，由环境变量覆盖
+_DEFAULT_MODEL_PATH = "models/gemma-4-E4B-it-Q4_K_M.gguf"
+
+# llama-cpp-python 加载参数（来自 0.C spike 选型，llm-backend-selection v0.3 §11.3）
+_LLAMA_DEFAULTS: dict[str, object] = {
+    "n_ctx": 4096,
+    "n_gpu_layers": -1,  # 全卸载到 Metal（macOS）
+    "seed": 42,
+    "verbose": False,
+}
 
 
 @runtime_checkable
@@ -35,17 +48,25 @@ class GemmaClient:
       n_ctx=4096, n_gpu_layers=-1（全 Metal 卸载）, seed=42, verbose=False。
     model_path 从环境变量 GEMMA_MODEL_PATH 读取，
     默认 models/gemma-4-E4B-it-Q4_K_M.gguf。
+
+    不暴露内部 Llama 对象，调用方只能通过 create_chat_completion 接口，
+    保证后续替换为 Ollama / vLLM 时只改 client.py。
     """
 
-    def __init__(self, model_path: str, **llama_kwargs: object) -> None:
-        raise NotImplementedError
+    def __init__(self, model_path: str | None = None, **llama_kwargs: object) -> None:
+        from llama_cpp import Llama  # type: ignore[import]
+
+        resolved_path = model_path or os.environ.get("GEMMA_MODEL_PATH", _DEFAULT_MODEL_PATH)
+        params = {**_LLAMA_DEFAULTS, **llama_kwargs}
+        self._llm = Llama(model_path=resolved_path, **params)  # type: ignore[arg-type]
 
     def create_chat_completion(
         self,
         messages: list[dict],
         **kwargs: object,
     ) -> dict:
-        raise NotImplementedError
+        result: dict = self._llm.create_chat_completion(messages=messages, **kwargs)  # type: ignore[arg-type]
+        return result
 
 
 class StubClient:
@@ -56,11 +77,14 @@ class StubClient:
     """
 
     def __init__(self, response: str = "stub response", delay: float = 0.0) -> None:
-        raise NotImplementedError
+        self._response = response
+        self._delay = delay
 
     def create_chat_completion(
         self,
         messages: list[dict],
         **kwargs: object,
     ) -> dict:
-        raise NotImplementedError
+        if self._delay:
+            time.sleep(self._delay)
+        return {"choices": [{"message": {"content": self._response}}]}

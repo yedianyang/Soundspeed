@@ -1,6 +1,9 @@
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
 pythonpath = ["."]
+markers = [
+    "smoke: 需要真实模型文件，默认 skip（用 --smoke flag 激活）",
+]
 
 [tool.ruff]
 line-length = 100
