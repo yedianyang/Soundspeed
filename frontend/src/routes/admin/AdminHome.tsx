@@ -1,5 +1,6 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState, type ReactNode, type TouchEvent } from "react"
 import {
+  ChevronDown,
   Eye,
   Folder,
   Settings,
@@ -128,10 +129,42 @@ const STATUS_LABEL: Record<Status, string> = {
   recording: "REC",
 }
 
+const MOBILE_TABS = ["live", "script", "history", "llm"] as const
+
 export default function AdminHome() {
   const [mobileTab, setMobileTab] = useState("live")
   const [sideTab, setSideTab] = useState("script")
   const [llmIndex, setLlmIndex] = useState(0)
+  const goMobileTab = (next: string) => {
+    setMobileTab(next)
+  }
+
+  // ---- mobile swipe ----
+  const touchStart = useRef<{ x: number; y: number } | null>(null)
+  const handleTouchStart = (e: TouchEvent<HTMLDivElement>) => {
+    const t = e.touches[0]
+    touchStart.current = { x: t.clientX, y: t.clientY }
+  }
+  const handleTouchEnd = (e: TouchEvent<HTMLDivElement>) => {
+    if (!touchStart.current) return
+    const start = touchStart.current
+    touchStart.current = null
+    const t = e.changedTouches[0]
+    const dx = start.x - t.clientX
+    const dy = start.y - t.clientY
+    const minSwipe = 56 // px
+    // 只处理水平滑动，且水平位移大于垂直位移（避免与垂直滚动冲突）
+    if (Math.abs(dx) < minSwipe || Math.abs(dy) > Math.abs(dx)) return
+
+    const idx = MOBILE_TABS.indexOf(mobileTab as typeof MOBILE_TABS[number])
+    if (dx > 0 && idx < MOBILE_TABS.length - 1) {
+      setMobileTab(MOBILE_TABS[idx + 1])
+    } else if (dx < 0 && idx > 0) {
+      setMobileTab(MOBILE_TABS[idx - 1])
+    }
+  }
+
+  const mobileIdx = MOBILE_TABS.indexOf(mobileTab as typeof MOBILE_TABS[number])
 
   return (
     <div className="h-dvh w-screen flex flex-col bg-muted/50 text-foreground overflow-hidden">
@@ -176,18 +209,35 @@ export default function AdminHome() {
       <main className="flex-1 min-h-0 p-2 sm:p-3 flex flex-col md:flex-row gap-2 sm:gap-3">
         {/* ---- Mobile：单 Card 内 Tabs 切换 ---- */}
         <Card size="sm" className="md:hidden flex-1 min-h-0 p-0 gap-0 overflow-hidden">
-          <Tabs value={mobileTab} onValueChange={setMobileTab} className="flex-1 min-h-0 flex flex-col p-3 pb-0 gap-3">
+          <Tabs value={mobileTab} onValueChange={goMobileTab} className="flex-1 min-h-0 flex flex-col p-3 pb-0 gap-3">
             <TabsList className="w-full flex-shrink-0">
               <TabsTrigger value="live">Live</TabsTrigger>
               <TabsTrigger value="script">剧本</TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
               <TabsTrigger value="llm">LLM 反馈</TabsTrigger>
             </TabsList>
-            <div className="flex-1 min-h-0 overflow-y-auto -mx-3 px-3 pb-3">
-              {mobileTab === "live" && <LiveTranscript />}
-              {mobileTab === "script" && <ScriptPanel />}
-              {mobileTab === "history" && <HistoryTakes />}
-              {mobileTab === "llm" && <LLMFeedback />}
+            <div
+              className="flex-1 min-h-0 overflow-hidden touch-pan-y"
+              onTouchStart={handleTouchStart}
+              onTouchEnd={handleTouchEnd}
+            >
+              <div
+                className="flex h-full transition-transform duration-300 ease-out will-change-transform"
+                style={{ transform: `translateX(-${mobileIdx * 100}%)` }}
+              >
+                <div className="w-full h-full flex-shrink-0 overflow-y-auto px-3 pb-3">
+                  <LiveTranscript />
+                </div>
+                <div className="w-full h-full flex-shrink-0 overflow-y-auto px-3 pb-3">
+                  <ScriptPanel />
+                </div>
+                <div className="w-full h-full flex-shrink-0 overflow-y-auto px-3 pb-3">
+                  <HistoryTakes />
+                </div>
+                <div className="w-full h-full flex-shrink-0 overflow-y-auto px-3 pb-3">
+                  <LLMFeedback />
+                </div>
+              </div>
             </div>
           </Tabs>
         </Card>
@@ -442,9 +492,6 @@ function TakeBlock({
 function ScriptPanel() {
   return (
     <div className="py-4 space-y-3">
-      <h3 className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground px-1">
-        剧本内容
-      </h3>
       <div className="rounded-3xl bg-muted/50 p-4 space-y-4">
         <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
           <span className="px-2 py-0.5 rounded-full bg-background">SCENE 3</span>
@@ -482,9 +529,6 @@ function ScriptPanel() {
 function LLMFeedback() {
   return (
     <div className="py-4 space-y-3">
-      <h3 className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground px-1">
-        本场 LLM 反馈
-      </h3>
       {LLM_FEEDBACK.map((item, i) => (
         <div key={i} className="rounded-3xl bg-muted/50 p-4 space-y-2">
           <Badge variant="secondary" className="font-mono uppercase">
@@ -497,6 +541,66 @@ function LLMFeedback() {
         每次 take 结束后由 L2 / NP / SP Pipeline 推送
       </p>
     </div>
+  )
+}
+
+function LongPressDropdown({
+  trigger,
+  children,
+}: {
+  trigger: ReactNode
+  children: ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  const timerRef = useRef<NodeJS.Timeout | null>(null)
+  const [pressing, setPressing] = useState(false)
+
+  const startPress = () => {
+    setPressing(true)
+    timerRef.current = setTimeout(() => {
+      setPressing(false)
+      setOpen(true)
+    }, 1000)
+  }
+
+  const endPress = () => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+    setPressing(false)
+  }
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          onPointerDown={(e) => {
+            e.preventDefault()
+            startPress()
+          }}
+          onPointerUp={endPress}
+          onPointerLeave={endPress}
+          className="relative overflow-hidden inline-flex items-center justify-center gap-0.5 h-7 px-1.5 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform select-none"
+        >
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div
+              className="rounded-full bg-primary/15 transition-transform duration-1000 ease-linear"
+              style={{
+                width: '200%',
+                height: '200%',
+                transform: pressing ? 'scale(1)' : 'scale(0)',
+                transformOrigin: 'center',
+              }}
+            />
+          </div>
+          <span className="relative z-10 font-mono text-[10px]">{trigger}</span>
+          <ChevronDown className="relative z-10 size-3 text-muted-foreground" />
+        </button>
+      </DropdownMenuTrigger>
+      {children}
+    </DropdownMenu>
   )
 }
 
@@ -545,22 +649,14 @@ function HistoryTakes() {
 
   return (
     <div className="py-4 space-y-2.5">
-      <h3 className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground px-1 mb-1">
-        History
-      </h3>
       {HISTORY_TAKES.map((take) => (
         <div
           key={take.id}
           className="w-full text-left rounded-3xl bg-muted/50 hover:bg-muted p-4 transition-colors space-y-2"
         >
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Badge variant="secondary" className="cursor-pointer font-mono text-[10px]">
-                    Scene {getScene(take)}
-                  </Badge>
-                </DropdownMenuTrigger>
+            <div className="flex items-center gap-1 flex-wrap">
+              <LongPressDropdown trigger={<>Scene {getScene(take)}</>}>
                 <DropdownMenuContent align="start">
                   <DropdownMenuLabel>修改 Scene</DropdownMenuLabel>
                   {[1, 2, 3, 4].map((n) => (
@@ -573,14 +669,9 @@ function HistoryTakes() {
                     </DropdownMenuItem>
                   ))}
                 </DropdownMenuContent>
-              </DropdownMenu>
+              </LongPressDropdown>
 
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Badge variant="secondary" className="cursor-pointer font-mono text-[10px]">
-                    Shot {getShot(take)}
-                  </Badge>
-                </DropdownMenuTrigger>
+              <LongPressDropdown trigger={<>Shot {getShot(take)}</>}>
                 <DropdownMenuContent align="start">
                   <DropdownMenuLabel>修改 Shot</DropdownMenuLabel>
                   {[1, 2, 3, 4].map((n) => (
@@ -593,14 +684,9 @@ function HistoryTakes() {
                     </DropdownMenuItem>
                   ))}
                 </DropdownMenuContent>
-              </DropdownMenu>
+              </LongPressDropdown>
 
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Badge variant="secondary" className="cursor-pointer font-mono text-[10px]">
-                    Take {getNo(take)}
-                  </Badge>
-                </DropdownMenuTrigger>
+              <LongPressDropdown trigger={<>Take {getNo(take)}</>}>
                 <DropdownMenuContent align="start">
                   <DropdownMenuLabel>修改 Take</DropdownMenuLabel>
                   {[1, 2, 3, 4, 5].map((n) => (
@@ -613,7 +699,7 @@ function HistoryTakes() {
                     </DropdownMenuItem>
                   ))}
                 </DropdownMenuContent>
-              </DropdownMenu>
+              </LongPressDropdown>
 
               <StatusBadge
                 status={getStatus(take)}
