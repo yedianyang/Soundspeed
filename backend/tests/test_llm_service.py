@@ -15,6 +15,22 @@ from backend.llm.service import LLMService, _reset_service, get_service
 
 
 # ---------------------------------------------------------------------------
+# 辅助：可捕获 gen_kwargs 的 stub client（两个测试共用）
+# ---------------------------------------------------------------------------
+
+
+class _CapturingClient:
+    """记录每次 create_chat_completion 调用的 kwargs，供测试断言使用。"""
+
+    def __init__(self) -> None:
+        self.captured_kwargs: dict = {}
+
+    def create_chat_completion(self, messages: list[dict], **kwargs: object) -> dict:
+        self.captured_kwargs.update(kwargs)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
@@ -338,14 +354,8 @@ async def test_task_config_applied():
     _reset_service()
     svc = get_service()
 
-    captured_kwargs: dict = {}
-
-    class CapturingClient:
-        def create_chat_completion(self, messages: list[dict], **kwargs: object) -> dict:
-            captured_kwargs.update(kwargs)
-            return {"choices": [{"message": {"content": "ok"}}]}
-
-    svc._client = CapturingClient()  # type: ignore[assignment]
+    client = _CapturingClient()
+    svc._client = client  # type: ignore[assignment]
 
     await svc.infer(
         messages=[{"role": "user", "content": "hi"}],
@@ -353,8 +363,8 @@ async def test_task_config_applied():
     )
 
     cfg = TASK_CONFIG["query_session"]
-    assert captured_kwargs.get("max_tokens") == cfg["max_tokens"]
-    assert captured_kwargs.get("temperature") == cfg["temperature"]
+    assert client.captured_kwargs.get("max_tokens") == cfg["max_tokens"]
+    assert client.captured_kwargs.get("temperature") == cfg["temperature"]
 
     _reset_service()
 
@@ -370,23 +380,17 @@ async def test_system_prompt_not_in_gen_kwargs():
     _reset_service()
     svc = get_service()
 
-    captured_kwargs: dict = {}
-
-    class CapturingClient:
-        def create_chat_completion(self, messages: list[dict], **kwargs: object) -> dict:
-            captured_kwargs.update(kwargs)
-            return {"choices": [{"message": {"content": "ok"}}]}
-
-    svc._client = CapturingClient()  # type: ignore[assignment]
+    client = _CapturingClient()
+    svc._client = client  # type: ignore[assignment]
 
     await svc.infer(
         messages=[{"role": "user", "content": "hi"}],
         task_type="query_session",
     )
 
-    assert "system" not in captured_kwargs, "system 不应出现在 gen_kwargs"
-    assert "priority" not in captured_kwargs, "priority 不应出现在 gen_kwargs"
-    assert "_reserved" not in captured_kwargs, "_reserved 不应出现在 gen_kwargs"
+    assert "system" not in client.captured_kwargs, "system 不应出现在 gen_kwargs"
+    assert "priority" not in client.captured_kwargs, "priority 不应出现在 gen_kwargs"
+    assert "_reserved" not in client.captured_kwargs, "_reserved 不应出现在 gen_kwargs"
 
     _reset_service()
 
@@ -428,6 +432,119 @@ async def test_event_loop_not_blocked():
     # 探针 0.05s + 最大 10ms 容差 = 0.06s，远小于 infer 的 0.2s
     assert probe_elapsed < 0.2 - 0.05, (
         f"事件循环可能被阻塞，探针耗时 {probe_elapsed:.3f}s 过长"
+    )
+
+    _reset_service()
+
+
+# ---------------------------------------------------------------------------
+# 新增用例：test_timeout_cancels_queued_work（P2 shield 修复验证）
+# 超时后 fut 被 cancel，worker 取出时跳过，不调用 client
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_timeout_cancels_queued_work():
+    """timeout 超时后，排队中的第二个任务 fut 被 cancel，worker 不执行它（call_count == 1）。
+
+    场景：StubClient delay=0.5s，并发提交两个 infer：
+      - task1：正常等待（无 timeout），worker 先取走执行
+      - task2：timeout=0.1s，入队后很快超时
+    断言：task2 抛 TimeoutError，StubClient 只被调用 1 次（task1），task2 被跳过。
+    """
+    _reset_service()
+    svc = get_service()
+
+    call_count = 0
+
+    class CountingStubClient:
+        def create_chat_completion(self, messages: list[dict], **kwargs: object) -> dict:
+            nonlocal call_count
+            time.sleep(0.5)
+            call_count += 1
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    svc._client = CountingStubClient()
+
+    async def task1() -> str:
+        return await svc.infer(
+            messages=[{"role": "user", "content": "task1"}],
+            task_type="query_session",
+            timeout=None,
+        )
+
+    async def task2() -> str:
+        return await svc.infer(
+            messages=[{"role": "user", "content": "task2"}],
+            task_type="query_session",
+            timeout=0.1,
+        )
+
+    # 先提交 task1 让 worker 占忙，再提交 task2 入队等待
+    t1 = asyncio.create_task(task1())
+    await asyncio.sleep(0.02)  # 让 task1 先进队被 worker 拿走
+    t2 = asyncio.create_task(task2())
+
+    # task2 应抛 TimeoutError
+    with pytest.raises(asyncio.TimeoutError):
+        await t2
+
+    # 等 task1 完成
+    await t1
+
+    # worker 处理 cancelled fut 时跳过，call_count 应只有 1（task1）
+    # 给 worker 额外一点时间处理 task2 的 cancelled fut（验证跳过不执行 client）
+    await asyncio.sleep(0.05)
+    assert call_count == 1, f"超时任务不应被执行，但 call_count={call_count}"
+
+    _reset_service()
+
+
+# ---------------------------------------------------------------------------
+# 新增用例：test_priority_defaults_from_task_config（默认 priority 修复验证）
+# 不传 priority 时应从 TASK_CONFIG[task_type]["priority"] 取默认值
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_priority_defaults_from_task_config():
+    """query_session（默认 P1）和 script_parse（默认 P3）不传 priority 时按 TASK_CONFIG 排队。
+
+    设计：
+      - 占位任务（P2，delay=0.05s）先入队让 worker 进入忙碌状态
+      - 再提交 script_parse（默认 P3）和 query_session（默认 P1）
+      - worker 完成占位任务后，应优先取 query_session（P1）再取 script_parse（P3）
+
+    完成顺序：占位 → query_session → script_parse
+    """
+    _reset_service()
+    svc = get_service()
+    svc._client = StubClient(response="ok", delay=0.05)
+
+    order: list[str] = []
+
+    async def run(task_type: str, label: str) -> None:
+        await svc.infer(
+            messages=[{"role": "user", "content": label}],
+            task_type=task_type,
+            # 不传 priority，验证默认从 TASK_CONFIG 取
+        )
+        order.append(label)
+
+    # 先提交 l2_take（P2）作占位，让 worker 进入忙碌
+    t_blocker = asyncio.create_task(run("l2_take", "blocker"))
+    await asyncio.sleep(0.01)  # 让 worker 拿走占位任务
+
+    # 再提交 script_parse（默认 P3）和 query_session（默认 P1）
+    t_sp = asyncio.create_task(run("script_parse", "script_parse"))
+    t_qs = asyncio.create_task(run("query_session", "query_session"))
+
+    await asyncio.gather(t_blocker, t_sp, t_qs)
+
+    # 断言：blocker 第一（先被取走），query_session 第二（P1 优先于 P3）
+    assert order[0] == "blocker", f"占位任务应第一个完成: {order}"
+    assert order.index("query_session") < order.index("script_parse"), (
+        f"query_session（P1）应在 script_parse（P3）之前完成: {order}"
     )
 
     _reset_service()

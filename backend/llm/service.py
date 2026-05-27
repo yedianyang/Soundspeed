@@ -66,7 +66,7 @@ class LLMService:
         同时通过 self._worker_task is None 判断的情况。
         """
         if self._worker_task is None:
-            self._worker_task = asyncio.get_event_loop().create_task(self._worker())
+            self._worker_task = asyncio.get_running_loop().create_task(self._worker())
 
     def _ensure_client(self) -> LLMClient:
         """Lazy 初始化 client（首次推理时加载模型）。"""
@@ -80,7 +80,7 @@ class LLMService:
         self,
         messages: list[dict],
         task_type: str,
-        priority: int = 2,
+        priority: int | None = None,
         timeout: float | None = 30.0,
     ) -> str:
         """统一推理入口。
@@ -88,7 +88,8 @@ class LLMService:
         Args:
             messages: 标准 chat 消息列表，每个元素有 "role" 和 "content" 键。
             task_type: TASK_CONFIG 中的合法 key。
-            priority: 1=用户态, 2=普通, 3=批处理。超出范围抛 ValueError。
+            priority: 1=用户态, 2=普通, 3=批处理。None 时从 TASK_CONFIG[task_type]["priority"] 取默认值。
+                      超出范围抛 ValueError。
             timeout: 最大等待时间（含排队 + 推理）秒数，None 表示不超时。
                      传 0 或负数抛 ValueError。
 
@@ -110,6 +111,9 @@ class LLMService:
             raise NotImplementedError(
                 f"task_type={task_type!r} 标记为 _reserved=True，MVP 阶段不可用"
             )
+        # priority 为 None 时从 TASK_CONFIG 取默认值
+        if priority is None:
+            priority = cfg["priority"]
         if priority not in (1, 2, 3):
             raise ValueError(f"priority 必须为 1/2/3，收到: {priority!r}")
         if timeout is not None and timeout <= 0:
@@ -119,7 +123,7 @@ class LLMService:
         gen_kwargs = {k: v for k, v in cfg.items() if k not in _META_KEYS}
 
         # 入队
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         fut: asyncio.Future[str] = loop.create_future()
         payload = _InferPayload(messages=messages, task_type=task_type, gen_kwargs=gen_kwargs)
         counter = next(self._counter)
@@ -128,8 +132,10 @@ class LLMService:
         # 确保 worker 已启动（lazy）
         self._ensure_worker()
 
-        # 等待结果，支持超时
-        return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
+        # 等待结果，支持超时。
+        # 不用 shield：超时后 wait_for 自动 cancel(fut)，
+        # worker 下一轮取出时 fut.cancelled() 为 True，直接跳过，节省推理资源。
+        return await asyncio.wait_for(fut, timeout=timeout)
 
     async def aclose(self) -> None:
         """关闭 worker task，清空队列中未处理的 Future。
@@ -191,17 +197,12 @@ class LLMService:
                 # worker 被取消，清理后退出
                 if not fut.done():
                     fut.set_exception(asyncio.CancelledError())
-                self._queue.task_done()
                 raise
             except Exception as exc:
                 if not fut.done():
                     fut.set_exception(exc)
             finally:
-                # 确保 task_done 被调用（CancelledError 分支已手动调用）
-                try:
-                    self._queue.task_done()
-                except Exception:
-                    pass
+                self._queue.task_done()
 
 
 # 模块级单例
