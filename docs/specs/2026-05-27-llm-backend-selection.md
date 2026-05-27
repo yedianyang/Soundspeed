@@ -2,7 +2,7 @@
 
 版本：v0.3
 日期：2026-05-27
-状态：spike 执行完成，Lead 评审通过待 commit
+状态：spike 执行完成，Lead 评审通过，已合并 main（PR #2）
 
 变更记录：
 - v0.3（2026-05-27）：补 Q4_K_M vs Q6_K 对照 + 16 GB Mac mini 内存预算；锁定量化档为 Q4_K_M。结论见 §11.2。Lead 评审修订：RTF 换算说明（§5）、Windows 措辞（§7）。
@@ -127,7 +127,7 @@ spike 结论同步到：
 - [x] macOS 上跑通 Gemma 4 E4B Q4_K_M 推理，6 个 task_type 各 3 轮
 - [x] 4 项指标全部测出并写入 README
 - [x] asyncio.to_thread 并发测试脚本通过
-- [ ] 选型推荐写回 `docs/specs/2026-05-25-llm-service-design.md` v1.1（属 0.D ticket，本 spike 不直接改）
+- [x] 选型推荐写回 `docs/specs/2026-05-25-llm-service-design.md` v1.1（0.D ticket 已完成，PR #2 合并到 main）
 - [x] Windows 验证留 TODO，理由文档化（§7）
 
 ## 11. 结论
