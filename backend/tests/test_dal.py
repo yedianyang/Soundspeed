@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.db.dal import DAL, ScriptLine, Take, TakeEvent, TranscriptSegment
+from backend.db.dal import DAL
 from backend.db.migrations.runner import apply_migrations
 
 
@@ -98,7 +98,7 @@ def test_active_observers_cleared_on_startup(tmp_path: Path) -> None:
 def test_dal_enables_wal_mode(tmp_path: Path) -> None:
     """DAL 初始化后 journal_mode 为 wal。"""
     db_path = tmp_path / "test.db"
-    dal = DAL(db_path)
+    _dal = DAL(db_path)
     conn = _raw_conn(db_path)
     mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
     conn.close()
@@ -108,7 +108,7 @@ def test_dal_enables_wal_mode(tmp_path: Path) -> None:
 def test_dal_enables_foreign_keys(tmp_path: Path) -> None:
     """DAL 初始化后 foreign_keys 已启用。"""
     db_path = tmp_path / "test.db"
-    dal = DAL(db_path)
+    _dal = DAL(db_path)
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON;")
     # 验证外键约束生效：向 takes 插入不存在的 scene_id
@@ -305,7 +305,7 @@ def test_insert_segment_with_speaker(tmp_path: Path) -> None:
 
 def test_insert_segment_rejects_null_take_id(tmp_path: Path) -> None:
     """传 None 作为 take_id 触发 IntegrityError（NOT NULL 约束）。"""
-    dal = DAL(tmp_path / "test.db")
+    _dal = DAL(tmp_path / "test.db")
     # 用裸连接直接插入 NULL take_id
     conn = sqlite3.connect(str(tmp_path / "test.db"))
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -380,7 +380,7 @@ def test_insert_script_auto_version(tmp_path: Path) -> None:
     """同场次多次插入版本号自动递增。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    scr1 = dal.insert_script(sid, "第一版剧本")
+    _scr1 = dal.insert_script(sid, "第一版剧本")
     scr2 = dal.insert_script(sid, "第二版剧本")
     latest = dal.get_latest_script(sid)
     assert latest is not None
@@ -410,8 +410,22 @@ def test_match_script_line_fts5_basic(tmp_path: Path) -> None:
     assert "fox" in results[0].text.lower()
 
 
+@pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 42, 0),
+    reason=(
+        "unicode61 CJK tokenization requires SQLite >= 3.42; "
+        f"current runtime SQLite is {sqlite3.sqlite_version} (Python-bundled). "
+        "spec §3.2 notes this limitation."
+    ),
+)
 def test_match_script_line_fts5_chinese(tmp_path: Path) -> None:
-    """FTS5 MATCH 中文字符级子串查询（unicode61 tokenizer）。"""
+    """FTS5 MATCH 中文字符级子串查询（unicode61 tokenizer）。
+
+    sqlite3.sqlite_version_info < (3, 42, 0) 时此测试自动跳过：
+    Python 3.11 自带的 SQLite 3.39.4 的 unicode61 不索引 CJK 字符，
+    中文 FTS5 查询在该版本下返回空集。
+    >= 3.42 时 unicode61 对中文按汉字粒度分 token，字面子串查询可用。
+    """
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
     scr_id = dal.insert_script(sid, "中文剧本")
@@ -515,7 +529,7 @@ def test_append_audit_returns_log_id(tmp_path: Path) -> None:
 
 def test_audit_payload_check_constraint(tmp_path: Path) -> None:
     """非法 JSON payload 触发 CHECK 约束异常（json_valid 约束）。"""
-    dal = DAL(tmp_path / "test.db")
+    _dal = DAL(tmp_path / "test.db")
     conn = sqlite3.connect(str(tmp_path / "test.db"))
     conn.execute("PRAGMA foreign_keys = ON;")
     with pytest.raises(sqlite3.IntegrityError):
