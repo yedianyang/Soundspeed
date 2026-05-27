@@ -30,24 +30,28 @@ class SessionState:
         shot: str | None,
     ) -> None:
         """记录 take 开始，更新 take_id / take_number / take_start_ts / shot / take_active。"""
-        raise NotImplementedError("1.E green")
+        self.take_id = take_id
+        self.take_number = take_number
+        self.take_start_ts = start_ts
+        self.shot = shot
+        self.take_active = True
 
     def take_end(self) -> None:
         """记录 take 结束：take_active=False，take_id 保留（1.H 写 takes.end_ts 还要用）。"""
-        raise NotImplementedError("1.E green")
+        self.take_active = False
 
     def activate_scene(self, scene_id: int) -> None:
         """设置当前活跃 scene_id（不写 DAL）。"""
-        raise NotImplementedError("1.E green")
+        self.scene_id = scene_id
 
     def load_script(self) -> None:
         """标记剧本已加载。"""
-        raise NotImplementedError("1.E green")
+        self.script_loaded = True
 
     def register_observer(self, connection_id: str) -> None:
         """注册观察者连接 ID 到 active_connections。"""
-        raise NotImplementedError("1.E green")
+        self.active_connections.add(connection_id)
 
     def unregister_observer(self, connection_id: str) -> None:
         """从 active_connections 中移除观察者连接 ID。"""
-        raise NotImplementedError("1.E green")
+        self.active_connections.discard(connection_id)
