@@ -14,7 +14,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from backend.core.events import ASR_FINAL_CH1, ASR_FINAL_CH2, AsrFinalPayload
+from backend.core.events import (
+    ASR_FINAL_CH1,
+    ASR_FINAL_CH2,
+    TAKE_END,
+    TAKE_START,
+    AsrFinalPayload,
+)
 from backend.core.session import SessionState
 from backend.db.dal import DAL
 
@@ -70,7 +76,7 @@ class Orchestrator:
                 logger.exception("handler error for event %r", event_type)
 
     def _register_builtin_handlers(self) -> None:
-        """注册内置 handler（asr.final.ch1 / asr.final.ch2）。"""
+        """注册内置 handler（asr.final.ch1 / asr.final.ch2 / take.start / take.end）。"""
         self.subscribe(
             ASR_FINAL_CH1,
             lambda p: self._on_asr_final(p, ch=1, force_speaker_none=False),
@@ -79,6 +85,8 @@ class Orchestrator:
             ASR_FINAL_CH2,
             lambda p: self._on_asr_final(p, ch=2, force_speaker_none=True),
         )
+        self.subscribe(TAKE_START, self._on_take_start)
+        self.subscribe(TAKE_END, self._on_take_end)
 
     def _resolve_take_id(self, payload_take_id: int | None, event_label: str) -> int | None:
         """payload.take_id 优先用，None 时回退 session.take_id。
@@ -127,6 +135,22 @@ class Orchestrator:
             start_frame=payload.start_frame,
             end_frame=payload.end_frame,
         )
+
+    def _on_take_start(self, payload: object) -> None:
+        """处理 take.start 事件：写 DAL + 更新 SessionState + publish take.changed。"""
+        raise NotImplementedError
+
+    def _on_take_end(self, payload: object) -> None:
+        """处理 take.end 事件：写 DAL + publish take.changed（同步）+ fire-and-forget L2。"""
+        raise NotImplementedError
+
+    async def _run_l2_async(self, take_id: int) -> None:
+        """后台异步 L2 Pipeline：组装 L2Input → 调 l2_runner → 写库 → publish take.changed。"""
+        raise NotImplementedError
+
+    def _l2_done_callback(self, task: Any) -> None:
+        """L2 task done callback：仅在异常时 log + publish 降级 take.changed。"""
+        raise NotImplementedError
 
 
 def create_orchestrator(

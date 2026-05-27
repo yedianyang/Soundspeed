@@ -537,3 +537,33 @@ class DAL:
                 (actor, action, payload_json),
             )
         return cur.lastrowid  # type: ignore[return-value]
+
+    # ── L2 Pipeline 写入（1.H）──────────────────────────────────────────────────
+
+    def update_take_l2_output(
+        self,
+        take_id: int,
+        script_diff: dict | None,
+    ) -> None:
+        """L2 Pipeline 写入 script_diff 字段。
+
+        dict 走 json.dumps，None 写 NULL。
+        """
+        raise NotImplementedError
+
+    def insert_take_line_matches(
+        self,
+        take_id: int,
+        matches: list[dict],
+    ) -> None:
+        """批量写入 take_line_matches。
+
+        过滤 line_no==-1 的 insertion（按 l2-pipeline §D5 决策）。
+        matches 每项需含：line_no / diff_type / detail（可选）/ segment_id（可选）。
+        line_no 对应 script_lines.line_id 的查询由 caller 在组装时完成。
+        """
+        raise NotImplementedError
+
+    def list_script_lines(self, script_id: int) -> list[dict]:
+        """返回剧本行列表，含 line_no / line_id / character / text，按 line_no ASC。"""
+        raise NotImplementedError
