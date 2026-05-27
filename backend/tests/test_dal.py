@@ -73,8 +73,8 @@ def test_apply_migrations_user_version(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_active_observers_cleared_on_startup(tmp_path: Path) -> None:
-    """apply_migrations 清空 active_observers 表。"""
+def test_apply_migrations_does_not_purge_observers(tmp_path: Path) -> None:
+    """apply_migrations 多次调用不清空 active_observers，已存在的行保留。"""
     db_path = tmp_path / "test.db"
     apply_migrations(db_path)
     # 直接插入一条观察者记录
@@ -84,11 +84,11 @@ def test_active_observers_cleared_on_startup(tmp_path: Path) -> None:
     )
     conn.commit()
     conn.close()
-    # 再次调用 apply_migrations，期望清空
+    # 再次调用 apply_migrations，期望不清空
     apply_migrations(db_path)
     conn = _raw_conn(db_path)
     count = conn.execute("SELECT COUNT(*) FROM active_observers;").fetchone()[0]
-    assert count == 0
+    assert count == 1  # 行仍然存在
     conn.close()
 
 
@@ -232,7 +232,7 @@ def test_update_take_np_output(tmp_path: Path) -> None:
     dal.end_take(tid, 1060.0, "tbd")
     dal.update_take_np_output(
         tid,
-        performer_issues='["line_miss"]',
+        performer_issues=["line_miss"],
         audio_quality="clean",
         status="keeper",
     )
@@ -241,6 +241,44 @@ def test_update_take_np_output(tmp_path: Path) -> None:
     assert take.audio_quality == "clean"
     assert take.status == "keeper"
     assert take.end_ts == pytest.approx(1060.0)  # end_ts 未被覆盖
+
+
+def test_update_take_np_output_serializes_json_list(tmp_path: Path) -> None:
+    """update_take_np_output 接受 list，存库后 get_take 读回仍是 list。"""
+    dal = DAL(tmp_path / "test.db")
+    sid = dal.create_scene("Scene_1")
+    tid = dal.start_take(sid, 1, 1000.0)
+    dal.end_take(tid, 1060.0, "tbd")
+    issues: list = ["line_miss", "overlap"]
+    dal.update_take_np_output(tid, performer_issues=issues, audio_quality=None, status=None)
+    take = dal.get_take(tid)
+    assert take is not None
+    assert take.performer_issues == issues
+
+
+def test_update_take_np_output_serializes_json_dict(tmp_path: Path) -> None:
+    """update_take_np_output 接受 dict，存库后 get_take 读回仍是 dict。"""
+    dal = DAL(tmp_path / "test.db")
+    sid = dal.create_scene("Scene_1")
+    tid = dal.start_take(sid, 1, 1000.0)
+    dal.end_take(tid, 1060.0, "tbd")
+    issues: dict = {"missed": ["line3"], "late_cue": ["line5"]}
+    dal.update_take_np_output(tid, performer_issues=issues, audio_quality=None, status=None)
+    take = dal.get_take(tid)
+    assert take is not None
+    assert take.performer_issues == issues
+
+
+def test_update_take_np_output_none_passes_through(tmp_path: Path) -> None:
+    """update_take_np_output 传 performer_issues=None，get_take 读回也是 None。"""
+    dal = DAL(tmp_path / "test.db")
+    sid = dal.create_scene("Scene_1")
+    tid = dal.start_take(sid, 1, 1000.0)
+    dal.end_take(tid, 1060.0, "tbd")
+    dal.update_take_np_output(tid, performer_issues=None, audio_quality=None, status=None)
+    take = dal.get_take(tid)
+    assert take is not None
+    assert take.performer_issues is None
 
 
 # ── take_events ───────────────────────────────────────────────────────────────
@@ -388,14 +426,14 @@ def test_insert_script_auto_version(tmp_path: Path) -> None:
 
 
 def test_insert_script_line_and_fts_sync(tmp_path: Path) -> None:
-    """插入台词行后 FTS5 可立即 MATCH 到。"""
+    """插入台词行后 FTS5 可立即 MATCH 到（trigram 最短 3 字符 query）。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
     scr_id = dal.insert_script(sid, "测试剧本")
     dal.insert_script_line(scr_id, 1, "HERO", "To be or not to be")
-    results = dal.match_script_line("be")
+    results = dal.match_script_line("not")
     assert len(results) >= 1
-    assert any("be" in r.text.lower() for r in results)
+    assert any("not" in r.text.lower() for r in results)
 
 
 def test_match_script_line_fts5_basic(tmp_path: Path) -> None:
@@ -410,31 +448,26 @@ def test_match_script_line_fts5_basic(tmp_path: Path) -> None:
     assert "fox" in results[0].text.lower()
 
 
-@pytest.mark.skipif(
-    sqlite3.sqlite_version_info < (3, 42, 0),
-    reason=(
-        "unicode61 CJK tokenization requires SQLite >= 3.42; "
-        f"current runtime SQLite is {sqlite3.sqlite_version} (Python-bundled). "
-        "spec §3.2 notes this limitation."
-    ),
-)
 def test_match_script_line_fts5_chinese(tmp_path: Path) -> None:
-    """FTS5 MATCH 中文字符级子串查询（unicode61 tokenizer）。
+    """FTS5 MATCH 中文子串查询（trigram tokenizer，SQLite >= 3.34）。
 
-    sqlite3.sqlite_version_info < (3, 42, 0) 时此测试自动跳过：
-    Python 3.11 自带的 SQLite 3.39.4 的 unicode61 不索引 CJK 字符，
-    中文 FTS5 查询在该版本下返回空集。
-    >= 3.42 时 unicode61 对中文按汉字粒度分 token，字面子串查询可用。
+    trigram tokenizer 将文本按连续 3 个 unicode codepoint 切分，支持 CJK 子串匹配。
+    query 必须 >= 3 个字符才能命中，< 3 个字符的 query 返回空集（trigram 最小粒度限制）。
+    本测试在所有支持 trigram 的平台（SQLite >= 3.34）上直接跑，无需 skipif。
     """
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
     scr_id = dal.insert_script(sid, "中文剧本")
     dal.insert_script_line(scr_id, 1, "演员甲", "我不想走，请别让我走")
     dal.insert_script_line(scr_id, 2, "演员乙", "好的，我理解你的心情")
-    # unicode61 按汉字粒度分 token，搜「不想」匹配含「不想」的行
-    results = dal.match_script_line("不想")
+    # trigram 最小 3 字符：搜「不想走」匹配含「不想走」的行
+    results = dal.match_script_line("不想走")
     assert len(results) >= 1
-    assert any("不想" in r.text for r in results)
+    assert any("不想走" in r.text for r in results)
+    # 搜「我理解」匹配另一行
+    results2 = dal.match_script_line("我理解")
+    assert len(results2) >= 1
+    assert any("我理解" in r.text for r in results2)
 
 
 def test_delete_script_line_fts_removed(tmp_path: Path) -> None:
@@ -511,8 +544,21 @@ def test_remove_observer(tmp_path: Path) -> None:
 
 
 def test_list_observers_empty_initially(tmp_path: Path) -> None:
-    """新 DAL 初始化后 active_observers 为空（apply_migrations 清空）。"""
+    """新 DAL 初始化后 active_observers 为空（全新数据库，尚无记录）。"""
     dal = DAL(tmp_path / "test.db")
+    assert dal.list_observers() == []
+
+
+def test_purge_volatile_tables_clears_observers(tmp_path: Path) -> None:
+    """purge_volatile_tables 显式调用后 active_observers 清空。"""
+    from backend.db.lifecycle import purge_volatile_tables
+
+    db_path = tmp_path / "test.db"
+    dal = DAL(db_path)
+    dal.upsert_observer("conn-1", "director")
+    dal.upsert_observer("conn-2", "sound")
+    assert len(dal.list_observers()) == 2
+    purge_volatile_tables(db_path)
     assert dal.list_observers() == []
 
 

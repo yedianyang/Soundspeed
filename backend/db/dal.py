@@ -28,7 +28,7 @@ class Take:
     start_ts: float
     end_ts: float | None
     status: str  # 'keeper' | 'ng' | 'hold' | 'tbd'
-    performer_issues: dict | None  # NP 解析输出，DAL 负责 json.loads；写入时也传 dict
+    performer_issues: dict | list | None  # NP 解析输出，DAL 负责 json.loads；写入时也传 dict/list
     audio_quality: str | None
     script_diff: dict | None  # L2 输出，DAL 负责 json.loads；写入时也传 dict
     notes: str | None
@@ -236,11 +236,18 @@ class DAL:
     def update_take_np_output(
         self,
         take_id: int,
-        performer_issues: str | None,
+        performer_issues: dict | list | None,
         audio_quality: str | None,
         status: str | None,
     ) -> None:
-        """NP Pipeline 写入结构化字段，不覆盖 end_ts。"""
+        """NP Pipeline 写入结构化字段，不覆盖 end_ts。
+
+        performer_issues 传 dict/list，DAL 内部 json.dumps 后存库；
+        读取时 _row_to_take 会 json.loads 还原。
+        """
+        performer_issues_json = (
+            json.dumps(performer_issues) if performer_issues is not None else None
+        )
         with self._conn:
             self._conn.execute("BEGIN IMMEDIATE;")
             self._conn.execute(
@@ -248,7 +255,7 @@ class DAL:
                 "status = COALESCE(?, status), "
                 "updated_at = CAST(strftime('%s', 'now') AS REAL) "
                 "WHERE take_id = ?;",
-                (performer_issues, audio_quality, status, take_id),
+                (performer_issues_json, audio_quality, status, take_id),
             )
 
     def get_take(self, take_id: int) -> Take | None:

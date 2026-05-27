@@ -40,9 +40,5 @@ def apply_migrations(db_path: Path) -> None:
             sql_file = MIGRATIONS_DIR / MIGRATION_FILES[version]
             sql = sql_file.read_text(encoding="utf-8")
             conn.executescript(sql)  # executescript 自动 commit，且会设置 user_version
-
-        # 服务启动时清空 active_observers（易失数据，不保留跨重启）
-        conn.execute("DELETE FROM active_observers;")
-        conn.commit()
     finally:
         conn.close()

@@ -187,7 +187,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS script_lines_fts
         character UNINDEXED,            -- 不参与检索，只做 retrieve
         content='script_lines',         -- content table 模式，不重复存文本
         content_rowid='line_id',        -- 关联 script_lines 主键
-        tokenize='unicode61 remove_diacritics 2'
+        tokenize='trigram'
     );
 
 -- ── FTS5 同步触发器 ──────────────────────────────────────────────────────────
