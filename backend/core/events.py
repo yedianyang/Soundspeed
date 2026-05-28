@@ -31,7 +31,10 @@ SCRIPT_UPLOAD = "script.upload"
 
 @dataclass(frozen=True)
 class AsrPartialPayload:
-    """asr.partial.ch1 / asr.partial.ch2 的 payload。"""
+    """asr.partial.ch1 / asr.partial.ch2 的 payload。
+
+    start_frame / end_frame 单位为毫秒（秒 × 1000 取整），字段名沿用历史命名。
+    """
 
     text: str
     start_frame: int
@@ -43,7 +46,10 @@ class AsrPartialPayload:
 
 @dataclass(frozen=True)
 class AsrFinalPayload:
-    """asr.final.ch1 / asr.final.ch2 的 payload。"""
+    """asr.final.ch1 / asr.final.ch2 的 payload。
+
+    start_frame / end_frame 单位为毫秒（秒 × 1000 取整），字段名沿用历史命名。
+    """
 
     text: str
     start_frame: int

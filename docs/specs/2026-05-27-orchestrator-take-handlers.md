@@ -1,14 +1,18 @@
 # Spec: Orchestrator take handler + L2 触发（ticket 1.H）
 
-版本：v0.1
-日期：2026-05-27
+版本：v0.2
+日期：2026-05-27（v0.2 更新：2026-05-28）
 状态：Q1–Q6 已 Lead 拍板，可供 backend agent 实施
+
+变更记录：
+- v0.2（2026-05-28 ASR 对接决策落地）：§1 契约依赖表新增 `l2-pipeline v0.2` 行（含 corrected_segments 字段）；§3.3 `update_take_l2_output` docstring 补充 `corrected_segments` 说明；§4 take.end handler 明确允许 `script_lines=[]` 时仍调 L2；组装 `takes.script_diff` JSON 时包含 `corrected_segments`；§10 新增 Q7（无剧本 take.changed payload 的 UI flag 问题）。依赖表中 `l2-pipeline v0.1` 升为 `v0.2`。
+- v0.1：初稿（Q1–Q6 已 Lead 拍板）
 
 对接 ticket：1.H · feat: core — take.end → 触发 L2 → 写 takes 表
 
 依赖 spec（按权威级别）：
 1. `orchestrator-session-state v0.4`（`docs/specs/2026-05-27-orchestrator-session-state.md`）
-2. `l2-pipeline v0.1`（`docs/specs/2026-05-27-l2-pipeline.md`）
+2. `l2-pipeline v0.2`（`docs/specs/2026-05-27-l2-pipeline.md`）
 3. `sqlite-schema v0.3.2`（`docs/specs/2026-05-27-sqlite-schema.md`）
 4. `llm-service v0.1`（`docs/specs/2026-05-27-llm-service.md`）
 5. `development-plan v0.2`（`docs/specs/2026-05-27-development-plan.md`）
@@ -46,7 +50,7 @@
 | 上游 spec | 本 spec 直接复用 | 本 spec 填的空白 |
 |---|---|---|
 | `orchestrator-session-state v0.4` | pub/sub 同步架构；`Handler = Callable[[object], None]`；handler 异常隔离（记日志 + 继续）；1.E 内置 handler 行为；`SessionState.take_start / take_end` 方法签名 | take.start / take.end handler 实现细节；Dependencies 容器结构；异步 L2 触发方案 |
-| `l2-pipeline v0.1` | `L2Input / L2Output / LineMatch` dataclass；`run_l2_take(input_data, llm_service)` 签名；`L2ParseError` 异常；insertion line_no=-1 跳过写 take_line_matches（§4 D5）；previous_notes 来源是 `takes.script_diff["script_diff_summary"]`（§10 Q5）；transcript 2500 字符截断由 pipeline 内部处理（caller 无需预截断） | previous_notes 提取算法（1.H caller 的组装逻辑）；previous_notes 5 条上限 / 800 字符截断（caller 侧处理） |
+| `l2-pipeline v0.2` | `L2Input / L2Output / LineMatch / CorrectedSegment` dataclass；`run_l2_take(input_data, llm_service)` 签名；`L2ParseError` 异常；insertion line_no=-1 跳过写 take_line_matches（§4 D5）；previous_notes 来源是 `takes.script_diff["script_diff_summary"]`（§10 Q5）；transcript 2500 字符截断由 pipeline 内部处理（caller 无需预截断）；`script_lines=[]` 时 L2 仍运行（§5.X）；`corrected_segments` 只含真正修改的 segment | previous_notes 提取算法（1.H caller 的组装逻辑）；previous_notes 5 条上限 / 800 字符截断（caller 侧处理） |
 | `sqlite-schema v0.3.2` | `start_take / end_take / insert_take_line_match / list_take_line_matches` 签名；takes.script_diff 存 JSON dict；`insert_take_line_match(take_id, line_id, diff_type, payload)` | `update_take_l2_output` / `list_script_lines` / `insert_take_line_matches` 三个 DAL 方法在 1.H scope 内新增（见 §3.3） |
 | `llm-service v0.1` | `get_service()` 工厂；`StubClient` 测试 fixture；`_reset_service()` 用法 | 1.H 如何将 LLMService 实例注入 Orchestrator（通过 Dependencies 容器） |
 | `onset-llm-ux v1.2.1` | `take.changed` 事件的前端消费方式；`status='tbd'` 作为 L2 完成前的默认值 | `take.changed` payload 结构（§4.2 / §4.5） |
@@ -167,6 +171,14 @@ def update_take_l2_output(
 
     script_diff 传 dict，DAL 内部 json.dumps 存库；None 时写 SQL NULL。
     对应 SQL：UPDATE takes SET script_diff = ? WHERE take_id = ?
+
+    script_diff JSON 的结构（由 caller 在写库前从 L2Output 组装）：
+    {
+        "script_diff_summary": str | null,
+        "line_matches": [...],
+        "corrected_segments": [{"idx": int, "original": str, "corrected": str}, ...]
+    }
+    corrected_segments 可为空列表（无需修正时）。
     """
 ```
 
@@ -314,11 +326,16 @@ async def _run_l2_background(
         l2_output: L2Output = await self._deps.l2_runner(input_data, self._deps.llm_service)
 
         # 5. 写 takes.script_diff
+        # script_lines=[] 时 l2_output.line_matches=[]、script_diff_summary=None，此为合法分支
         script_diff_dict = {
             "script_diff_summary": l2_output.script_diff_summary,
             "line_matches": [
                 {"line_no": m.line_no, "diff_type": m.diff_type, "detail": m.detail}
                 for m in l2_output.line_matches
+            ],
+            "corrected_segments": [
+                {"idx": cs.idx, "original": cs.original, "corrected": cs.corrected}
+                for cs in l2_output.corrected_segments
             ],
         }
         self._deps.dal.update_take_l2_output(take_id, script_diff=script_diff_dict)
@@ -575,3 +592,5 @@ orchestrator-session-state v0.4 §1.2 明确：「`take.start` / `take.end` hand
 Q1（DAL `update_take_l2_output`）、Q2（handler class 拆分）、Q3（DAL `list_script_lines`）、Q4（TakeChangedPayload 字段）、Q6（asyncio 上下文保证）均已 Lead 拍板，决策内容已合并进正文各对应节。
 
 **Q5（1.G 遗留 bug，已修复）**：`_truncate_segments` 在单 segment text 字符数本身超 2500 时原本可能返回空列表。1.G + 1.H 合并 PR 内已修复：超长单段保留末尾 2500 字符（`text[-2500:]`），commit 3b49cbe。
+
+**Q7（v0.2 新增 · 无剧本 take.changed payload 的 UI flag）**：`script_lines=[]` 时，L2 完成后发布的第二次 `take.changed` payload 的 `script_diff` 中 `line_matches=[]`。前端能否仅凭 `line_matches=[]` 判定「无剧本场景」而非「剧本全行匹配」？建议 v0.1 不在 payload 加额外 flag，前端通过 `line_matches=[]` 且 `script_diff_summary=null` 两个条件联合判定无剧本状态（两个条件同时满足时才视为无剧本，任一非空则视为有剧本 + 无偏差）。如果前端 1.L ticket 实现时发现歧义，再评估是否在 `TakeChangedPayload` 加 `has_script: bool` 字段。

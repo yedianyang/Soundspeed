@@ -139,8 +139,8 @@ CREATE TABLE IF NOT EXISTS transcript_segments (
         CHECK (ch IN (1, 2)),
     speaker         TEXT,                           -- 说话人标签，NULL 表示未知或未分离
     text            TEXT    NOT NULL,               -- 转录文本
-    start_frame     INTEGER NOT NULL,               -- 片段首帧（16kHz 基准采样计数）
-    end_frame       INTEGER NOT NULL,               -- 片段末帧
+    start_frame     INTEGER NOT NULL,               -- 毫秒（秒 × 1000 取整）⚠ 字段名沿用历史命名
+    end_frame       INTEGER NOT NULL,               -- 毫秒（秒 × 1000 取整）⚠ 字段名沿用历史命名
     created_at      REAL    NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS REAL)),
     CHECK (end_frame > start_frame)
 );
