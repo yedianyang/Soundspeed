@@ -49,8 +49,8 @@ class TranscriptSegment:
     ch: int  # 1 或 2
     speaker: str | None
     text: str
-    start_frame: int
-    end_frame: int
+    start_frame: int  # 毫秒（秒 × 1000 取整），字段名沿用历史命名
+    end_frame: int    # 毫秒（秒 × 1000 取整），字段名沿用历史命名
     created_at: float
 
 
@@ -347,7 +347,10 @@ class DAL:
         start_frame: int,
         end_frame: int,
     ) -> int:
-        """写入一条转录片段，返回 segment_id。ch 必须为 1 或 2。"""
+        """写入一条转录片段，返回 segment_id。ch 必须为 1 或 2。
+
+        start_frame / end_frame 单位为毫秒（秒 × 1000 取整），字段名沿用历史命名。
+        """
         with self._write_tx() as conn:
             cur = conn.execute(
                 "INSERT INTO transcript_segments "

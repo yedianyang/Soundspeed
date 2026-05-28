@@ -1,11 +1,12 @@
 # Spec: SQLite 9 表 schema 与 DAL 接口
 
-版本：v0.3.2（spec 内部一致性收敛）
-日期：2026-05-27
+版本：v0.3.3（时间单位语义修订）
+日期：2026-05-27（v0.3.3 更新：2026-05-28）
 状态：定稿，进入开发
 owner：境熙
 
 变更记录：
+- v0.3.3（2026-05-28 ASR 对接决策落地）：`transcript_segments.start_frame / end_frame` 语义从「16 kHz 帧」改为「毫秒（秒 × 1000 取整）」；§1 时间表示约定更新；§2.7 DDL 注释更新；§6 `TranscriptSegment` dataclass 注释更新；不起 migration，字段名保留。后续需要高精度时间对齐时另开 ticket。
 - v0.3.2（2026-05-27 spec 内部一致性收敛）：§6 Take 数据类 performer_issues 类型改 dict | list | None，与同节 update_take_np_output 签名对齐；§5.2 apply_migrations 伪代码移除 DELETE active_observers，补注说明清理由独立 purge_volatile_tables 函数负责。
 - v0.3.1（2026-05-27 quality review 同步）：§6 update_take_np_output 签名 performer_issues 改 dict | list | None；§6 末句接口计数改 23 + 4；§7 两条测试名同步实现 (test_apply_migrations_does_not_purge_observers / test_purge_volatile_tables_clears_observers / test_take_events_payload_json_validation)。
 - v0.3（2026-05-27 codex/lead review 收敛）：FTS5 tokenizer 从 unicode61 改 trigram（unicode61 实测对 CJK phrase query 不命中，spec v0.2 描述错）；§3.2 选型说明 + §8.2 开放问题重写；jieba 升级路径降级为「召回不达标再上」。
@@ -34,7 +35,11 @@ owner：境熙
 
 **业务时间戳**：用 `REAL`（Unix epoch 秒，含小数秒）。理由：`SessionState.take_start_ts` 定义为 `float`，对齐可以直接赋值，无需转换。所有表中 `_ts` 后缀列（`start_ts`、`end_ts`、`created_at` 等）均为 `REAL`。
 
-**音频帧偏移**：用 `INTEGER`（16kHz 采样的帧计数）。理由：帧是离散采样索引，不是连续时间量，整数表示更精确，与 ASR 层 `SpeechSegment.start_frame / end_frame` 直接对应。`transcript_segments.start_frame` 和 `end_frame` 均为 `INTEGER`。
+**音频时间偏移**：用 `INTEGER`（**毫秒**，秒 × 1000 取整）。理由：整数精度足以满足 MVP 时间对齐需求，转换公式简单（`round(sec * 1000)`），与 ASR 离线 JSON 输出（秒）之间的换算无歧义。`transcript_segments.start_frame` 和 `end_frame` 均为 `INTEGER`，字段名沿用历史命名（原定义为 16 kHz 帧，Lead 拍板改为毫秒，不起 migration）。
+
+⚠ 字段名 `start_frame / end_frame` 与实际语义（毫秒）不匹配，是历史遗留。后续若需要高精度时间对齐（16 kHz 帧，精度 62.5 μs），另开 ticket 更改字段名和语义并起 migration。
+
+示例：`21.023 秒 → start_frame = 21023`。
 
 ---
 
@@ -219,8 +224,8 @@ CREATE TABLE IF NOT EXISTS transcript_segments (
         CHECK (ch IN (1, 2)),
     speaker         TEXT,                           -- 说话人标签，NULL 表示未知或未分离
     text            TEXT    NOT NULL,               -- 转录文本
-    start_frame     INTEGER NOT NULL,               -- 片段首帧（16kHz 基准采样计数）
-    end_frame       INTEGER NOT NULL,               -- 片段末帧
+    start_frame     INTEGER NOT NULL,               -- 片段开始时间（毫秒，秒×1000取整）⚠ 字段名沿用历史命名
+    end_frame       INTEGER NOT NULL,               -- 片段结束时间（毫秒，秒×1000取整）⚠ 字段名沿用历史命名
     created_at      REAL    NOT NULL DEFAULT (unixepoch('now', 'subsec')),
     CHECK (end_frame > start_frame)
 );
@@ -504,8 +509,8 @@ class TranscriptSegment:
     ch: int                             # 1 或 2
     speaker: str | None
     text: str
-    start_frame: int
-    end_frame: int
+    start_frame: int                    # 毫秒（秒×1000取整）⚠ 字段名沿用历史命名，实际语义为毫秒
+    end_frame: int                      # 毫秒（秒×1000取整）⚠ 字段名沿用历史命名，实际语义为毫秒
     created_at: float
 
 

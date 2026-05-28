@@ -32,7 +32,7 @@ from backend.core.events import (
 from backend.core.orchestrator import create_orchestrator
 from backend.core.session import SessionState
 from backend.db.dal import DAL
-from backend.pipelines.l2_take import L2Output, LineMatch, run_l2_take
+from backend.pipelines.l2_take import CorrectedSegment, L2Output, LineMatch, run_l2_take
 
 
 # ---------------------------------------------------------------------------
@@ -43,13 +43,20 @@ from backend.pipelines.l2_take import L2Output, LineMatch, run_l2_take
 def _make_stub_l2_runner(
     script_diff_summary: str | None = "台词吻合",
     line_matches: list[LineMatch] | None = None,
+    corrected_segments: list[CorrectedSegment] | None = None,
 ) -> AsyncMock:
     """创建返回固定 L2Output 的 stub l2_runner。"""
     if line_matches is None:
         line_matches = [
             LineMatch(line_no=1, diff_type="match", detail=None),
         ]
-    output = L2Output(script_diff_summary=script_diff_summary, line_matches=line_matches)
+    if corrected_segments is None:
+        corrected_segments = []
+    output = L2Output(
+        script_diff_summary=script_diff_summary,
+        line_matches=line_matches,
+        corrected_segments=corrected_segments,
+    )
     runner = AsyncMock(return_value=output)
     return runner
 
@@ -57,7 +64,9 @@ def _make_stub_l2_runner(
 def _make_stub_llm_service() -> MagicMock:
     """创建 stub LLMService（不实际调用 LLM）。"""
     svc = MagicMock()
-    svc.infer = AsyncMock(return_value='{"script_diff_summary": "ok", "line_matches": []}')
+    svc.infer = AsyncMock(
+        return_value='{"script_diff_summary": "ok", "line_matches": [], "corrected_segments": []}'
+    )
     return svc
 
 
@@ -229,7 +238,7 @@ async def test_take_end_assembles_previous_notes(tmp_dal: DAL) -> None:
 
     async def capturing_runner(input_data, llm_service):  # type: ignore[no-untyped-def]
         captured_inputs.append(input_data)
-        return L2Output(script_diff_summary=None, line_matches=[])
+        return L2Output(script_diff_summary=None, line_matches=[], corrected_segments=[])
 
     stub_svc = _make_stub_llm_service()
     session = SessionState()
@@ -326,6 +335,7 @@ async def test_activate_scene_end_to_end(tmp_dal: DAL) -> None:
         "line_matches": [
             {"line_no": 1, "diff_type": "match", "detail": None},
         ],
+        "corrected_segments": [],
     })
     stub_svc = MagicMock()
     stub_svc.infer = AsyncMock(return_value=l2_json)
@@ -472,7 +482,7 @@ async def test_take_end_uses_session_scene(tmp_dal: DAL) -> None:
 
     async def capturing_runner(input_data, llm_service):  # type: ignore[no-untyped-def]
         captured_inputs.append(input_data)
-        return L2Output(script_diff_summary=None, line_matches=[])
+        return L2Output(script_diff_summary=None, line_matches=[], corrected_segments=[])
 
     stub_svc = _make_stub_llm_service()
     orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=capturing_runner)
@@ -510,7 +520,7 @@ async def test_take_end_l2_uses_take_scene_not_session(tmp_dal: DAL) -> None:
         # 从 script_lines 的 line text 内容推断用了哪个 scene 的 script
         # （或者直接看 input_data.scene_id 就够了）
         captured_script_ids.append(input_data.scene_id)
-        return L2Output(script_diff_summary=None, line_matches=[])
+        return L2Output(script_diff_summary=None, line_matches=[], corrected_segments=[])
 
     stub_svc = _make_stub_llm_service()
     session = SessionState()
@@ -553,7 +563,7 @@ async def test_previous_notes_caps_at_5_takes(tmp_dal: DAL) -> None:
 
     async def capturing_runner(input_data, llm_service):  # type: ignore[no-untyped-def]
         captured_inputs.append(input_data)
-        return L2Output(script_diff_summary=None, line_matches=[])
+        return L2Output(script_diff_summary=None, line_matches=[], corrected_segments=[])
 
     stub_svc = _make_stub_llm_service()
     session = SessionState()
@@ -582,7 +592,7 @@ async def test_previous_notes_caps_total_chars(tmp_dal: DAL) -> None:
 
     async def capturing_runner(input_data, llm_service):  # type: ignore[no-untyped-def]
         captured_inputs.append(input_data)
-        return L2Output(script_diff_summary=None, line_matches=[])
+        return L2Output(script_diff_summary=None, line_matches=[], corrected_segments=[])
 
     stub_svc = _make_stub_llm_service()
     session = SessionState()
@@ -627,3 +637,52 @@ def test_create_orchestrator_no_llm_service_keeps_l2_runner_none(tmp_dal: DAL) -
     session = SessionState()
     orch = create_orchestrator(tmp_dal, session)
     assert orch._deps.l2_runner is None  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# v0.2 新增：corrected_segments 落库验证
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_take_end_persists_corrected_segments(tmp_dal: DAL) -> None:
+    """L2 完成后 takes.script_diff 含 corrected_segments 字段，数据正确。
+
+    验证：corrected_segments 写入 script_diff JSON，字段完整（idx/original/corrected）。
+    """
+    scene_id = tmp_dal.create_scene("scene_cs1")
+    session = SessionState()
+    session.activate_scene(scene_id)
+
+    stub_runner = _make_stub_l2_runner(
+        script_diff_summary="第0段有错别字",
+        line_matches=[LineMatch(line_no=-1, diff_type="insertion", detail=None)],
+        corrected_segments=[
+            CorrectedSegment(idx=0, original="爱生活", corrected="爱具体的生活"),
+        ],
+    )
+    stub_svc = _make_stub_llm_service()
+
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=stub_runner)
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
+    take_id = session.take_id
+    assert take_id is not None
+
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
+    await orch._l2_task  # type: ignore[attr-defined]
+
+    take = tmp_dal.get_take(take_id)
+    assert take is not None
+    assert take.script_diff is not None
+    assert isinstance(take.script_diff, dict)
+
+    # 验证 corrected_segments 字段存在且数据正确
+    cs_list = take.script_diff.get("corrected_segments")
+    assert cs_list is not None
+    assert len(cs_list) == 1
+    cs = cs_list[0]
+    assert cs["idx"] == 0
+    assert cs["original"] == "爱生活"
+    assert cs["corrected"] == "爱具体的生活"
