@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from backend.core.events import (
@@ -314,10 +314,8 @@ class Orchestrator:
         # 写库：script_diff
         script_diff_dict = {
             "script_diff_summary": l2_output.script_diff_summary,
-            "line_matches": [
-                {"line_no": m.line_no, "diff_type": m.diff_type, "detail": m.detail}
-                for m in l2_output.line_matches
-            ],
+            "line_matches": [asdict(m) for m in l2_output.line_matches],
+            "corrected_segments": [asdict(cs) for cs in l2_output.corrected_segments],
         }
         self.dal.update_take_l2_output(take_id, script_diff_dict)
 

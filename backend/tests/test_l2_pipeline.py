@@ -14,6 +14,7 @@ import pytest
 
 from backend.llm.service import LLMService
 from backend.pipelines.l2_take import (
+    CorrectedSegment,
     L2Input,
     L2Output,
     L2ParseError,
@@ -90,6 +91,7 @@ def _normal_response() -> str:
                 {"line_no": 2, "diff_type": "missing", "detail": "漏词：「不然一切都完了」"},
                 {"line_no": 3, "diff_type": "match", "detail": None},
             ],
+            "corrected_segments": [],
         },
         ensure_ascii=False,
     )
@@ -127,7 +129,8 @@ async def test_run_l2_take_empty_transcript(stub_script_lines: list[dict]) -> No
         previous_notes=[],
     )
     empty_response = json.dumps(
-        {"script_diff_summary": None, "line_matches": []}, ensure_ascii=False
+        {"script_diff_summary": None, "line_matches": [], "corrected_segments": []},
+        ensure_ascii=False,
     )
     svc = _mock_llm(empty_response)
     result = await run_l2_take(inp, svc)
@@ -147,7 +150,8 @@ async def test_run_l2_take_empty_script_lines(stub_segments: list[dict]) -> None
         previous_notes=[],
     )
     no_script_response = json.dumps(
-        {"script_diff_summary": None, "line_matches": []}, ensure_ascii=False
+        {"script_diff_summary": None, "line_matches": [], "corrected_segments": []},
+        ensure_ascii=False,
     )
     svc = _mock_llm(no_script_response)
     result = await run_l2_take(inp, svc)
@@ -250,6 +254,7 @@ async def test_run_l2_take_insertion_line_no_minus_one(l2_input: L2Input) -> Non
                 {"line_no": 1, "diff_type": "match", "detail": None},
                 {"line_no": -1, "diff_type": "insertion", "detail": "额外台词：「等等，我还有话说。」"},
             ],
+            "corrected_segments": [],
         },
         ensure_ascii=False,
     )
@@ -374,3 +379,176 @@ def test_truncate_segments_keeps_tail_of_oversized_segment() -> None:
     # 其他字段保持原值
     assert result[0]["speaker"] == "A"
     assert result[0]["start_frame"] == 0
+
+
+# ---------------------------------------------------------------------------
+# v0.2 新增：corrected_segments 解析 + 无剧本场景 + transcript idx
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_corrected_segments_returned(l2_input: L2Input) -> None:
+    """LLMService 返回含非空 corrected_segments 的 JSON，L2Output.corrected_segments 正确解析。
+
+    验证：每项是 CorrectedSegment 实例，idx/original/corrected 字段均正确。
+    """
+    response = json.dumps(
+        {
+            "script_diff_summary": "第0段有错别字。",
+            "line_matches": [
+                {"line_no": 1, "diff_type": "match", "detail": None},
+            ],
+            "corrected_segments": [
+                {"idx": 0, "original": "我不想走", "corrected": "我不想走（已修正）"},
+                {"idx": 1, "original": "你必须留下来", "corrected": "你必须留下来（已修正）"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    result = await run_l2_take(l2_input, svc)
+
+    assert isinstance(result, L2Output)
+    assert len(result.corrected_segments) == 2
+
+    cs0 = result.corrected_segments[0]
+    assert isinstance(cs0, CorrectedSegment)
+    assert cs0.idx == 0
+    assert cs0.original == "我不想走"
+    assert cs0.corrected == "我不想走（已修正）"
+
+    cs1 = result.corrected_segments[1]
+    assert isinstance(cs1, CorrectedSegment)
+    assert cs1.idx == 1
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_no_corrections_returned(l2_input: L2Input) -> None:
+    """LLMService 返回 corrected_segments: []，L2Output.corrected_segments 为空列表，不抛错。"""
+    response = json.dumps(
+        {
+            "script_diff_summary": "无偏差。",
+            "line_matches": [],
+            "corrected_segments": [],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    result = await run_l2_take(l2_input, svc)
+
+    assert result.corrected_segments == []
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_no_script_lines(stub_segments: list[dict]) -> None:
+    """script_lines=[]，pipeline 正常调用，解析含 corrected_segments 的 JSON。
+
+    验证：L2Output.line_matches==[]、corrected_segments 非空、script_diff_summary is None。
+    """
+    inp = L2Input(
+        take_id=10,
+        scene_id=2,
+        take_number=1,
+        transcript_segments=stub_segments,
+        script_lines=[],
+        previous_notes=[],
+    )
+    response = json.dumps(
+        {
+            "script_diff_summary": None,
+            "line_matches": [],
+            "corrected_segments": [
+                {"idx": 0, "original": "爱生活", "corrected": "爱具体的生活"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    result = await run_l2_take(inp, svc)
+
+    assert result.line_matches == []
+    assert result.script_diff_summary is None
+    assert len(result.corrected_segments) == 1
+    assert isinstance(result.corrected_segments[0], CorrectedSegment)
+    assert result.corrected_segments[0].original == "爱生活"
+    assert result.corrected_segments[0].corrected == "爱具体的生活"
+
+
+@pytest.mark.asyncio
+async def test_user_message_includes_transcript_indices(l2_input: L2Input) -> None:
+    """user message 中的 transcript_block 含 [0] / [1] 下标标记，供 corrected_segments.idx 引用。"""
+    svc = _mock_llm(_normal_response())
+    await run_l2_take(l2_input, svc)
+
+    call_args = svc.infer.call_args
+    messages = call_args[0][0]
+    user_message = next(m["content"] for m in messages if m["role"] == "user")
+
+    # transcript_block 中每行应含 [0]、[1]、[2] 等下标
+    assert "[0]" in user_message
+    assert "[1]" in user_message
+    assert "[2]" in user_message
+
+
+# ---------------------------------------------------------------------------
+# v0.2 解析负面测试：与 line_matches 对称的字段缺失/类型错抛错
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_missing_corrected_segments_field(l2_input: L2Input) -> None:
+    """LLM 输出缺 corrected_segments 字段，抛 L2ParseError。"""
+    response = json.dumps(
+        {"script_diff_summary": "ok", "line_matches": []},
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    with pytest.raises(L2ParseError, match="corrected_segments"):
+        await run_l2_take(l2_input, svc)
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_corrected_segments_not_list(l2_input: L2Input) -> None:
+    """corrected_segments 不是 list，抛 L2ParseError。"""
+    response = json.dumps(
+        {"script_diff_summary": "ok", "line_matches": [], "corrected_segments": "oops"},
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    with pytest.raises(L2ParseError, match="corrected_segments"):
+        await run_l2_take(l2_input, svc)
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_corrected_segments_negative_idx(l2_input: L2Input) -> None:
+    """corrected_segments[*].idx 为负数，抛 L2ParseError。"""
+    response = json.dumps(
+        {
+            "script_diff_summary": None,
+            "line_matches": [],
+            "corrected_segments": [{"idx": -1, "original": "a", "corrected": "b"}],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    with pytest.raises(L2ParseError, match="non-negative integer"):
+        await run_l2_take(l2_input, svc)
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_corrected_segments_bool_idx(l2_input: L2Input) -> None:
+    """corrected_segments[*].idx 为 bool（True/False），抛 L2ParseError。
+
+    Python 中 isinstance(True, int) is True，必须显式拦截。
+    """
+    response = json.dumps(
+        {
+            "script_diff_summary": None,
+            "line_matches": [],
+            "corrected_segments": [{"idx": True, "original": "a", "corrected": "b"}],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    with pytest.raises(L2ParseError, match="non-negative integer"):
+        await run_l2_take(l2_input, svc)

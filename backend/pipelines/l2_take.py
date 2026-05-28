@@ -80,16 +80,31 @@ class L2Input:
 
 
 @dataclass(frozen=True)
+class CorrectedSegment:
+    """单个转录片段的错别字修正结果（v0.2 新增）。
+
+    idx 指向 L2Input.transcript_segments 截断后列表的下标（从 0 开始）。
+    只对真正有修改的 segment 输出；未改动的 segment 不出现。
+    """
+
+    idx: int
+    original: str
+    corrected: str
+
+
+@dataclass(frozen=True)
 class L2Output:
     """L2 Pipeline 输出。
 
     script_diff_summary → takes.script_diff（JSON 顶层字段，由 caller 写库）。
     line_matches → take_line_matches 表（由 caller 1.H 写库）。
+    corrected_segments → takes.script_diff（JSON 字段，由 caller 写库）。
     insertion 类型 line_no=-1 时，caller 跳过写 take_line_matches（§4 决策）。
     """
 
     script_diff_summary: str | None
     line_matches: list[LineMatch]
+    corrected_segments: list[CorrectedSegment]
 
 
 # ---------------------------------------------------------------------------
@@ -109,17 +124,25 @@ def _build_system_prompt() -> str:
     """从 TASK_CONFIG["l2_take"]["system"] 读取模板，追加格式约束。"""
     base = TASK_CONFIG["l2_take"]["system"]
     format_constraint = (
-        "\n\n输出格式要求（严格遵守）：\n"
+        "\n\n职责：\n"
+        "1. 剧本偏差检测：对比剧本台词与转录记录，识别漏词/改词/加词。\n"
+        "2. 错别字修正：检查转录文本中的明显错别字（同音字、形近字误识别），输出修正结果到 corrected_segments 字段。\n"
+        "\n输出格式要求（严格遵守）：\n"
         "- 只输出合法 JSON，不要 markdown 代码块，不要注释，不要额外解释。\n"
         "- JSON schema：\n"
         "  {\n"
         '    "script_diff_summary": "<str 或 null>",\n'
         '    "line_matches": [\n'
         '      {"line_no": <int>, "diff_type": "<match|missing|substitution|insertion>", "detail": "<str 或 null>"}\n'
+        "    ],\n"
+        '    "corrected_segments": [\n'
+        '      {"idx": <int>, "original": "<str>", "corrected": "<str>"}\n'
         "    ]\n"
         "  }\n"
         "- line_matches 只列出 script_lines 提供的行，不自创行号。\n"
-        "- insertion 类型（演员台词剧本无对应行）line_no 固定填 -1。"
+        "- insertion 类型（演员台词剧本无对应行）line_no 固定填 -1。\n"
+        "- corrected_segments 只列出真正有修改的 segment，未改动的不出现；无需修正时输出空列表 []。\n"
+        "- idx 是转录记录列表的下标（从 0 开始），对应 user message 中转录记录前的序号。"
     )
     return f"{base}{format_constraint}"
 
@@ -137,19 +160,20 @@ def _build_script_lines_block(script_lines: list[dict]) -> str:
 
 
 def _build_transcript_block(segments: list[dict], truncated: bool) -> str:
-    """格式化 transcript_segments 为 [speaker] text 文本。
+    """格式化 transcript_segments 为 [idx][speaker] text 文本。
 
     truncated=True 时在头部加截断警告。
+    idx 从 0 开始，与 corrected_segments.idx 对应。
     """
     if not segments:
         return "（无转录片段）"
     lines = []
     if truncated:
         lines.append("[WARNING: transcript truncated to 2500 chars, earliest segments dropped]")
-    for seg in segments:
+    for idx, seg in enumerate(segments):
         speaker = seg.get("speaker")
         label = speaker if speaker is not None else "未知说话人"
-        lines.append(f"[{label}] {seg['text']}")
+        lines.append(f"[{idx}][{label}] {seg['text']}")
     return "\n".join(lines)
 
 
@@ -197,10 +221,10 @@ def _build_user_message(input_data: L2Input) -> str:
     return (
         f"## 剧本台词（场次 {input_data.scene_id}）\n\n"
         f"{script_block}\n\n"
-        f"## Take {input_data.take_number} 转录记录\n\n"
+        f"## Take {input_data.take_number} 转录记录（含下标索引）\n\n"
         f"{transcript_block}\n"
         f"{previous_section}\n"
-        "请按要求输出 JSON 偏差报告。"
+        "请按要求输出 JSON 报告，包含偏差检测（line_matches）和错别字修正（corrected_segments）。"
     )
 
 
@@ -251,12 +275,17 @@ def _parse_llm_output(raw_text: str) -> L2Output:
         raise L2ParseError("LLM response missing required field: 'script_diff_summary'")
     if "line_matches" not in data:
         raise L2ParseError("LLM response missing required field: 'line_matches'")
+    if "corrected_segments" not in data:
+        raise L2ParseError("LLM response missing required field: 'corrected_segments'")
 
     script_diff_summary: str | None = data["script_diff_summary"]
     raw_matches = data["line_matches"]
+    raw_corrections = data["corrected_segments"]
 
     if not isinstance(raw_matches, list):
         raise L2ParseError("LLM response 'line_matches' is not a list")
+    if not isinstance(raw_corrections, list):
+        raise L2ParseError("LLM response 'corrected_segments' is not a list")
 
     line_matches: list[LineMatch] = []
     for i, item in enumerate(raw_matches):
@@ -282,7 +311,36 @@ def _parse_llm_output(raw_text: str) -> L2Output:
 
         line_matches.append(LineMatch(line_no=line_no, diff_type=diff_type, detail=detail))
 
-    return L2Output(script_diff_summary=script_diff_summary, line_matches=line_matches)
+    corrected_segments: list[CorrectedSegment] = []
+    for j, cs_item in enumerate(raw_corrections):
+        if not isinstance(cs_item, dict):
+            raise L2ParseError(f"corrected_segments[{j}] is not a dict")
+
+        idx = cs_item.get("idx")
+        if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0:
+            raise L2ParseError(
+                f"corrected_segments[{j}].idx is not a non-negative integer: {idx!r}"
+            )
+
+        original = cs_item.get("original")
+        if not isinstance(original, str):
+            raise L2ParseError(
+                f"corrected_segments[{j}].original is not a string: {original!r}"
+            )
+
+        corrected = cs_item.get("corrected")
+        if not isinstance(corrected, str):
+            raise L2ParseError(
+                f"corrected_segments[{j}].corrected is not a string: {corrected!r}"
+            )
+
+        corrected_segments.append(CorrectedSegment(idx=idx, original=original, corrected=corrected))
+
+    return L2Output(
+        script_diff_summary=script_diff_summary,
+        line_matches=line_matches,
+        corrected_segments=corrected_segments,
+    )
 
 
 # ---------------------------------------------------------------------------
