@@ -16,9 +16,11 @@ from typing import Protocol, runtime_checkable
 # 默认模型路径，由环境变量覆盖
 _DEFAULT_MODEL_PATH = "models/gemma-4-E4B-it-Q4_K_M.gguf"
 
-# llama-cpp-python 加载参数（来自 0.C spike 选型，llm-backend-selection v0.3 §11.3）
+# llama-cpp-python 加载参数（来自 0.C spike 选型，llm-backend-selection v0.4 §11.3）
+# n_ctx=8192：从 v0.3 的 4096 升一倍，支持长 take 场景（剧本 100+ 行 / 5+ 分钟转录），
+# Q4_K_M @ 8192 实测 RSS ~6.5 GB（M1 Max 16 GB 余量充足，见 llm-backend-selection §3.3）。
 _LLAMA_DEFAULTS: dict[str, object] = {
-    "n_ctx": 4096,
+    "n_ctx": 8192,
     "n_gpu_layers": -1,  # 全卸载到 Metal（macOS）
     "seed": 42,
     "verbose": False,
@@ -44,8 +46,8 @@ class LLMClient(Protocol):
 class GemmaClient:
     """llama-cpp-python 封装，实现 LLMClient 协议。
 
-    加载参数来自 0.C spike 选型（llm-backend-selection v0.3 §11.3）：
-      n_ctx=4096, n_gpu_layers=-1（全 Metal 卸载）, seed=42, verbose=False。
+    加载参数来自 0.C spike 选型（llm-backend-selection v0.4 §11.3）：
+      n_ctx=8192, n_gpu_layers=-1（全 Metal 卸载）, seed=42, verbose=False。
     model_path 从环境变量 GEMMA_MODEL_PATH 读取，
     默认 models/gemma-4-E4B-it-Q4_K_M.gguf。
 
