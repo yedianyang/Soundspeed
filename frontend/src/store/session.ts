@@ -27,9 +27,15 @@ export interface CurrentTake {
 }
 
 function readToken(): string | null {
-  if (typeof localStorage === "undefined") return null
-  const v = localStorage.getItem(LS_TOKEN_KEY)
-  return v && v.trim() ? v : null
+  const stored =
+    typeof localStorage !== "undefined" ? localStorage.getItem(LS_TOKEN_KEY) : null
+  if (stored && stored.trim()) return stored
+  // dev 自动填：localhost 无需手填 token。后端 DEV 用固定 "dev"，故默认 VITE_ADMIN_TOKEN ?? "dev"。
+  // 生产构建（import.meta.env.DEV=false）不自动填，仍需手填 token——不是鉴权绕过，只是已知 dev 默认。
+  if (import.meta.env.DEV) {
+    return (import.meta.env.VITE_ADMIN_TOKEN as string | undefined) ?? "dev"
+  }
+  return null
 }
 
 interface SessionState {

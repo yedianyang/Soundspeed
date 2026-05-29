@@ -15,13 +15,94 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { miniPill } from "@/lib/styles"
 import { API_BASE, LS_TOKEN_KEY } from "@/lib/config"
 import { useSessionStore } from "@/store/session"
+import {
+  endTake,
+  injectDebugAsr,
+  pickActiveScene,
+  startTake,
+  useScenes,
+  type DebugAsrSeg,
+} from "@/lib/api"
 import { Check, ChevronDown, ChevronRight } from "lucide-react"
-import { Plus, Trash2, User, AudioLines, Link2, Server } from "lucide-react"
+import { Plus, Trash2, User, AudioLines, Link2, Server, FlaskConical } from "lucide-react"
+
+const DEV = import.meta.env.DEV
+
+const DEBUG_ASR_PLACEHOLDER = `{
+  "speakers": ["SPEAKER_00", "SPEAKER_01"],
+  "turns": [
+    { "start": 2.88, "end": 5.63, "speaker": "SPEAKER_00", "text": "你昨天为什么没告诉我真相。" },
+    { "start": 5.70, "end": 8.10, "speaker": "SPEAKER_01", "text": "因为我不想让你再卷进来。" }
+  ]
+}
+
+// 也接受纯段数组：[{ "ch": 1, "speaker": "...", "text": "...", "is_partial": false }]`
+
+// 容错解析，三种输入形状（按优先级）：
+// 1. diarize 导出 {turns:[{speaker,text,start,end,...}]} → 每条 turn 映射为 ch1 final 段（单声道）。
+// 2. 顶层数组 [{ch?=1, speaker?=null, text, is_partial?=false}]。
+// 3. {segments:[...]} 包裹，同 (2)。
+// 每项需非空 text，缺 text 的项跳过（不报错）。speaker 任意字符串（speakerColor 哈希分色）。
+function parseDebugAsr(raw: string): { segs: DebugAsrSeg[]; error: string | null } {
+  let data: unknown
+  try {
+    data = JSON.parse(raw)
+  } catch {
+    return { segs: [], error: "JSON 解析失败：检查格式（{turns:[...]} 或段数组）" }
+  }
+
+  // 形状 1：diarize {turns:[...]}。turns 是 final，单声道 = ch1；忽略 start/end，按数组顺序注入
+  //（后端 /debug/asr 盖单调 server frame，顺序保留）。
+  if (data && typeof data === "object" && Array.isArray((data as { turns?: unknown }).turns)) {
+    const turns = (data as { turns: unknown[] }).turns
+    const segs: DebugAsrSeg[] = []
+    for (const t of turns) {
+      if (!t || typeof t !== "object") continue
+      const o = t as Record<string, unknown>
+      if (typeof o.text !== "string" || !o.text.trim()) continue
+      segs.push({
+        ch: 1,
+        text: o.text,
+        speaker: typeof o.speaker === "string" ? o.speaker : null,
+        is_partial: false,
+      })
+    }
+    if (segs.length === 0) return { segs: [], error: "turns 里没有带 text 的有效条目" }
+    return { segs, error: null }
+  }
+
+  // 形状 2 / 3：顶层数组 或 {segments:[...]}。
+  const arr = Array.isArray(data)
+    ? data
+    : data && typeof data === "object" && Array.isArray((data as { segments?: unknown }).segments)
+      ? (data as { segments: unknown[] }).segments
+      : null
+  if (!arr) return { segs: [], error: "需要 {turns:[...]}、段数组、或 {segments:[...]}" }
+  if (arr.length === 0) return { segs: [], error: "段数组为空" }
+
+  const segs: DebugAsrSeg[] = []
+  for (const item of arr) {
+    if (!item || typeof item !== "object") continue
+    const o = item as Record<string, unknown>
+    if (typeof o.text !== "string" || !o.text.trim()) continue
+    segs.push({
+      ch: o.ch === 2 ? 2 : 1,
+      text: o.text,
+      speaker: typeof o.speaker === "string" ? o.speaker : null,
+      is_partial: o.is_partial === true,
+    })
+  }
+  if (segs.length === 0) return { segs: [], error: "没有带 text 的有效段" }
+  return { segs, error: null }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 // ---- 数据模型 ----
 
@@ -92,6 +173,52 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
     if (v) {
       queryClient.invalidateQueries({ queryKey: ["scenes"] })
       queryClient.invalidateQueries({ queryKey: ["takes"] })
+    }
+  }
+
+  // ---- dev 测试面板：paste ASR JSON → 一键跑完整 take ----
+  const { data: scenes } = useScenes()
+  const activeScene = pickActiveScene(scenes)
+  const startRecordingLocal = useSessionStore((s) => s.startRecordingLocal)
+  const stopRecordingLocal = useSessionStore((s) => s.stopRecordingLocal)
+  const [asrJson, setAsrJson] = useState("")
+  const [running, setRunning] = useState(false)
+  const [runStatus, setRunStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
+
+  const handleRunFullTake = async () => {
+    if (running) return
+    const { segs, error } = parseDebugAsr(asrJson)
+    if (error) {
+      setRunStatus({ kind: "error", msg: error })
+      return
+    }
+    if (!activeScene) {
+      setRunStatus({ kind: "error", msg: "无活跃场次，无法开始" })
+      return
+    }
+    setRunning(true)
+    // 必须 startRecordingLocal：清 segments、置 recording=true / take_id=null，使 take.changed 绑定门
+    // 重绑到新 take。否则 currentTake 停在上一次 REC 的 take_id，applyAsr 的跨-take 守卫会把本次注入帧
+    // 全丢（transcript 空），且 take_number 不显示。recording=true 后无论后端是否在 /debug/asr 盖
+    // take_id 都能正确绑定。
+    startRecordingLocal(activeScene.scene_id, null)
+    try {
+      await startTake(activeScene.scene_id, null)
+      setRunStatus({ kind: "info", msg: `注入 ${segs.length} 段…` })
+      for (const seg of segs) {
+        await injectDebugAsr(seg)
+        // stagger，让 transcript 可见地滚动（partial 替换 / final 落定）。
+        await sleep(150)
+      }
+      await endTake()
+      setRunStatus({ kind: "done", msg: "完成 — 看 History / LLM 反馈 tab" })
+      queryClient.invalidateQueries({ queryKey: ["takes"] })
+    } catch (err) {
+      console.error("run full take failed", err)
+      setRunStatus({ kind: "error", msg: "请求失败（看 console / 是否 SOUNDSPEED_DEV=1）" })
+    } finally {
+      stopRecordingLocal()
+      setRunning(false)
     }
   }
 
@@ -240,6 +367,62 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
           </div>
 
           <Separator />
+
+          {/* ========== 开发 / 测试（仅 dev 构建） ========== */}
+          {DEV && (
+            <>
+              <div className="grid gap-2">
+                <div className="flex items-center gap-2">
+                  <FlaskConical className="size-4 text-primary" />
+                  <span className="text-sm font-medium">开发 / 测试</span>
+                  <span className={`ml-auto ${miniPill("neutral", "text-[10px]")}`}>
+                    {activeScene ? `场次 ${activeScene.scene_code}` : "无活跃场次"}
+                  </span>
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  粘贴 ASR JSON，一键跑完整 take（start → 逐段注入 → end → L2）。
+                </span>
+                <Textarea
+                  value={asrJson}
+                  onChange={(e) => setAsrJson(e.target.value)}
+                  placeholder={DEBUG_ASR_PLACEHOLDER}
+                  rows={6}
+                  className="font-mono text-xs"
+                  disabled={running}
+                />
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="default"
+                    size="sm"
+                    className="gap-1.5"
+                    disabled={running || !activeScene || !asrJson.trim()}
+                    onClick={handleRunFullTake}
+                  >
+                    <FlaskConical className="size-4" />
+                    {running ? "运行中…" : "一键跑完整 take"}
+                  </Button>
+                  {runStatus && (
+                    <span
+                      className={
+                        runStatus.kind === "error"
+                          ? "text-xs text-destructive"
+                          : runStatus.kind === "done"
+                            ? "text-xs text-green-600"
+                            : "text-xs text-muted-foreground"
+                      }
+                    >
+                      {runStatus.msg}
+                    </span>
+                  )}
+                </div>
+                <span className="text-[10px] text-muted-foreground/70">
+                  L2 摘要需 Gemma 权重，否则降级（script_diff 为空）。
+                </span>
+              </div>
+
+              <Separator />
+            </>
+          )}
 
           {/* ========== 音频输入 ========== */}
           <div className="grid gap-2">

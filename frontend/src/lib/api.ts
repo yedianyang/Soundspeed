@@ -67,6 +67,22 @@ export function endTake(): Promise<void> {
   })
 }
 
+// dev-only 合成 ASR 注入（后端仅 SOUNDSPEED_DEV=1 挂载 /api/v1/debug/asr）。
+// 服务端补 start/end_frame，前端只发 ch/text/speaker/is_partial。
+export interface DebugAsrSeg {
+  ch: 1 | 2
+  text: string
+  speaker: string | null
+  is_partial: boolean
+}
+
+export function injectDebugAsr(seg: DebugAsrSeg): Promise<void> {
+  return request<void>(`/api/v1/debug/asr`, {
+    method: "POST",
+    body: JSON.stringify(seg),
+  })
+}
+
 // ── react-query 查询键 + hooks ──
 
 export const scenesQueryKey = () => ["scenes"] as const
