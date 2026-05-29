@@ -723,6 +723,70 @@ def test_entrypoint_build_app_healthz(tmp_path, monkeypatch) -> None:
     assert app.state.llm_service is get_service()
 
 
+# ── DEV 固定 admin token ────────────────────────────────────────────────────
+#
+# resolve_admin_token 在函数体内 import（RED 阶段行为未改，顶层 import 会假绿），
+# 实际上 resolve_admin_token 已在顶层 import 链里，可以直接用；
+# 但 monkeypatch 必须在调用前设好 env（create_app 时读取）。
+
+
+def test_dev_token_is_fixed_string(monkeypatch) -> None:
+    """SOUNDSPEED_DEV=1 + ADMIN_TOKEN 未设 → resolve_admin_token() == "dev"。"""
+    from backend.api.auth import resolve_admin_token  # noqa: PLC0415
+
+    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    assert resolve_admin_token() == "dev"
+
+
+def test_dev_token_env_wins(monkeypatch) -> None:
+    """ADMIN_TOKEN 显式设置时 SOUNDSPEED_DEV 不覆盖，env 优先。"""
+    from backend.api.auth import resolve_admin_token  # noqa: PLC0415
+
+    monkeypatch.setenv("ADMIN_TOKEN", "explicit")
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    assert resolve_admin_token() == "explicit"
+
+
+def test_non_dev_random_token(monkeypatch) -> None:
+    """非 DEV + ADMIN_TOKEN 未设 → 返回非空随机 token（不等于 "dev"）。"""
+    from backend.api.auth import resolve_admin_token  # noqa: PLC0415
+
+    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("SOUNDSPEED_DEV", raising=False)
+    token = resolve_admin_token()
+    assert token  # 非空
+    assert token != "dev"
+
+
+def test_dev_token_auth_enforced(tmp_dal: DAL, monkeypatch) -> None:
+    """DEV 模式下 token 固定为 "dev"，auth 仍生效：正确 token→200，错误 token→401。"""
+    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    scene_id = tmp_dal.create_scene("scene_dev_auth")
+    orch = create_orchestrator(tmp_dal)
+    # create_app 此时读 env：ADMIN_TOKEN 未设 + SOUNDSPEED_DEV=1 → admin_token="dev"
+    app = create_app(orch)
+    from fastapi.testclient import TestClient as _TC  # noqa: PLC0415
+    client = _TC(app)
+
+    # 正确 token → 200
+    resp = client.post(
+        "/api/v1/take/start",
+        json={"scene_id": scene_id, "shot": None},
+        headers={"Authorization": "Bearer dev"},
+    )
+    assert resp.status_code == 200
+
+    # 错误 token → 401（auth 仍强制）
+    resp = client.post(
+        "/api/v1/take/start",
+        json={"scene_id": scene_id, "shot": None},
+        headers={"Authorization": "Bearer wrong"},
+    )
+    assert resp.status_code == 401
+
+
 # ── 1.J-1.L v0.3：GET /scenes + DEV 自动播种 ────────────────────────────────
 
 
