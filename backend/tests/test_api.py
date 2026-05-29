@@ -615,6 +615,51 @@ def test_debug_asr_publishes_partial(tmp_dal: DAL, monkeypatch) -> None:
     assert payload.is_partial is True
 
 
+def test_debug_asr_final_persists_segment_when_take_active(tmp_dal: DAL, monkeypatch) -> None:
+    """回归测试：active take 时 POST /debug/asr is_partial=false → 段写入 DB。
+
+    smoke 发现的 bug：end_frame == start_frame 触发 CHECK(end_frame > start_frame)，
+    sqlite3.IntegrityError 被 publish() 吞掉，段静默不存库（1.L take detail 为空）。
+    修复后 end_frame = start_frame + 1000，此测试断言段确实写入。
+
+    流程：先 POST take/start（session.take_active=True + take 行存在）→
+    POST debug/asr ch=1 is_partial=false → dal.list_segments(take_id) 返回该段。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    scene_id = tmp_dal.create_scene("scene_debug_persist")
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {_TOKEN}"}
+
+    # 先起一个 take，使 session.take_active=True
+    resp = client.post(
+        "/api/v1/take/start",
+        json={"scene_id": scene_id, "shot": None},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    take_id = tmp_dal.list_takes(scene_id)[0].take_id
+
+    # 注入 final ASR（修复前会因 CHECK 约束失败静默丢弃）
+    resp = client.post(
+        "/api/v1/debug/asr",
+        json={"ch": 1, "text": "injected segment", "speaker": "A", "is_partial": False},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+    # 断言段已写入 DB（不是只推了 WS 就完）
+    segments = tmp_dal.list_segments(take_id)
+    assert len(segments) == 1, f"段应写库，实际 list_segments 返回 {len(segments)} 条"
+    assert segments[0].text == "injected segment"
+    assert segments[0].ch == 1
+    assert segments[0].speaker == "A"
+    # 顺带验证 end_frame > start_frame（约束合规）
+    assert segments[0].end_frame > segments[0].start_frame
+
+
 def test_debug_asr_absent_without_dev_flag(tmp_dal: DAL, monkeypatch) -> None:
     """SOUNDSPEED_DEV 未设 → POST /api/v1/debug/asr → 404（路由未挂载）。"""
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)

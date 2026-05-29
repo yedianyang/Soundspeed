@@ -4,9 +4,13 @@
 POST /api/v1/debug/asr → 合成 AsrPartialPayload / AsrFinalPayload → orchestrator.publish。
 
 用途：1.C（结构化 ASR 输出）落地前手动驱动 1.J transcript 面板验收。
-start_frame / end_frame 用 int(time.time()*1000)，使存库 segments 按 start_frame 排序正确。
 take_id=None → _on_asr_final 通过 _resolve_take_id 回退 session.take_id；
 active take 时 final ASR 既推 WS 也存库（take detail 可见 segments）。
+
+start_frame / end_frame：
+  start_frame = int(time.time()*1000)
+  end_frame   = start_frame + 1000  （+1 秒，满足 CHECK(end_frame > start_frame)）
+  partial 不写库，但保持字段格式一致。
 """
 from __future__ import annotations
 
@@ -46,20 +50,22 @@ async def debug_asr(
     """合成 ASR 事件并 publish 到 orchestrator。
 
     ch 必须为 1 或 2，否则 422。
-    start_frame / end_frame 用 int(time.time()*1000)，保证存库顺序正确。
+    end_frame = start_frame + 1000（满足 CHECK(end_frame > start_frame)，
+    相等会触发 sqlite3.IntegrityError 被 publish() 吞掉，段静默不存库）。
     """
     if body.ch not in (1, 2):
         raise HTTPException(status_code=422, detail="ch must be 1 or 2")
 
     orch = request.app.state.orchestrator
-    frame_ts = int(time.time() * 1000)
+    start_frame = int(time.time() * 1000)
+    end_frame = start_frame + 1000  # 严格大于，满足 CHECK(end_frame > start_frame)
 
     if body.is_partial:
         topic = ASR_PARTIAL_CH1 if body.ch == 1 else ASR_PARTIAL_CH2
         payload: AsrPartialPayload | AsrFinalPayload = AsrPartialPayload(
             text=body.text,
-            start_frame=frame_ts,
-            end_frame=frame_ts,
+            start_frame=start_frame,
+            end_frame=end_frame,
             speaker=body.speaker,
             take_id=None,
             is_partial=True,
@@ -68,8 +74,8 @@ async def debug_asr(
         topic = ASR_FINAL_CH1 if body.ch == 1 else ASR_FINAL_CH2
         payload = AsrFinalPayload(
             text=body.text,
-            start_frame=frame_ts,
-            end_frame=frame_ts,
+            start_frame=start_frame,
+            end_frame=end_frame,
             speaker=body.speaker,
             take_id=None,
             is_partial=False,
