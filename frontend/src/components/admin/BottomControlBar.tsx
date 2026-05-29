@@ -36,7 +36,7 @@ export default function BottomControlBar({
   return (
     <div className="flex-shrink-0 border-t bg-background">
       {/* Memo input */}
-      <div className="px-3 sm:px-5 pt-2 pb-1.5">
+      <div className="px-4 pt-2 pb-1.5">
         <div className="flex items-center gap-2 h-11 px-4 rounded-4xl bg-muted/60 focus-within:bg-muted transition-colors">
           <Input
             placeholder="Typing memo · 例：第三条结尾好，可以用"
@@ -54,10 +54,10 @@ export default function BottomControlBar({
       </div>
 
       {/* Controls: left stack + right REC (absolute) */}
-      <div className="px-3 sm:px-5 pb-2 mt-1 relative">
-        <div className="flex flex-col gap-2 pr-24 sm:pr-28">
+      <div className="px-4 pb-2 mt-1 relative">
+        <div className="flex flex-col gap-2 pr-24">
           {/* Row 1: Scene / Shot / Take / Mark */}
-          <div className="flex items-center gap-1.5 sm:gap-2">
+          <div className="flex items-center gap-2">
             <SceneShotTakeButton label="Scene" value="3" />
             <SceneShotTakeButton label="Shot" value="2" />
             <SceneShotTakeButton label="Take" value="6" highlight />
@@ -65,7 +65,7 @@ export default function BottomControlBar({
               variant="ghost"
               size="default"
               onClick={onCycleMark}
-              className="flex-1 sm:flex-none min-w-0 gap-1 sm:gap-1.5 h-9 px-2.5 sm:px-3 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform"
+              className="flex-none sm:w-24 gap-1.5 h-9 px-3 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform"
             >
               <span className={cn("size-1.5 rounded-full", STATUS_DOT[mark] || "bg-muted-foreground")} />
               <span className="text-sm font-medium text-foreground">{STATUS_LABEL[mark]}</span>
@@ -97,7 +97,7 @@ export default function BottomControlBar({
           variant="ghost"
           onClick={onToggleRecording}
           className={cn(
-            "absolute right-3 sm:right-5 bottom-2 size-20 rounded-full text-white shadow-lg transition-all active:scale-95 border-0",
+            "absolute right-4 bottom-2 size-20 rounded-full text-white shadow-lg transition-all active:scale-95 border-0",
             isRecording
               ? "bg-red-600 hover:bg-red-600 ring-4 ring-red-500/20"
               : "bg-red-500 hover:bg-red-500 ring-2 ring-red-500/10"
@@ -111,7 +111,7 @@ export default function BottomControlBar({
       </div>
 
       {/* Log */}
-      <div className="px-3 sm:px-5 pb-1.5 pt-0.5 border-t">
+      <div className="px-4 pb-1.5 pt-0.5 border-t">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap py-1">
             <span className="size-1.5 rounded-full bg-green-500 flex-shrink-0" />
@@ -142,7 +142,7 @@ function SceneShotTakeButton({
           variant="ghost"
           size="default"
           className={cn(
-            "flex-1 sm:flex-none min-w-0 gap-1 h-9 px-2 sm:px-2.5 rounded-full text-xs border border-border/60 active:scale-95 transition-transform",
+            "flex-1 sm:flex-none sm:w-24 min-w-0 gap-1 h-9 px-2.5 rounded-full text-xs border border-border/60 active:scale-95 transition-transform",
             highlight ? "bg-background shadow-sm" : "bg-muted/60"
           )}
         >
