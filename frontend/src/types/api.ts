@@ -22,9 +22,11 @@ export interface LineMatch {
   detail: string | null
 }
 
-// L2 错别字修正输出。1.J–1.L 不渲染，类型保持宽松。
+// L2 修正输出：原始转录 → 对齐剧本后的文本。diff 显示的主内容。
 export interface CorrectedSegment {
-  [key: string]: unknown
+  idx: number
+  original: string
+  corrected: string
 }
 
 export interface ScriptDiff {

@@ -1,15 +1,9 @@
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { mutedCard } from "@/lib/styles"
-import type { LineMatch, TakeDTO } from "@/types/api"
+import type { TakeDTO } from "@/types/api"
 import { useSessionStore } from "@/store/session"
-
-const DIFF_LABEL: Record<LineMatch["diff_type"], string> = {
-  match: "匹配",
-  missing: "漏词",
-  substitution: "改词",
-  insertion: "加词",
-}
+import { ScriptDiffView } from "./ScriptDiffView"
 
 export function LLMFeedback() {
   const takesMap = useSessionStore((s) => s.takes)
@@ -39,40 +33,15 @@ export function LLMFeedback() {
         <CardContent className="p-4 space-y-2">
           <div className="flex items-center gap-2">
             <Badge variant="secondary" className="font-mono uppercase">
-              summary
+              diff
             </Badge>
             <span className="font-mono text-[10px] text-muted-foreground">
               Scene {latest.scene_id} · Take {latest.take_number}
             </span>
           </div>
-          <p className="text-sm leading-relaxed text-foreground">
-            {diff.script_diff_summary ?? "无偏差摘要（台词匹配 / 无剧本）"}
-          </p>
+          <ScriptDiffView diff={diff} />
         </CardContent>
       </Card>
-
-      {diff.line_matches.length > 0 && (
-        <Card className={mutedCard}>
-          <CardContent className="p-4 space-y-2">
-            <Badge variant="secondary" className="font-mono uppercase">
-              diff
-            </Badge>
-            <div className="space-y-1">
-              {diff.line_matches.map((lm, i) => (
-                <div key={i} className="flex items-baseline gap-2 text-xs">
-                  <span className="font-mono text-muted-foreground w-10 flex-shrink-0">
-                    {lm.line_no >= 0 ? `L${lm.line_no}` : "—"}
-                  </span>
-                  <span className="text-muted-foreground flex-shrink-0">
-                    {DIFF_LABEL[lm.diff_type]}
-                  </span>
-                  {lm.detail && <span className="text-foreground">{lm.detail}</span>}
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       <p className="text-xs text-muted-foreground text-center pt-2">
         每次 take 结束后由 L2 推送

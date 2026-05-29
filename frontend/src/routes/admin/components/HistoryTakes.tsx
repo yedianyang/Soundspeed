@@ -13,16 +13,10 @@ import {
 import { STATUS_DOT, STATUS_LABEL, MARK_ORDER, speakerColor } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 import { mutedCard } from "@/lib/styles"
-import type { TakeDTO, TakeStatus, LineMatch } from "@/types/api"
+import type { TakeDTO, TakeStatus } from "@/types/api"
 import { useTake } from "@/lib/api"
 import { useSessionStore } from "@/store/session"
-
-const DIFF_LABEL: Record<LineMatch["diff_type"], string> = {
-  match: "匹配",
-  missing: "漏词",
-  substitution: "改词",
-  insertion: "加词",
-}
+import { ScriptDiffView } from "./ScriptDiffView"
 
 function StatusBadge({
   status,
@@ -89,38 +83,13 @@ function TakeDetail({ takeId }: { takeId: number }) {
         <p className="text-sm text-muted-foreground/60">无转录片段</p>
       )}
 
-      {/* L2 摘要 + line_matches */}
+      {/* L2 diff */}
       <div className="flex items-center gap-2">
         <div className="flex-1 h-px bg-border" />
         <span className="text-[10px] text-muted-foreground whitespace-nowrap">L2</span>
         <div className="flex-1 h-px bg-border" />
       </div>
-      {diff ? (
-        <div className="space-y-2">
-          {diff.script_diff_summary ? (
-            <p className="text-sm text-foreground">{diff.script_diff_summary}</p>
-          ) : (
-            <p className="text-sm text-muted-foreground/60">无偏差摘要</p>
-          )}
-          {diff.line_matches.length > 0 && (
-            <div className="space-y-1">
-              {diff.line_matches.map((lm, i) => (
-                <div key={i} className="flex items-baseline gap-2 text-xs">
-                  <span className="font-mono text-muted-foreground w-10 flex-shrink-0">
-                    {lm.line_no >= 0 ? `L${lm.line_no}` : "—"}
-                  </span>
-                  <span className="text-muted-foreground flex-shrink-0">
-                    {DIFF_LABEL[lm.diff_type]}
-                  </span>
-                  {lm.detail && <span className="text-foreground">{lm.detail}</span>}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      ) : (
-        <p className="text-sm text-muted-foreground/60">L2 未完成 / 无剧本</p>
-      )}
+      <ScriptDiffView diff={diff} />
     </div>
   )
 }
