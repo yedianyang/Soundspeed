@@ -1,7 +1,12 @@
 """鉴权（architecture §10.3）。
 
-ADMIN_TOKEN：服务启动从环境读，缺失则生成随机并打印到 console（hackathon 现场友好）。
+ADMIN_TOKEN 解析优先级：
+  1. ADMIN_TOKEN env 已设 → 直接使用（最高优先级）。
+  2. SOUNDSPEED_DEV=1 → 固定返回 "dev"（前端可自动填，dev server 确定性）。
+  3. 其他 → 随机生成并打印到 console（hackathon 现场友好）。
+
 REST：require_admin 依赖校验 `Authorization: Bearer <token>`，不符 401。
+auth 路径本身不变——固定 "dev" 只是让 dev token 可预测，不绕过鉴权。
 
 token 在 create_app 时解析并存到 app.state.admin_token，require_admin 通过
 request.app.state 读取——不在 import 时捕获环境（否则测试 monkeypatch.setenv 不生效）。
@@ -19,15 +24,20 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 _bearer = HTTPBearer(auto_error=False)
 
+_DEV_TOKEN = "dev"
+
 
 def resolve_admin_token() -> str:
-    """解析 ADMIN_TOKEN：环境有就用，缺失则随机生成并打印到 console。
+    """解析 ADMIN_TOKEN，优先级：env 显式设置 > DEV 固定值 > 随机生成。
 
     在 create_app 时调用（不在 import 时），保证测试 monkeypatch.setenv 生效。
     """
     token = os.environ.get("ADMIN_TOKEN")
     if token:
         return token
+    if os.environ.get("SOUNDSPEED_DEV") == "1":
+        print(f"[soundspeed] SOUNDSPEED_DEV=1，使用固定 ADMIN_TOKEN：{_DEV_TOKEN}")
+        return _DEV_TOKEN
     token = secrets.token_urlsafe(32)
     print(f"[soundspeed] ADMIN_TOKEN 未设置，已随机生成：{token}")
     return token
