@@ -3,19 +3,24 @@
 设计依据：
   llm-service-design v1.1 §决策 1-3
   1.F 实施 spec §3-§4
+  1.J-1.L-frontend-integration v0.3：模型缺失时自动下载 + downloading 状态
 
 公共 API：
-  get_service() -> LLMService      工厂函数，返回模块级单例
-  _reset_service() -> None          仅供测试使用，清空单例
-  LLMService.infer(...)             统一推理入口
-  LLMService.aclose()               关闭 worker，释放资源
+  resolve_model_path(download) -> str | None   模型路径解析器（模块级函数）
+  get_service() -> LLMService                  工厂函数，返回模块级单例
+  _reset_service() -> None                     仅供测试使用，清空单例
+  LLMService.infer(...)                        统一推理入口
+  LLMService.aclose()                          关闭 worker，释放资源
+  LLMService.ensure_model_ready()              异步解析+下载模型路径（在 worker thread）
 """
 
 from __future__ import annotations
 
 import asyncio
 import itertools
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from backend.llm.config import TASK_CONFIG
@@ -25,6 +30,47 @@ if TYPE_CHECKING:
 
 # gen_kwargs 中过滤掉的元字段（不传给 client）
 _META_KEYS = frozenset({"priority", "_reserved", "system"})
+
+# HF 模型坐标（与 client.py 的默认路径对应）
+_HF_REPO_ID = "unsloth/gemma-4-E4B-it-GGUF"
+_HF_FILENAME = "gemma-4-E4B-it-Q4_K_M.gguf"
+
+
+def resolve_model_path(download: bool) -> str | None:
+    """解析可用模型路径，按优先级：本地 env > HF cache > 下载。
+
+    优先级：
+      1. GEMMA_MODEL_PATH env 设置且文件存在 → 直接返回，不调用任何 HF 函数。
+      2. huggingface_hub.try_to_load_from_cache 命中（返回 str）→ 返回缓存路径。
+         注意：返回值可能是哨兵对象（truthy 非 str），用 isinstance(result, str) 判。
+      3. download=True → huggingface_hub.hf_hub_download 触发下载并返回路径。
+      4. 否则 → None（模型不可用，调用方应发 downloading 再 await ensure_model_ready）。
+
+    此函数是同步的，在 worker thread 内调用（asyncio.to_thread），不阻塞 event loop。
+    """
+    # 优先级 1：env 显式设置且文件存在（用户当前 run，零 HF 调用）
+    env_path = os.environ.get("GEMMA_MODEL_PATH")
+    if env_path and Path(env_path).exists():
+        return env_path
+
+    # 优先级 2/3：走 HF 路径（lazy import，GEMMA_MODEL_PATH 分支已 return）
+    import huggingface_hub  # noqa: PLC0415
+
+    cache_result = huggingface_hub.try_to_load_from_cache(
+        repo_id=_HF_REPO_ID,
+        filename=_HF_FILENAME,
+    )
+    if isinstance(cache_result, str):
+        return cache_result  # 缓存命中
+
+    # 优先级 3：触发下载
+    if download:
+        return huggingface_hub.hf_hub_download(
+            repo_id=_HF_REPO_ID,
+            filename=_HF_FILENAME,
+        )
+
+    return None
 
 
 @dataclass
@@ -46,6 +92,7 @@ class LLMService:
     - _lock: asyncio.Lock，串行化 client 调用
     - _worker_task: 长运行 asyncio.Task，从队列取任务逐个推理
     - _client: LLMClient 实例，首次 infer 时 lazy 初始化
+    - _model_path: 已解析的模型路径（ensure_model_ready 后填充）
     - _counter: itertools.count()，保证相同 priority 下 FIFO
     """
 
@@ -56,6 +103,7 @@ class LLMService:
         self._lock: asyncio.Lock = asyncio.Lock()
         self._worker_task: asyncio.Task[None] | None = None
         self._client: LLMClient | None = None
+        self._model_path: str | None = None
         self._counter = itertools.count()
 
     @property
@@ -65,6 +113,26 @@ class LLMService:
         供 Orchestrator 区分 loading（首次权重加载）vs running（后续推理）。
         """
         return self._client is not None
+
+    @property
+    def model_present(self) -> bool:
+        """模型是否可用（本地或 HF cache 存在），同步检查，不触发下载。
+
+        - _client 已加载 → True（已就绪）。
+        - resolve_model_path(download=False) 非 None → True（文件存在，下次加载不需下载）。
+        - 否则 → False（需要先 await ensure_model_ready() 再推理）。
+        """
+        if self._client is not None:
+            return True
+        return resolve_model_path(download=False) is not None
+
+    async def ensure_model_ready(self) -> None:
+        """在 worker thread 内解析（或下载）模型路径，存入 _model_path。
+
+        download=True：缓存未命中时触发 hf_hub_download，阻塞直到下载完成。
+        不触发模型加载（加载在 _ensure_client/_worker 内完成）。
+        """
+        self._model_path = await asyncio.to_thread(resolve_model_path, True)
 
     def _ensure_worker(self) -> None:
         """Lazy 启动 worker task，只启动一次。
@@ -77,11 +145,16 @@ class LLMService:
             self._worker_task = asyncio.get_running_loop().create_task(self._worker())
 
     def _ensure_client(self) -> LLMClient:
-        """Lazy 初始化 client（首次推理时加载模型）。"""
-        if self._client is None:
-            from backend.llm.client import GemmaClient
+        """Lazy 初始化 client（首次推理时加载模型）。
 
-            self._client = GemmaClient()
+        model_path 优先用 _model_path（ensure_model_ready 已填充），
+        回退 resolve_model_path(False)（本地/cache），最后 None（GemmaClient 自行解析）。
+        """
+        if self._client is None:
+            from backend.llm.client import GemmaClient  # noqa: PLC0415
+
+            path = self._model_path or resolve_model_path(download=False)
+            self._client = GemmaClient(model_path=path)
         return self._client
 
     async def infer(
@@ -176,6 +249,8 @@ class LLMService:
         """长运行 worker：串行从队列取任务，逐个推理。
 
         单线程 asyncio 语义保证无竞态；只启动一次（见 _ensure_worker）。
+        _ensure_client 改为 await asyncio.to_thread 调用，首次加载模型权重在 worker thread
+        内进行，不阻塞 event loop（1.F advisor 标记的 loop-freeze 修复）。
         worker 异常处理：捕获所有异常并通过 fut.set_exception 回传，
         worker 本身不退出。只有 asyncio.CancelledError 允许穿透（触发 task 退出）。
         """
@@ -186,7 +261,9 @@ class LLMService:
                 self._queue.task_done()
                 continue
             try:
-                client = self._ensure_client()
+                # to_thread：_ensure_client 内的 GemmaClient() 会加载权重（同步阻塞），
+                # 放进 worker thread 避免首次加载冻结 event loop。
+                client = await asyncio.to_thread(self._ensure_client)
                 async with self._lock:
                     result_dict = await asyncio.to_thread(
                         client.create_chat_completion,

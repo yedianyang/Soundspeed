@@ -573,8 +573,17 @@ def test_resolve_model_path_env_set_exists(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("GEMMA_MODEL_PATH", str(fake_model))
 
     hf_called = []
-    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: hf_called.append(1) or "/fake")
-    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *a, **kw: hf_called.append(2) or "/fake")
+
+    def _spy_cache(*a: object, **kw: object) -> str:
+        hf_called.append(1)
+        return "/fake"
+
+    def _spy_download(*a: object, **kw: object) -> str:
+        hf_called.append(2)
+        return "/fake"
+
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", _spy_cache)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _spy_download)
 
     result = resolve_model_path(download=False)
     assert result == str(fake_model)
@@ -655,8 +664,6 @@ def test_resolve_model_path_download_true(tmp_path, monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_model_present_true_when_client_loaded(monkeypatch) -> None:
     """_client 已设（模型已加载）→ model_present=True。"""
-    from backend.llm.service import resolve_model_path  # noqa: PLC0415
-
     _reset_service()
     svc = get_service()
     svc._client = StubClient()  # 直接注入，模拟已加载

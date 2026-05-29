@@ -122,10 +122,14 @@ class TakeChangedPayload:
 class LlmStatusPayload:
     """llm.status 的 payload（1.J-1.L：驱动前端 LLM chip 状态）。
 
-    state 取值：'idle'（空闲）| 'loading'（首次加载权重）| 'running'（推理中）。
+    state 取值：
+      'idle'        空闲（L2 任务完成后）
+      'downloading' 模型文件不在本地，正在通过 huggingface_hub 下载（可能数分钟）
+      'loading'     模型文件存在，首次加载权重到内存/Metal（数秒）
+      'running'     模型已加载，正在推理中
     task_type / take_id 在 idle 时可为 None。
     """
 
-    state: str          # "idle" | "loading" | "running"
+    state: str          # "idle" | "downloading" | "loading" | "running"
     task_type: str | None
     take_id: int | None

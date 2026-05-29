@@ -276,14 +276,29 @@ class Orchestrator:
 
         scene_id / take_number 由 caller 闭包传入（P2 #1 race condition 防护）。
         L2ParseError / asyncio.TimeoutError 等异常不在此捕获，传到 task.exception() 由 callback 处理。
+
+        llm.status 发射顺序（前端 chip 状态）：
+          模型不在本地 → downloading → ensure_model_ready（HF 下载）→ loading/running → idle
+          模型已在本地 →                                              loading/running → idle
         """
         from backend.pipelines.l2_take import L2Input
+
+        svc = self._deps.llm_service
+
+        # 模型缺失时：发 downloading + await ensure_model_ready（触发下载，在 worker thread）。
+        # getattr 兜底：MagicMock stub 默认 model_present truthy → 跳过此分支，既有测试不受影响。
+        if svc is not None and not getattr(svc, "model_present", True):
+            self.publish(
+                LLM_STATUS,
+                LlmStatusPayload(state="downloading", task_type="l2_take", take_id=take_id),
+            )
+            await svc.ensure_model_ready()
 
         # 起手发射 llm.status：model_loaded=False → loading（首次权重加载），否则 running。
         # getattr 兜底：stub / 非标准服务对象不一定有 model_loaded 属性，缺失视为已加载。
         _state = (
             "loading"
-            if not getattr(self._deps.llm_service, "model_loaded", True)
+            if not getattr(svc, "model_loaded", True)
             else "running"
         )
         self.publish(
