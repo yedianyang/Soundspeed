@@ -686,3 +686,124 @@ async def test_take_end_persists_corrected_segments(tmp_dal: DAL) -> None:
     assert cs["idx"] == 0
     assert cs["original"] == "爱生活"
     assert cs["corrected"] == "爱具体的生活"
+
+
+# ---------------------------------------------------------------------------
+# 1.J-1.L 新增：llm.status 发射测试
+#
+# LLM_STATUS / LlmStatusPayload 导入放函数体内（RED 阶段这两个符号尚不存在，
+# 顶层 import 会炸掉整个文件 collection，令基线一起变红，分不清原因）。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_l2_emits_loading_when_model_not_loaded(tmp_dal: DAL) -> None:
+    """llm_service.model_loaded=False → _run_l2_async 发出 state="loading"。"""
+    from backend.core.events import LLM_STATUS, LlmStatusPayload  # noqa: PLC0415
+
+    scene_id = tmp_dal.create_scene("scene_llm_load")
+    stub_runner = _make_stub_l2_runner()
+    stub_svc = _make_stub_llm_service()
+    stub_svc.model_loaded = False  # 显式设，不依赖 MagicMock 默认真值
+
+    session = SessionState()
+    session.activate_scene(scene_id)
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=stub_runner)
+
+    emitted: list[LlmStatusPayload] = []
+    orch.subscribe(LLM_STATUS, lambda p: emitted.append(p))  # type: ignore[arg-type]
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
+    await orch._l2_task  # type: ignore[attr-defined]
+
+    states = [p.state for p in emitted]
+    assert "loading" in states
+    assert states[0] == "loading"
+
+
+@pytest.mark.asyncio
+async def test_l2_emits_running_when_model_loaded(tmp_dal: DAL) -> None:
+    """llm_service.model_loaded=True → _run_l2_async 发出 state="running"。"""
+    from backend.core.events import LLM_STATUS, LlmStatusPayload  # noqa: PLC0415
+
+    scene_id = tmp_dal.create_scene("scene_llm_run")
+    stub_runner = _make_stub_l2_runner()
+    stub_svc = _make_stub_llm_service()
+    stub_svc.model_loaded = True  # 模型已加载
+
+    session = SessionState()
+    session.activate_scene(scene_id)
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=stub_runner)
+
+    emitted: list[LlmStatusPayload] = []
+    orch.subscribe(LLM_STATUS, lambda p: emitted.append(p))  # type: ignore[arg-type]
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
+    await orch._l2_task  # type: ignore[attr-defined]
+
+    states = [p.state for p in emitted]
+    assert "running" in states
+    assert states[0] == "running"
+
+
+@pytest.mark.asyncio
+async def test_l2_emits_idle_on_success(tmp_dal: DAL) -> None:
+    """L2 成功路径：publish 序列末尾出现 state="idle"。"""
+    from backend.core.events import LLM_STATUS, LlmStatusPayload  # noqa: PLC0415
+
+    scene_id = tmp_dal.create_scene("scene_idle_ok")
+    stub_runner = _make_stub_l2_runner()
+    stub_svc = _make_stub_llm_service()
+    stub_svc.model_loaded = True
+
+    session = SessionState()
+    session.activate_scene(scene_id)
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=stub_runner)
+
+    emitted: list[LlmStatusPayload] = []
+    orch.subscribe(LLM_STATUS, lambda p: emitted.append(p))  # type: ignore[arg-type]
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
+    await orch._l2_task  # type: ignore[attr-defined]
+
+    states = [p.state for p in emitted]
+    assert "idle" in states
+    # idle 应在 running/loading 之后（callback 在 task 完成后触发）
+    assert states[-1] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_l2_emits_idle_on_failure(tmp_dal: DAL) -> None:
+    """L2 失败路径：runner 抛异常，仍发出 state="idle"。"""
+    from backend.core.events import LLM_STATUS, LlmStatusPayload  # noqa: PLC0415
+    from backend.pipelines.l2_take import L2ParseError  # noqa: PLC0415
+
+    scene_id = tmp_dal.create_scene("scene_idle_fail")
+    failing_runner = AsyncMock(side_effect=L2ParseError("解析失败"))
+    stub_svc = _make_stub_llm_service()
+    stub_svc.model_loaded = True
+
+    session = SessionState()
+    session.activate_scene(scene_id)
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=failing_runner)
+
+    emitted: list[LlmStatusPayload] = []
+    orch.subscribe(LLM_STATUS, lambda p: emitted.append(p))  # type: ignore[arg-type]
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
+    try:
+        await orch._l2_task  # type: ignore[attr-defined]
+    except Exception:
+        pass  # 失败路径 task 抛异常，此处忽略
+
+    states = [p.state for p in emitted]
+    assert "idle" in states
+    assert states[-1] == "idle"

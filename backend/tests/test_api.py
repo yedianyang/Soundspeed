@@ -414,6 +414,272 @@ def test_broadcast_noop_after_loop_cleared() -> None:
     cm.broadcast(TAKE_CHANGED, payload)
 
 
+# ── 1.J-1.L 新增：GET 端点 / llm.status 转发 / dev ASR 注入 / llm_service lifecycle ──
+
+
+def test_list_takes_empty_returns_200(tmp_dal: DAL, monkeypatch) -> None:
+    """GET /api/v1/takes（带 token）→ 200，body {"takes":[]}。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.get("/api/v1/takes", headers={"Authorization": f"Bearer {_TOKEN}"})
+    assert resp.status_code == 200
+    assert resp.json() == {"takes": []}
+
+
+def test_list_takes_returns_all(tmp_dal: DAL, monkeypatch) -> None:
+    """写两条 take → GET /api/v1/takes 返回 len==2。"""
+    import time
+
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    headers = {"Authorization": f"Bearer {_TOKEN}"}
+
+    scene_id = tmp_dal.create_scene("scene_lt1")
+    # 通过 REST 端点建 take（保证 session 状态正确）
+    client.post("/api/v1/take/start", json={"scene_id": scene_id, "shot": "A"}, headers=headers)
+    client.post("/api/v1/take/end", headers=headers)
+    client.post("/api/v1/take/start", json={"scene_id": scene_id, "shot": "B"}, headers=headers)
+    client.post("/api/v1/take/end", headers=headers)
+
+    resp = client.get("/api/v1/takes", headers=headers)
+    assert resp.status_code == 200
+    assert len(resp.json()["takes"]) == 2
+
+
+def test_list_takes_scene_id_filter(tmp_dal: DAL, monkeypatch) -> None:
+    """scene_1 + scene_2 各一条，?scene_id=scene_1 → 只返回 scene_1 的。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    headers = {"Authorization": f"Bearer {_TOKEN}"}
+
+    scene1 = tmp_dal.create_scene("scene_f1a")
+    scene2 = tmp_dal.create_scene("scene_f1b")
+    client.post("/api/v1/take/start", json={"scene_id": scene1, "shot": None}, headers=headers)
+    client.post("/api/v1/take/end", headers=headers)
+    client.post("/api/v1/take/start", json={"scene_id": scene2, "shot": None}, headers=headers)
+    client.post("/api/v1/take/end", headers=headers)
+
+    resp = client.get(f"/api/v1/takes?scene_id={scene1}", headers=headers)
+    assert resp.status_code == 200
+    takes = resp.json()["takes"]
+    assert len(takes) == 1
+    assert takes[0]["scene_id"] == scene1
+
+
+def test_list_takes_field_contract(tmp_dal: DAL, monkeypatch) -> None:
+    """TakeDTO 含 11 个规定字段，有意省略 performer_issues / audio_quality。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    headers = {"Authorization": f"Bearer {_TOKEN}"}
+
+    scene_id = tmp_dal.create_scene("scene_fc1")
+    client.post("/api/v1/take/start", json={"scene_id": scene_id, "shot": "X"}, headers=headers)
+    client.post("/api/v1/take/end", headers=headers)
+
+    resp = client.get("/api/v1/takes", headers=headers)
+    assert resp.status_code == 200
+    take = resp.json()["takes"][0]
+
+    required_fields = {
+        "take_id", "scene_id", "take_number", "shot",
+        "start_ts", "end_ts", "status",
+        "script_diff", "notes", "created_at", "updated_at",
+    }
+    assert required_fields.issubset(take.keys())
+    # 有意省略字段不得出现
+    assert "performer_issues" not in take
+    assert "audio_quality" not in take
+
+
+def test_list_takes_without_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
+    """GET /api/v1/takes 无 Authorization 头 → 401。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.get("/api/v1/takes")
+    assert resp.status_code == 401
+
+
+def test_get_take_returns_detail_with_segments(tmp_dal: DAL, monkeypatch) -> None:
+    """GET /api/v1/takes/{take_id} → 200，含 segments 列表。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    headers = {"Authorization": f"Bearer {_TOKEN}"}
+
+    scene_id = tmp_dal.create_scene("scene_det1")
+    client.post("/api/v1/take/start", json={"scene_id": scene_id, "shot": None}, headers=headers)
+    # 直接用 DAL 插入 segment，避免需要 ASR pipeline
+    take_id = tmp_dal.list_takes(scene_id)[0].take_id
+    tmp_dal.insert_segment(take_id=take_id, ch=1, speaker="A", text="hello", start_frame=0, end_frame=1000)
+
+    resp = client.get(f"/api/v1/takes/{take_id}", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["take_id"] == take_id
+    assert "segments" in body
+    assert len(body["segments"]) == 1
+    seg = body["segments"][0]
+    assert seg["text"] == "hello"
+    assert seg["ch"] == 1
+    assert seg["speaker"] == "A"
+
+
+def test_get_take_404_when_missing(tmp_dal: DAL, monkeypatch) -> None:
+    """GET /api/v1/takes/999 → 404。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    headers = {"Authorization": f"Bearer {_TOKEN}"}
+
+    resp = client.get("/api/v1/takes/999", headers=headers)
+    assert resp.status_code == 404
+
+
+def test_llm_status_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
+    """合成 publish llm.status → 已连 WS 收到 {"topic":"llm.status",...}。
+
+    llm.status / LlmStatusPayload 导入放函数体内（RED 阶段这两个符号尚不存在，
+    顶层 import 会炸掉 collection，令 35 条基线全红，分不清 feature-missing 还是 import 错）。
+    """
+    from backend.core.events import LLM_STATUS, LlmStatusPayload  # noqa: PLC0415
+
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws:
+            payload = LlmStatusPayload(state="loading", task_type="l2_take", take_id=1)
+            t = threading.Thread(target=lambda: orch.publish(LLM_STATUS, payload))
+            t.start()
+            t.join()
+
+            msg = ws.receive_json()
+            assert msg["topic"] == "llm.status"
+            assert msg["payload"]["state"] == "loading"
+            assert msg["payload"]["task_type"] == "l2_take"
+            assert msg["payload"]["take_id"] == 1
+
+
+def test_debug_asr_publishes_final(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV=1 挂载；POST /api/v1/debug/asr {is_partial:false} → orch 收到 ASR_FINAL_CH1。
+
+    ASR_FINAL_CH1 / AsrFinalPayload 已在文件顶层 import（既有测试依赖），可直接用。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+
+    received: list[object] = []
+    orch.subscribe(ASR_FINAL_CH1, lambda p: received.append(p))
+
+    resp = client.post(
+        "/api/v1/debug/asr",
+        json={"ch": 1, "text": "hello debug", "speaker": "A", "is_partial": False},
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert resp.status_code == 200
+    assert len(received) == 1
+    from backend.core.events import AsrFinalPayload  # noqa: PLC0415
+    payload = received[0]
+    assert isinstance(payload, AsrFinalPayload)
+    assert payload.text == "hello debug"
+    assert payload.speaker == "A"
+    assert payload.is_partial is False
+
+
+def test_debug_asr_publishes_partial(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV=1；is_partial:true → orch 收到 ASR_PARTIAL_CH1。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+
+    received: list[object] = []
+    orch.subscribe(ASR_PARTIAL_CH1, lambda p: received.append(p))
+
+    resp = client.post(
+        "/api/v1/debug/asr",
+        json={"ch": 1, "text": "partial text", "speaker": None, "is_partial": True},
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert resp.status_code == 200
+    assert len(received) == 1
+    from backend.core.events import AsrPartialPayload  # noqa: PLC0415
+    payload = received[0]
+    assert isinstance(payload, AsrPartialPayload)
+    assert payload.text == "partial text"
+    assert payload.is_partial is True
+
+
+def test_debug_asr_absent_without_dev_flag(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV 未设 → POST /api/v1/debug/asr → 404（路由未挂载）。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.delenv("SOUNDSPEED_DEV", raising=False)
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/debug/asr",
+        json={"ch": 1, "text": "x", "speaker": None, "is_partial": False},
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_create_app_stores_llm_service(tmp_dal: DAL, monkeypatch) -> None:
+    """create_app(orch, llm_service=stub) → app.state.llm_service is stub。"""
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    stub_llm = MagicMock()
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch, llm_service=stub_llm)
+    assert app.state.llm_service is stub_llm
+
+
+def test_lifespan_calls_aclose_on_shutdown(tmp_dal: DAL, monkeypatch) -> None:
+    """TestClient with 块退出 → stub llm_service.aclose() 被 await 一次。"""
+    from unittest.mock import AsyncMock, MagicMock
+
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    stub_llm = MagicMock()
+    stub_llm.aclose = AsyncMock()
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch, llm_service=stub_llm)
+
+    with TestClient(app):
+        pass  # 触发 lifespan startup + shutdown
+
+    stub_llm.aclose.assert_awaited_once()
+
+
+def test_entrypoint_build_app_healthz(tmp_path, monkeypatch) -> None:
+    """build_app() → TestClient → GET /healthz == 200，llm_service 是 get_service() 单例。
+
+    设 SOUNDSPEED_DB 指向 tmp_path，避免写 ./soundspeed.db。
+    llm_service import 放函数体内，避免 RED 阶段符号不存在时炸 collection。
+    """
+    import os
+
+    db_file = tmp_path / "entry_test.db"
+    monkeypatch.setenv("SOUNDSPEED_DB", str(db_file))
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+
+    from backend.api.entrypoint import build_app  # noqa: PLC0415
+    from backend.llm.service import get_service  # noqa: PLC0415
+
+    app = build_app()
+    with TestClient(app) as client:
+        resp = client.get("/healthz")
+        assert resp.status_code == 200
+    assert app.state.llm_service is get_service()
+
+
 def test_broadcast_noop_when_loop_not_running() -> None:
     """BLOCKING 1：loop 已建但未跑（stopped-but-not-closed）→ 跨线程 broadcast no-op。
 
