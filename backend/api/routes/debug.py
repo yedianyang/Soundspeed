@@ -1,16 +1,19 @@
-"""dev-only 合成 ASR 注入端点（1.J-1.L §2.4）。
+"""dev-only 合成端点（1.J-1.L §2.4 + 剧本注入）。
 
 仅在 SOUNDSPEED_DEV=1 时由 create_app 挂载，生产不暴露。
-POST /api/v1/debug/asr → 合成 AsrPartialPayload / AsrFinalPayload → orchestrator.publish。
 
-用途：1.C（结构化 ASR 输出）落地前手动驱动 1.J transcript 面板验收。
-take_id=None → _on_asr_final 通过 _resolve_take_id 回退 session.take_id；
-active take 时 final ASR 既推 WS 也存库（take detail 可见 segments）。
+端点列表：
+  POST /api/v1/debug/asr    合成 AsrPartial/FinalPayload → orchestrator.publish
+  POST /api/v1/debug/script 注入剧本行 → scripts + script_lines，供 L2 diff 使用
 
-start_frame / end_frame：
-  start_frame = int(time.time()*1000)
-  end_frame   = start_frame + 1000  （+1 秒，满足 CHECK(end_frame > start_frame)）
-  partial 不写库，但保持字段格式一致。
+/debug/asr 用途：1.C（结构化 ASR 输出）落地前手动驱动 1.J transcript 面板验收。
+  take_id=None → _on_asr_final 通过 _resolve_take_id 回退 session.take_id；
+  active take 时 final ASR 既推 WS 也存库（take detail 可见 segments）。
+  start_frame / end_frame：start_frame=int(time.time()*1000)，end_frame=start_frame+1000
+  （满足 CHECK(end_frame > start_frame)，相等触发 IntegrityError 被 publish() 吞掉）。
+
+/debug/script 用途：为当前 scene 注入剧本台词，L2 _run_l2_async 通过
+  get_latest_script + list_script_lines 读取，使下一次 take.end 产出真实行级 diff。
 """
 from __future__ import annotations
 
@@ -83,3 +86,64 @@ async def debug_asr(
 
     orch.publish(topic, payload)
     return {"status": "ok"}
+
+
+# ── /debug/script：注入剧本行 ─────────────────────────────────────────────────
+
+
+class ScriptLineIn(BaseModel):
+    """剧本行输入。"""
+
+    character: str | None = None
+    text: str
+
+
+class DebugScriptBody(BaseModel):
+    """POST /api/v1/debug/script 请求体。"""
+
+    scene_id: int | None = None
+    lines: list[ScriptLineIn]
+
+
+@router.post("/script")
+async def debug_script(
+    body: DebugScriptBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict[str, object]:
+    """注入剧本到 scripts + script_lines 表，供 L2 _run_l2_async 读取产出真实 diff。
+
+    scene_id 优先用请求体，缺失时回退 dal.get_active_scene_id()。
+    过滤空行（text.strip() 为空）；过滤后无行 → 422。
+    raw_text 用全角冒号拼接（与导入格式一致）。
+    line_no 从 1 起，按 lines 顺序排。
+    """
+    dal = request.app.state.orchestrator.dal
+
+    # 解析 scene_id
+    scene_id = body.scene_id
+    if scene_id is None:
+        scene_id = dal.get_active_scene_id()
+    if scene_id is None:
+        raise HTTPException(status_code=422, detail="no active scene")
+
+    # 过滤空行
+    valid_lines = [ln for ln in body.lines if ln.text.strip()]
+    if not valid_lines:
+        raise HTTPException(status_code=422, detail="no lines")
+
+    # 组装 raw_text（全角冒号，与剧本文本格式一致）
+    raw_text = "\n".join(
+        f"{ln.character}：{ln.text}" if ln.character else ln.text
+        for ln in valid_lines
+    )
+
+    script_id = dal.insert_script(scene_id, raw_text)
+    for i, ln in enumerate(valid_lines, start=1):
+        dal.insert_script_line(script_id, i, ln.character, ln.text)
+
+    return {
+        "script_id": script_id,
+        "scene_id": scene_id,
+        "line_count": len(valid_lines),
+    }
