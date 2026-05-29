@@ -150,7 +150,7 @@ function SceneShotTakeButton({
             {label}
           </span>
           <span className="font-semibold text-sm text-foreground">{value}</span>
-          <ChevronDown className="size-2.5 sm:size-3 text-muted-foreground" />
+          <ChevronDown className="size-3 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-44">

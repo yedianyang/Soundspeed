@@ -29,7 +29,7 @@ export function SpeakerLabel({
       <DropdownMenuTrigger asChild>
         <span
           className={cn(
-            "inline-flex items-center gap-1 cursor-pointer select-none rounded px-1 -ml-1 transition-colors",
+            "inline-flex items-center gap-1 cursor-pointer select-none rounded-md px-1 -ml-1 transition-colors",
             textColor,
             muted ? "hover:bg-muted/40" : "hover:bg-muted"
           )}

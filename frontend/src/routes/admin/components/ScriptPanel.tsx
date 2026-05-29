@@ -2,6 +2,7 @@ import { useState, useRef } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { miniPill, mutedCard } from "@/lib/styles"
 import {
   ChevronLeft,
   ChevronRight,
@@ -262,7 +263,7 @@ export function ScriptPanel() {
               </Button>
             )}
             {viewIndex === currentIndex && (
-              <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded-full">
+              <span className={miniPill("primary", "text-[10px]")}>
                 当前场
               </span>
             )}
@@ -291,11 +292,11 @@ export function ScriptPanel() {
 
       {/* ========== 剧本内容 ========== */}
       <div className="flex-1 min-h-0 overflow-y-auto">
-        <Card className="rounded-4xl bg-muted/50 shadow-none ring-0 py-0">
+        <Card className={mutedCard}>
           <CardContent className="p-4 space-y-4">
             {/* 场次头 */}
             <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
-              <span className="px-2 py-0.5 rounded-full bg-background">
+              <span className={miniPill("neutral")}>
                 SCENE {viewScene?.id}
               </span>
               <span>{viewScene?.location}</span>

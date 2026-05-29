@@ -95,7 +95,7 @@ export default function AdminHome() {
             <Button variant="ghost" size="icon-sm" className="rounded-full text-muted-foreground flex-shrink-0" title="导入已录制文件">
               <Folder className="size-4" />
             </Button>
-            <StatusChip label="Input" tone="ok" detail={INPUT_DEVICE}>
+            <StatusChip label="Input" tone="ok" detail={INPUT_DEVICE} detailClassName="hidden sm:inline">
               {Array.from({ length: INPUT_CHANNELS }, (_, i) => (
                 <LevelMeter key={i} count={5} color={i === 0 ? "bg-green-500" : "bg-primary"} />
               ))}
@@ -119,7 +119,7 @@ export default function AdminHome() {
             <Button
               variant="ghost"
               size="icon-sm"
-              className="text-muted-foreground"
+              className="rounded-full text-muted-foreground"
               title={settingsOpen ? "关闭设置" : "打开设置"}
               onClick={() => setSettingsOpen((prev) => !prev)}
             >

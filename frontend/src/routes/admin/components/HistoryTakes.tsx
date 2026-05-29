@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { STATUS_DOT, STATUS_LABEL, MARK_ORDER } from "@/lib/constants"
 import { cn } from "@/lib/utils"
+import { mutedCard } from "@/lib/styles"
 import type { Status, Take } from "@/types/take"
 import { HISTORY_TAKES } from "@/data/mock"
 
@@ -138,7 +139,7 @@ export function HistoryTakes() {
       {HISTORY_TAKES.map((take) => (
         <Card
           key={take.id}
-          className="w-full text-left rounded-4xl bg-muted/50 hover:bg-muted shadow-none ring-0 py-0 transition-colors"
+          className={cn(mutedCard, "w-full text-left hover:bg-muted transition-colors")}
         >
           <CardContent className="p-4 space-y-2">
             <div className="flex items-center justify-between">

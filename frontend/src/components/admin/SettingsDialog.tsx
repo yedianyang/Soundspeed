@@ -16,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
+import { miniPill } from "@/lib/styles"
 import { Check, ChevronDown, ChevronRight } from "lucide-react"
 import { Plus, Trash2, User, AudioLines, Link2 } from "lucide-react"
 
@@ -221,7 +222,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                           {bound.map((sid) => (
                             <span
                               key={sid}
-                              className="text-[10px] bg-background px-1.5 py-0.5 rounded-full"
+                              className={miniPill("neutral", "text-[10px]")}
                             >
                               {sid}
                             </span>
@@ -444,7 +445,7 @@ function BoundSpeakersCollapse({
                 <AudioLines className="size-4 text-primary flex-shrink-0" />
                 <span className="text-sm font-medium flex-1">{speaker.id}</span>
                 {boundActor && (
-                  <span className="text-[10px] bg-primary/10 text-primary px-2 py-0.5 rounded-full flex-shrink-0">
+                  <span className={miniPill("primary", "text-[10px] flex-shrink-0")}>
                     {boundActor}
                   </span>
                 )}

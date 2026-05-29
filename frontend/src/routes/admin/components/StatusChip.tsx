@@ -6,12 +6,14 @@ export function StatusChip({
   label,
   tone,
   detail,
+  detailClassName,
   onClick,
   children,
 }: {
   label: string
   tone: "ok" | "warn" | "err"
   detail?: string
+  detailClassName?: string
   onClick?: () => void
   children?: ReactNode
 }) {
@@ -26,7 +28,7 @@ export function StatusChip({
       <span className={cn("size-1.5 rounded-full flex-shrink-0", dotColor)} />
       <span className="hidden sm:inline text-xs font-medium text-foreground">{label}</span>
       {detail && (
-        <span className="text-[10px] font-mono text-muted-foreground">{detail}</span>
+        <span className={cn("text-[10px] font-mono text-muted-foreground", detailClassName)}>{detail}</span>
       )}
       {children}
     </>
@@ -44,7 +46,7 @@ export function StatusChip({
 
 export function LevelMeter({
   count = 5,
-  color = "bg-emerald-500",
+  color = "bg-green-500",
 }: {
   count?: number
   color?: string
