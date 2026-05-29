@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { miniPill } from "@/lib/styles"
 import { API_BASE, LS_TOKEN_KEY } from "@/lib/config"
+import { DEV_ASR_SAMPLE, DEV_SCRIPT_SAMPLE } from "@/data/devFixtures"
 import { useSessionStore } from "@/store/session"
 import {
   endTake,
@@ -250,10 +251,10 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
   const activeScene = pickActiveScene(scenes)
   const startRecordingLocal = useSessionStore((s) => s.startRecordingLocal)
   const stopRecordingLocal = useSessionStore((s) => s.stopRecordingLocal)
-  const [asrJson, setAsrJson] = useState("")
+  const [asrJson, setAsrJson] = useState(DEV_ASR_SAMPLE)
   const [running, setRunning] = useState(false)
   const [runStatus, setRunStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
-  const [scriptText, setScriptText] = useState("")
+  const [scriptText, setScriptText] = useState(DEV_SCRIPT_SAMPLE)
   const [scriptStatus, setScriptStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
 
   const handleInjectScript = async () => {
