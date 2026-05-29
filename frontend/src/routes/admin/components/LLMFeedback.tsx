@@ -6,7 +6,7 @@ export function LLMFeedback() {
   return (
     <div className="py-4 space-y-3">
       {LLM_FEEDBACK.map((item, i) => (
-        <Card key={i} className="rounded-3xl bg-muted/50 shadow-none ring-0 py-0">
+        <Card key={i} className="rounded-4xl bg-muted/50 shadow-none ring-0 py-0">
           <CardContent className="p-4 space-y-2">
             <Badge variant="secondary" className="font-mono uppercase">
               {item.kind}

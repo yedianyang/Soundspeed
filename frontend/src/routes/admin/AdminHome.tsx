@@ -4,6 +4,7 @@ import {
   Folder,
   Settings,
   Upload,
+  X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -17,6 +18,7 @@ import { LiveTranscript } from "./components/LiveTranscript"
 import { ScriptPanel } from "./components/ScriptPanel"
 import { LLMFeedback } from "./components/LLMFeedback"
 import { HistoryTakes } from "./components/HistoryTakes"
+import SettingsDialog from "@/components/admin/SettingsDialog"
 
 const MOBILE_TABS = ["live", "script", "history", "llm"] as const
 
@@ -24,6 +26,7 @@ export default function AdminHome() {
   const [mobileTab, setMobileTab] = useState("live")
   const [sideTab, setSideTab] = useState("script")
   const [llmIndex, setLlmIndex] = useState(0)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   // ---- recording state (lifted from BottomControlBar) ----
   const [isRecording, setIsRecording] = useState(false)
@@ -94,7 +97,7 @@ export default function AdminHome() {
             </Button>
             <StatusChip label="Input" tone="ok" detail={INPUT_DEVICE}>
               {Array.from({ length: INPUT_CHANNELS }, (_, i) => (
-                <LevelMeter key={i} count={5} color={i === 0 ? "bg-emerald-500" : "bg-primary"} />
+                <LevelMeter key={i} count={5} color={i === 0 ? "bg-green-500" : "bg-primary"} />
               ))}
             </StatusChip>
             <StatusChip
@@ -113,8 +116,14 @@ export default function AdminHome() {
             <Button variant="ghost" size="icon-sm" className="rounded-full text-muted-foreground" title="导出">
               <Upload className="size-4" />
             </Button>
-            <Button variant="ghost" size="icon-sm" className="text-muted-foreground">
-              <Settings />
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="text-muted-foreground"
+              title={settingsOpen ? "关闭设置" : "打开设置"}
+              onClick={() => setSettingsOpen((prev) => !prev)}
+            >
+              {settingsOpen ? <X className="size-4" /> : <Settings className="size-4" />}
             </Button>
           </div>
         </div>
@@ -189,6 +198,8 @@ export default function AdminHome() {
       </main>
 
       {/* ============ Bottom ============ */}
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+
       <BottomControlBar
         isRecording={isRecording}
         onToggleRecording={handleToggleRecording}

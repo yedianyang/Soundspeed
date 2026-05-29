@@ -1,5 +1,5 @@
 import { useState, useRef, type ReactNode } from "react"
-import { ChevronDown } from "lucide-react"
+import { ChevronDown, ChevronRight, ChevronUp } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
@@ -114,22 +114,35 @@ export function HistoryTakes() {
   const [sceneOverrides, setSceneOverrides] = useState<Record<string, number>>({})
   const [shotOverrides, setShotOverrides] = useState<Record<string, number>>({})
   const [noOverrides, setNoOverrides] = useState<Record<string, number>>({})
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const getStatus = (take: Take) => overrides[take.id] ?? take.status
   const getScene = (take: Take) => sceneOverrides[take.id] ?? take.scene
   const getShot = (take: Take) => shotOverrides[take.id] ?? take.shot
   const getNo = (take: Take) => noOverrides[take.id] ?? take.no
 
+  const toggleExpand = (id: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+  }
+
   return (
     <div className="py-4 space-y-2.5">
       {HISTORY_TAKES.map((take) => (
         <Card
           key={take.id}
-          className="w-full text-left rounded-3xl bg-muted/50 hover:bg-muted shadow-none ring-0 py-0 transition-colors"
+          className="w-full text-left rounded-4xl bg-muted/50 hover:bg-muted shadow-none ring-0 py-0 transition-colors"
         >
           <CardContent className="p-4 space-y-2">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1 flex-wrap">
+              <div className="flex items-center gap-0.5 sm:gap-1 flex-wrap">
                 <LongPressDropdown trigger={<>Scene {getScene(take)}</>}>
                   <DropdownMenuContent align="start">
                     <DropdownMenuLabel>修改 Scene</DropdownMenuLabel>
@@ -180,11 +193,50 @@ export function HistoryTakes() {
                   onChange={(s) => setOverrides((prev) => ({ ...prev, [take.id]: s }))}
                 />
               </div>
-              <span className="text-[10px] font-mono text-muted-foreground">14:30</span>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] font-mono text-muted-foreground">14:30</span>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="size-6 rounded-full"
+                  onClick={() => toggleExpand(take.id)}
+                >
+                  {expanded.has(take.id) ? (
+                    <ChevronUp className="size-3.5" />
+                  ) : (
+                    <ChevronRight className="size-3.5" />
+                  )}
+                </Button>
+              </div>
             </div>
-            <p className="text-sm text-muted-foreground line-clamp-2">
-              {take.lines.map((l) => l.text).join("  ")}
-            </p>
+            {expanded.has(take.id) ? (
+              <div className="space-y-2">
+                {take.lines.map((line, i) => (
+                  <p key={i} className="text-sm">
+                    <span className="text-primary font-medium">{line.speaker}：</span>
+                    {line.text}
+                  </p>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground line-clamp-2">
+                {take.lines.map((l) => l.text).join("  ")}
+              </p>
+            )}
+            {take.note && (
+              <div className="flex items-center gap-2">
+                <div className="flex-1 h-px bg-border" />
+                <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                  Note
+                </span>
+                <div className="flex-1 h-px bg-border" />
+              </div>
+            )}
+            {take.note && (
+              <p className="text-xs text-muted-foreground">
+                {take.note}
+              </p>
+            )}
           </CardContent>
         </Card>
       ))}

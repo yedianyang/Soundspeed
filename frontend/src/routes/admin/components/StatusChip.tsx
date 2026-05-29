@@ -16,7 +16,7 @@ export function StatusChip({
   children?: ReactNode
 }) {
   const dotColor =
-    tone === "ok" ? "bg-emerald-500" : tone === "warn" ? "bg-primary" : "bg-destructive"
+    tone === "ok" ? "bg-green-500" : tone === "warn" ? "bg-primary" : "bg-destructive"
   const className = cn(
     "flex items-center gap-1.5 h-9 px-4 rounded-full bg-muted/70 whitespace-nowrap sm:min-w-[5.5rem]",
     onClick && "cursor-pointer active:scale-95 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

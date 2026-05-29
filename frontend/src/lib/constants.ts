@@ -1,11 +1,11 @@
 import type { Status } from "@/types/take"
 
 export const STATUS_DOT: Record<Status, string> = {
-  keeper: "bg-emerald-500",
+  keeper: "bg-green-500",
   ng: "bg-destructive",
   hold: "bg-primary",
   tbd: "bg-muted-foreground",
-  recording: "bg-red-500 animate-pulse",
+  recording: "bg-destructive animate-pulse",
 }
 
 export const STATUS_LABEL: Record<Status, string> = {
