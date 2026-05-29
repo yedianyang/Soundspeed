@@ -66,6 +66,46 @@ def test_take_start_without_token_returns_401(tmp_dal: DAL, monkeypatch) -> None
     assert resp.status_code == 401
 
 
+def test_take_start_with_wrong_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
+    """带错误但 ASCII 的 token → 401。守 compare_digest 比对逻辑本身。
+
+    现有逻辑对 ASCII 错 token 已正确返 401，本测试修前就应绿——补漏测（之前完全
+    没测比对逻辑，删了 compare_digest 也不会红），作为安全回归。
+    """
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        "/api/v1/take/start",
+        json={"scene_id": 1, "shot": "A"},
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+    assert resp.status_code == 401
+
+
+def test_take_start_with_non_ascii_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
+    """带非 ASCII token（café 的 é，U+00E9，latin-1 内 → httpx 可编码进头）→ 401。
+
+    header 值传 raw bytes b"Bearer caf\xe9"：httpx 对 str header 值按 ASCII 严格编码，
+    "Bearer café" 会在客户端 UnicodeEncodeError 死掉（测到的是 transport 不是比对逻辑）。
+    传 bytes 则 httpx 原样上线，starlette 服务端按 latin-1 解码 \xe9 → credentials
+    "café"（非 ASCII str）——正是生产里的真实 bug 路径。
+    修前红：secrets.compare_digest(str, str) 对含非 ASCII 的 str 在 auth.py 抛 TypeError，
+    require_admin 未 catch → TestClient(raise_server_exceptions=True) 把 TypeError
+    重抛进本测试（不是返 500）。
+    修后绿：auth.py 改 bytes 比对，非 ASCII 安全比对失败 → 干净 401。
+    """
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        "/api/v1/take/start",
+        json={"scene_id": 1, "shot": "A"},
+        headers={"Authorization": b"Bearer caf\xe9"},
+    )
+    assert resp.status_code == 401
+
+
 def test_take_start_with_valid_token_publishes_event(tmp_dal: DAL, monkeypatch) -> None:
     """带正确 Bearer token，POST take/start → 200，orchestrator 收到 TakeStartPayload。
 
@@ -198,6 +238,51 @@ def test_ws_with_valid_token_connects(tmp_dal: DAL, monkeypatch) -> None:
             assert ws is not None
 
 
+def test_ws_non_ascii_token_rejected(tmp_dal: DAL, monkeypatch) -> None:
+    """/ws?token=<非 ASCII> → 干净 close 1008（WebSocketDisconnect code==1008）。
+
+    修前红：ws_endpoint 里 secrets.compare_digest(token, expected) 对含非 ASCII 的
+    str 抛 TypeError，在 close(1008) 之前抛 → 握手异常终止，surface 的不是
+    WebSocketDisconnect(1008)，pytest.raises(WebSocketDisconnect) 拿不到 1008 → RED。
+    修后绿：ws.py 改 bytes 比对，比对干净失败 → close(1008)。
+    用 café（é，latin-1 内）保证 httpx 能编码进 query，RED 是服务端 TypeError 而非
+    客户端编码错。镜像 test_ws_without_token_rejected。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    app = create_app(create_orchestrator(tmp_dal))
+
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect("/ws?token=caf%C3%A9"):
+                pass
+    assert exc_info.value.code == 1008
+
+
+def test_ws_binary_frame_cleans_up_connection(tmp_dal: DAL, monkeypatch) -> None:
+    """连上 ws 后发 binary frame → 连接最终从 cm._active 清理（不泄漏）。
+
+    机制：保活循环 await receive_text() 收到 binary frame 时 starlette 抛 KeyError
+    （message 只有 "bytes" 没 "text"）。
+    修前红：循环只 except WebSocketDisconnect，KeyError 逃逸 → cm.disconnect 不跑 →
+    _active 残留 1 个死连接（泄漏）。
+    修后绿：finally: cm.disconnect(websocket) 保证任何退出路径都清理 → _active 空。
+    KeyError 在两种状态下都会传播（finally 不吞它），唯一判别是 len(cm._active)：
+    修前 1、修后 0。故整个 with 块包 try/except KeyError，让异常到不了断言。
+    退出 with 的 join 保证服务端 task 跑完 finally 才走到断言（同 test_ws_disconnect_cleans_up）。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    app = create_app(create_orchestrator(tmp_dal))
+
+    with TestClient(app) as client:
+        cm = client.app.state.connection_manager
+        try:
+            with client.websocket_connect(f"/ws?token={_TOKEN}") as ws:
+                ws.send_bytes(b"binary-frame")
+        except KeyError:
+            pass  # binary frame 致服务端 KeyError，两种状态都传播；判别只看 _active
+        assert len(cm._active) == 0  # type: ignore[attr-defined]
+
+
 def test_take_changed_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
     """连上 ws 后 POST /take/start → ws 收到一条 take.changed（loop 线程内投递路径）。
 
@@ -207,6 +292,9 @@ def test_take_changed_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
     必须先 create_scene：_on_take_start 在 publish 之前 start_take 写库，scene 不存在
     会让它在 publish 前抛异常并被 publish 吞掉，take.changed 永不发，receive_json 死挂。
     """
+    # 无超时风险：下面 ws.receive_json() 无超时，若上游回归致 take.changed 永不发，
+    # CI 会超时挂死而非干净 fail。当前环境无 pytest-timeout 插件（--markers 无 timeout），
+    # 不引脆弱的 watchdog 线程。TODO: 装 pytest-timeout 后给本函数加 @pytest.mark.timeout(N)。
     scene_id = tmp_dal.create_scene("scene_ws_take")
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
     app = create_app(create_orchestrator(tmp_dal))
@@ -235,6 +323,9 @@ def test_asr_final_forwarded_from_background_thread(tmp_dal: DAL, monkeypatch) -
     take 未 active 时 _on_asr_final 直接 return（不写库），桥接转发仍应发生——
     转发是订阅 CM.broadcast，与内置 segment handler 互不影响。
     """
+    # 无超时风险：下面 ws.receive_json() 无超时，若上游回归致 asr.final 永不转发，
+    # CI 会超时挂死而非干净 fail。当前环境无 pytest-timeout 插件（--markers 无 timeout），
+    # 不引脆弱的 watchdog 线程。TODO: 装 pytest-timeout 后给本函数加 @pytest.mark.timeout(N)。
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
     orch = create_orchestrator(tmp_dal)
     app = create_app(orch)

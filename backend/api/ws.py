@@ -137,7 +137,9 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     expected: str = websocket.app.state.admin_token
     token = websocket.query_params.get("token", "")
 
-    if not secrets.compare_digest(token, expected):
+    # bytes 比对：secrets.compare_digest(str, str) 对含非 ASCII 的 str 抛 TypeError，
+    # 在 close(1008) 之前抛 → 握手异常终止。encode 后 bytes 比对对非 ASCII 安全。
+    if not secrets.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
         await websocket.close(code=1008)  # 不 accept，握手被拒
         return
 
@@ -147,4 +149,9 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             # 保活：本切片不消费客户端消息，只等断开
             await websocket.receive_text()
     except WebSocketDisconnect:
+        pass
+    finally:
+        # finally 保证任何退出路径都清理连接：WebSocketDisconnect 正常断开，或
+        # binary frame 致 receive_text() 抛 KeyError（message 无 "text"）等。
+        # KeyError 仍会从端点 task 传播（被记录），但连接已清理，不泄漏在 _active。
         cm.disconnect(websocket)

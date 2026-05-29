@@ -45,7 +45,9 @@ def require_admin(
     if (
         credentials is None
         or credentials.scheme.lower() != "bearer"
-        or not secrets.compare_digest(credentials.credentials, expected)
+        or not secrets.compare_digest(
+            credentials.credentials.encode("utf-8"), expected.encode("utf-8")
+        )
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
