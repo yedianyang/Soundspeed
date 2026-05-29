@@ -752,7 +752,11 @@ async def test_l2_emits_running_when_model_loaded(tmp_dal: DAL) -> None:
 
 @pytest.mark.asyncio
 async def test_l2_emits_idle_on_success(tmp_dal: DAL) -> None:
-    """L2 成功路径：publish 序列末尾出现 state="idle"。"""
+    """L2 成功路径：idle 恰好发一次，在 running/loading 之后。
+
+    2-emission 模型：_run_l2_async 发一次 running/loading，_l2_done_callback 发一次 idle。
+    断 idle 精确一次（不多不少），杜绝双发回归。
+    """
     from backend.core.events import LLM_STATUS, LlmStatusPayload  # noqa: PLC0415
 
     scene_id = tmp_dal.create_scene("scene_idle_ok")
@@ -773,14 +777,18 @@ async def test_l2_emits_idle_on_success(tmp_dal: DAL) -> None:
     await orch._l2_task  # type: ignore[attr-defined]
 
     states = [p.state for p in emitted]
-    assert "idle" in states
-    # idle 应在 running/loading 之后（callback 在 task 完成后触发）
+    # 2-emission：[running, idle]（model_loaded=True → running；callback → idle）
+    assert states.count("idle") == 1, f"idle 应恰好发一次，实际: {states}"
     assert states[-1] == "idle"
 
 
 @pytest.mark.asyncio
 async def test_l2_emits_idle_on_failure(tmp_dal: DAL) -> None:
-    """L2 失败路径：runner 抛异常，仍发出 state="idle"。"""
+    """L2 失败路径：runner 抛异常，idle 恰好发一次。
+
+    2-emission 模型同成功路径；失败时 callback 跳过 exc is None 分支，发降级 take.changed。
+    断 idle 精确一次，杜绝双发回归。
+    """
     from backend.core.events import LLM_STATUS, LlmStatusPayload  # noqa: PLC0415
     from backend.pipelines.l2_take import L2ParseError  # noqa: PLC0415
 
@@ -805,5 +813,54 @@ async def test_l2_emits_idle_on_failure(tmp_dal: DAL) -> None:
         pass  # 失败路径 task 抛异常，此处忽略
 
     states = [p.state for p in emitted]
-    assert "idle" in states
+    assert states.count("idle") == 1, f"idle 应恰好发一次，实际: {states}"
+    assert states[-1] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_l2_emits_idle_on_cancellation(tmp_dal: DAL) -> None:
+    """L2 取消路径（P1-2 fix）：task.cancel() 后 idle 仍发出（恰好一次）。
+
+    机制：_l2_done_callback 在 idle publish 之后才检查 task.cancelled()，
+    保证取消路径不漏发 idle。实际场景：shutdown 时 loop 已停，broadcast no-op；
+    此测试在 running loop 内取消，验证 idle 确实到达 subscriber。
+    """
+    from backend.core.events import LLM_STATUS, LlmStatusPayload  # noqa: PLC0415
+
+    scene_id = tmp_dal.create_scene("scene_idle_cancel")
+    # 用 asyncio.Event 让 runner 挂住，再 cancel task
+    import asyncio  # noqa: PLC0415
+
+    blocked = asyncio.Event()
+
+    async def hanging_runner(input_data: object, llm_service: object) -> None:
+        await blocked.wait()  # 永远挂住，直到 task 被 cancel
+
+    stub_svc = _make_stub_llm_service()
+    stub_svc.model_loaded = True
+
+    session = SessionState()
+    session.activate_scene(scene_id)
+    orch = create_orchestrator(
+        tmp_dal, session, llm_service=stub_svc, l2_runner=hanging_runner
+    )
+
+    emitted: list[LlmStatusPayload] = []
+    orch.subscribe(LLM_STATUS, lambda p: emitted.append(p))  # type: ignore[arg-type]
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+    task = orch._l2_task  # type: ignore[attr-defined]
+    assert task is not None
+
+    # 等 _run_l2_async 进入 hanging_runner（已发 running），再取消
+    await asyncio.sleep(0)  # 让 task 启动并到达 await blocked.wait()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    states = [p.state for p in emitted]
+    assert states.count("idle") == 1, f"取消路径 idle 应恰好发一次，实际: {states}"
     assert states[-1] == "idle"

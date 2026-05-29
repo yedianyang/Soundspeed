@@ -38,10 +38,12 @@ router = APIRouter(prefix="/api/v1", tags=["takes"])
 
 
 class SegmentOut(BaseModel):
-    """transcript_segments 行的响应投影。"""
+    """transcript_segments 行的响应投影（spec §2.1 shape）。
+
+    有意省略 take_id：前端 TranscriptSegmentDTO 不含此字段，减少响应体冗余。
+    """
 
     segment_id: int
-    take_id: int
     ch: int
     speaker: str | None
     text: str

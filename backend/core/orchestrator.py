@@ -371,20 +371,22 @@ class Orchestrator:
     ) -> None:
         """L2 task done callback：发 idle + 失败时 log + publish 降级 take.changed。
 
-        codex P8：idle 统一在此发，成功和失败路径均发一次，消除双发歧义。
+        codex P8：idle 统一在此发，成功 / 失败 / 取消三条路径均发一次，消除双发歧义。
+        cancelled 路径：shutdown 时 loop 取消 task，broadcast 会 no-op（loop 已停），
+          发 idle 是防御性保证——若未来在未停 loop 时取消，前端也能回到 idle。
         成功路径：_run_l2_async 已 publish 第二次 take.changed，callback 只发 idle。
         失败路径：记 WARNING + publish idle + publish 降级 take.changed（script_diff=None）。
 
         take_id / scene_id / take_number 由 add_done_callback lambda 闭包绑定，
         避免 session 被后续 take.start 覆盖（race condition 防护）。
         """
-        if task.cancelled():
-            return
-        # 无论成功失败，先发 idle（两条路径都经过此处）
+        # 无论成功 / 失败 / 取消，先发 idle（所有路径都经过此处）
         self.publish(
             LLM_STATUS,
             LlmStatusPayload(state="idle", task_type="l2_take", take_id=take_id),
         )
+        if task.cancelled():
+            return  # 取消路径：idle 已发，不取 exception（会抛 CancelledError）
         exc = task.exception()
         if exc is None:
             return  # 成功路径，_run_l2_async 已处理 take.changed
