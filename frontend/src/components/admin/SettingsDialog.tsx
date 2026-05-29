@@ -24,10 +24,12 @@ import { useSessionStore } from "@/store/session"
 import {
   endTake,
   injectDebugAsr,
+  injectDebugScript,
   pickActiveScene,
   startTake,
   useScenes,
   type DebugAsrSeg,
+  type DebugScriptLine,
 } from "@/lib/api"
 import { Check, ChevronDown, ChevronRight } from "lucide-react"
 import { Plus, Trash2, User, AudioLines, Link2, Server, FlaskConical } from "lucide-react"
@@ -103,6 +105,73 @@ function parseDebugAsr(raw: string): { segs: DebugAsrSeg[]; error: string | null
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+const DEBUG_SCRIPT_PLACEHOLDER = `SZA：你昨天为什么没告诉我真相。
+YY：因为我不想让你再卷进来。
+那你打算什么时候告诉我。
+
+// 也接受 JSON：[{ "character": "SZA", "text": "..." }] 或 {lines:[...]}`
+
+// 剧本文本解析，两种输入形状（按优先级）：
+// 1. JSON 数组 [{character?, text}] 或 {lines:[...]}（容错，同 ASR parser）。
+// 2. 纯文本，每行一句：按首个全角「：」或半角「:」切分 → {character: 冒号前, text: 冒号后}；
+//    无冒号的行 → {character: null, text: 整行}。空行跳过。
+// 每行需非空 text。
+function parseDebugScript(raw: string): { lines: DebugScriptLine[]; error: string | null } {
+  const trimmed = raw.trim()
+  if (!trimmed) return { lines: [], error: "剧本为空" }
+
+  // 先试 JSON（数组 或 {lines:[...]}）。失败则当纯文本。
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    let data: unknown = null
+    try {
+      data = JSON.parse(trimmed)
+    } catch {
+      // 解析失败 → data 保持 null，退回纯文本路径。
+    }
+    if (data) {
+      const arr = Array.isArray(data)
+        ? data
+        : typeof data === "object" && Array.isArray((data as { lines?: unknown }).lines)
+          ? (data as { lines: unknown[] }).lines
+          : null
+      if (arr) {
+        const lines: DebugScriptLine[] = []
+        for (const item of arr) {
+          if (!item || typeof item !== "object") continue
+          const o = item as Record<string, unknown>
+          if (typeof o.text !== "string" || !o.text.trim()) continue
+          lines.push({
+            character: typeof o.character === "string" ? o.character : null,
+            text: o.text.trim(),
+          })
+        }
+        if (lines.length === 0) return { lines: [], error: "JSON 里没有带 text 的有效行" }
+        return { lines, error: null }
+      }
+      // 是 JSON 但形状不对（既非数组也非 {lines:[]}）→ 报错，不静默当纯文本。
+      return { lines: [], error: "JSON 需为数组或 {lines:[...]}" }
+    }
+  }
+
+  // 纯文本：每行按首个 ：/ : 切分。
+  const lines: DebugScriptLine[] = []
+  for (const row of trimmed.split(/\r?\n/)) {
+    const line = row.trim()
+    if (!line) continue
+    const m = /[：:]/.exec(line)
+    if (m) {
+      const character = line.slice(0, m.index).trim()
+      const text = line.slice(m.index + 1).trim()
+      if (!text) continue
+      lines.push({ character: character || null, text })
+    } else {
+      lines.push({ character: null, text: line })
+    }
+  }
+  if (lines.length === 0) return { lines: [], error: "没有有效台词行" }
+  return { lines, error: null }
+}
 
 // ---- 数据模型 ----
 
@@ -184,6 +253,35 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
   const [asrJson, setAsrJson] = useState("")
   const [running, setRunning] = useState(false)
   const [runStatus, setRunStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
+  const [scriptText, setScriptText] = useState("")
+  const [scriptStatus, setScriptStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
+
+  const handleInjectScript = async () => {
+    if (running) return
+    const { lines, error } = parseDebugScript(scriptText)
+    if (error) {
+      setScriptStatus({ kind: "error", msg: error })
+      return
+    }
+    if (!activeScene) {
+      setScriptStatus({ kind: "error", msg: "无活跃场次，无法注入" })
+      return
+    }
+    setRunning(true)
+    try {
+      // sceneId 省略 → 后端用活跃场次；这里显式传 activeScene 与 UI 显示一致。
+      const res = await injectDebugScript(lines, activeScene.scene_id)
+      setScriptStatus({
+        kind: "done",
+        msg: `注入 ${res.line_count} 行剧本到 Scene ${res.scene_id}`,
+      })
+    } catch (err) {
+      console.error("inject script failed", err)
+      setScriptStatus({ kind: "error", msg: "请求失败（看 console / 是否 SOUNDSPEED_DEV=1）" })
+    } finally {
+      setRunning(false)
+    }
+  }
 
   const handleRunFullTake = async () => {
     if (running) return
@@ -379,6 +477,51 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                     {activeScene ? `场次 ${activeScene.scene_code}` : "无活跃场次"}
                   </span>
                 </div>
+
+                {/* ---- 剧本注入（先做，持久化） ---- */}
+                <span className="text-xs font-medium text-foreground">
+                  剧本（可选，注入后 L2 才能产出真实 diff）
+                </span>
+                <Textarea
+                  value={scriptText}
+                  onChange={(e) => setScriptText(e.target.value)}
+                  placeholder={DEBUG_SCRIPT_PLACEHOLDER}
+                  rows={5}
+                  className="font-mono text-xs"
+                  disabled={running}
+                />
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="gap-1.5"
+                    disabled={running || !activeScene || !scriptText.trim()}
+                    onClick={handleInjectScript}
+                  >
+                    注入剧本到当前场次
+                  </Button>
+                  {scriptStatus && (
+                    <span
+                      className={
+                        scriptStatus.kind === "error"
+                          ? "text-xs text-destructive"
+                          : scriptStatus.kind === "done"
+                            ? "text-xs text-green-600"
+                            : "text-xs text-muted-foreground"
+                      }
+                    >
+                      {scriptStatus.msg}
+                    </span>
+                  )}
+                </div>
+                <span className="text-[10px] text-muted-foreground/70">
+                  先注入剧本，再「一键跑完整 take」，L2 就会按剧本逐行比对（改词/漏词/加词）。
+                  剧本会持久化，注入一次可跑多条 take。
+                </span>
+
+                <Separator className="my-1" />
+
+                {/* ---- ASR 注入 + 一键跑完整 take ---- */}
                 <span className="text-xs text-muted-foreground">
                   粘贴 ASR JSON，一键跑完整 take（start → 逐段注入 → end → L2）。
                 </span>

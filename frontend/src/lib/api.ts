@@ -83,6 +83,29 @@ export function injectDebugAsr(seg: DebugAsrSeg): Promise<void> {
   })
 }
 
+// dev-only 剧本注入（后端仅 SOUNDSPEED_DEV=1 挂载 /api/v1/debug/script）。
+// 注入后持久化到场次，L2 才能按剧本逐行比对产出真实 diff。sceneId 省略时后端用活跃场次。
+export interface DebugScriptLine {
+  character: string | null
+  text: string
+}
+
+export interface DebugScriptResult {
+  script_id: number
+  scene_id: number
+  line_count: number
+}
+
+export function injectDebugScript(
+  lines: DebugScriptLine[],
+  sceneId?: number,
+): Promise<DebugScriptResult> {
+  return request<DebugScriptResult>(`/api/v1/debug/script`, {
+    method: "POST",
+    body: JSON.stringify(sceneId !== undefined ? { scene_id: sceneId, lines } : { lines }),
+  })
+}
+
 // ── react-query 查询键 + hooks ──
 
 export const scenesQueryKey = () => ["scenes"] as const
