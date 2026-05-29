@@ -429,8 +429,6 @@ def test_list_takes_empty_returns_200(tmp_dal: DAL, monkeypatch) -> None:
 
 def test_list_takes_returns_all(tmp_dal: DAL, monkeypatch) -> None:
     """写两条 take → GET /api/v1/takes 返回 len==2。"""
-    import time
-
     orch = create_orchestrator(tmp_dal)
     client = _make_client(orch, monkeypatch)
     headers = {"Authorization": f"Bearer {_TOKEN}"}
@@ -592,6 +590,8 @@ def test_debug_asr_publishes_final(tmp_dal: DAL, monkeypatch) -> None:
 
 def test_debug_asr_publishes_partial(tmp_dal: DAL, monkeypatch) -> None:
     """SOUNDSPEED_DEV=1；is_partial:true → orch 收到 ASR_PARTIAL_CH1。"""
+    from backend.core.events import ASR_PARTIAL_CH1  # noqa: PLC0415
+
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
     monkeypatch.setenv("SOUNDSPEED_DEV", "1")
     orch = create_orchestrator(tmp_dal)
@@ -664,8 +664,6 @@ def test_entrypoint_build_app_healthz(tmp_path, monkeypatch) -> None:
     设 SOUNDSPEED_DB 指向 tmp_path，避免写 ./soundspeed.db。
     llm_service import 放函数体内，避免 RED 阶段符号不存在时炸 collection。
     """
-    import os
-
     db_file = tmp_path / "entry_test.db"
     monkeypatch.setenv("SOUNDSPEED_DB", str(db_file))
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)

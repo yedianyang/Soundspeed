@@ -20,6 +20,9 @@ TAKE_START = "take.start"
 TAKE_END = "take.end"
 TAKE_CHANGED = "take.changed"
 
+# LLM 状态事件（1.J-1.L：驱动前端 LLM chip 黄点 Loading）
+LLM_STATUS = "llm.status"
+
 # 其他事件（本 ticket 只定义常量，不注册 handler）
 MANUAL_MARK = "manual.mark"
 QUERY_REQUEST = "query.request"
@@ -113,3 +116,16 @@ class TakeChangedPayload:
     take_number: int
     status: str
     script_diff: dict | None
+
+
+@dataclass(frozen=True)
+class LlmStatusPayload:
+    """llm.status 的 payload（1.J-1.L：驱动前端 LLM chip 状态）。
+
+    state 取值：'idle'（空闲）| 'loading'（首次加载权重）| 'running'（推理中）。
+    task_type / take_id 在 idle 时可为 None。
+    """
+
+    state: str          # "idle" | "loading" | "running"
+    task_type: str | None
+    take_id: int | None

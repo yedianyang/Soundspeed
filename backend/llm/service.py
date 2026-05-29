@@ -58,6 +58,14 @@ class LLMService:
         self._client: LLMClient | None = None
         self._counter = itertools.count()
 
+    @property
+    def model_loaded(self) -> bool:
+        """首次 infer 前（_ensure_client 未调用）为 False，加载后为 True。
+
+        供 Orchestrator 区分 loading（首次权重加载）vs running（后续推理）。
+        """
+        return self._client is not None
+
     def _ensure_worker(self) -> None:
         """Lazy 启动 worker task，只启动一次。
 

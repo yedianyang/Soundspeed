@@ -18,10 +18,12 @@ from typing import Any
 from backend.core.events import (
     ASR_FINAL_CH1,
     ASR_FINAL_CH2,
+    LLM_STATUS,
     TAKE_CHANGED,
     TAKE_END,
     TAKE_START,
     AsrFinalPayload,
+    LlmStatusPayload,
     TakeChangedPayload,
     TakeEndPayload,
     TakeStartPayload,
@@ -277,6 +279,18 @@ class Orchestrator:
         """
         from backend.pipelines.l2_take import L2Input
 
+        # 起手发射 llm.status：model_loaded=False → loading（首次权重加载），否则 running。
+        # getattr 兜底：stub / 非标准服务对象不一定有 model_loaded 属性，缺失视为已加载。
+        _state = (
+            "loading"
+            if not getattr(self._deps.llm_service, "model_loaded", True)
+            else "running"
+        )
+        self.publish(
+            LLM_STATUS,
+            LlmStatusPayload(state=_state, task_type="l2_take", take_id=take_id),
+        )
+
         # 收集 ch1 转录记录
         segments = self.dal.list_segments(take_id, ch=1)
         transcript_segments = [
@@ -355,19 +369,25 @@ class Orchestrator:
     def _l2_done_callback(
         self, task: Any, *, take_id: int, scene_id: int, take_number: int
     ) -> None:
-        """L2 task done callback：仅在异常时 log + publish 降级 take.changed。
+        """L2 task done callback：发 idle + 失败时 log + publish 降级 take.changed。
 
-        成功路径：_run_l2_async 已 publish 第二次 take.changed，callback 无需操作。
-        失败路径：记 WARNING + publish 降级 take.changed（script_diff=None）。
+        codex P8：idle 统一在此发，成功和失败路径均发一次，消除双发歧义。
+        成功路径：_run_l2_async 已 publish 第二次 take.changed，callback 只发 idle。
+        失败路径：记 WARNING + publish idle + publish 降级 take.changed（script_diff=None）。
 
         take_id / scene_id / take_number 由 add_done_callback lambda 闭包绑定，
         避免 session 被后续 take.start 覆盖（race condition 防护）。
         """
         if task.cancelled():
             return
+        # 无论成功失败，先发 idle（两条路径都经过此处）
+        self.publish(
+            LLM_STATUS,
+            LlmStatusPayload(state="idle", task_type="l2_take", take_id=take_id),
+        )
         exc = task.exception()
         if exc is None:
-            return  # 成功路径，_run_l2_async 已处理
+            return  # 成功路径，_run_l2_async 已处理 take.changed
         logger.warning("L2 pipeline failed for task, publishing degraded take.changed: %r", exc)
         self.publish(
             TAKE_CHANGED,
