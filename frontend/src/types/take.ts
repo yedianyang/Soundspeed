@@ -12,4 +12,5 @@ export interface Take {
   no: number
   status: Status
   lines: Line[]
+  note?: string
 }

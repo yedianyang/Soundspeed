@@ -114,7 +114,7 @@ export default function BottomControlBar({
       <div className="px-3 sm:px-5 pb-1.5 pt-0.5 border-t">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap py-1">
-            <span className="size-1.5 rounded-full bg-emerald-500 flex-shrink-0" />
+            <span className="size-1.5 rounded-full bg-green-500 flex-shrink-0" />
             <span>debug log</span>
           </div>
           <span className="text-[10px] font-mono text-muted-foreground/50">
@@ -150,7 +150,7 @@ function SceneShotTakeButton({
             {label}
           </span>
           <span className="font-semibold text-sm text-foreground">{value}</span>
-          <ChevronDown className="size-2.5 sm:size-3 text-muted-foreground" />
+          <ChevronDown className="size-3 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-44">

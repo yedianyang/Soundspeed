@@ -11,6 +11,7 @@ export const HISTORY_TAKES: Take[] = [
       { speaker: "SZA", text: "你昨天为什么没有告诉我真相。" },
       { speaker: "YY", text: "因为我不想让你再卷进来。" },
     ],
+    note: "表演自然，情绪到位",
   },
   {
     id: "t2",
@@ -22,6 +23,7 @@ export const HISTORY_TAKES: Take[] = [
       { speaker: "SZA", text: "你昨天为什么没告诉我真相？" },
       { speaker: "YY", text: "因为我..." },
     ],
+    note: "YY 最后一句忘词，需补拍",
   },
   {
     id: "t3",
@@ -33,6 +35,7 @@ export const HISTORY_TAKES: Take[] = [
       { speaker: "SZA", text: "你昨天为什么没有告诉我真相。" },
       { speaker: "YY", text: "因为我不想让你再卷进来。" },
     ],
+    note: "台词准确但情绪偏淡，待导演确认",
   },
   {
     id: "t4",
@@ -45,6 +48,7 @@ export const HISTORY_TAKES: Take[] = [
       { speaker: "YY", text: "因为我不想让你再卷进来。" },
       { speaker: "SZA", text: "那你打算什么时候告诉我。" },
     ],
+    note: "完整表演，台词与剧本一致",
   },
   {
     id: "t5",
@@ -56,6 +60,7 @@ export const HISTORY_TAKES: Take[] = [
       { speaker: "SZA", text: "你昨天为什么没有告诉我真相。" },
       { speaker: "YY", text: "因为我担心你会更难过。" },
     ],
+    note: "即兴改词，导演认可",
   },
 ]
 

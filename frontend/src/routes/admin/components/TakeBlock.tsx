@@ -35,7 +35,7 @@ export function TakeBlock({
       </span>
       <div className="flex-1 space-y-1.5">
         {take.lines.map((line, i) => (
-          <p key={i} className="text-base">
+          <p key={i} className="text-sm">
             {take.status !== "recording" && (
               <SpeakerLabel
                 speaker={getSpeaker(i)}

@@ -1,12 +1,13 @@
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { LLM_FEEDBACK } from "@/data/mock"
+import { mutedCard } from "@/lib/styles"
 
 export function LLMFeedback() {
   return (
     <div className="py-4 space-y-3">
       {LLM_FEEDBACK.map((item, i) => (
-        <Card key={i} className="rounded-3xl bg-muted/50 shadow-none ring-0 py-0">
+        <Card key={i} className={mutedCard}>
           <CardContent className="p-4 space-y-2">
             <Badge variant="secondary" className="font-mono uppercase">
               {item.kind}
