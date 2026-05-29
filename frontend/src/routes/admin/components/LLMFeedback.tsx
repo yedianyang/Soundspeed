@@ -14,13 +14,12 @@ const DIFF_LABEL: Record<LineMatch["diff_type"], string> = {
 export function LLMFeedback() {
   const takesMap = useSessionStore((s) => s.takes)
 
-  // 最近被更新的、有 script_diff 的 take：按 updated_at 降序（L2 写库会刷新 updated_at），
-  // updated_at 缺失（WS 部分条目 0）时退回 take_number 降序。
+  // 最新一条有 script_diff 的 take：按 take_id 降序。take_id 单调（autoincrement，最高 = 最新），
+  // 且 WS take.changed 与 getTakes 两条路径都带它；updated_at 不在 WS Pick 上（WS-only take 会是
+  // undefined→排到所有 seeded take 之下，反而选错），故不用它。
   const latest: TakeDTO | undefined = Array.from(takesMap.values())
     .filter((t) => t.script_diff != null)
-    .sort(
-      (a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0) || b.take_number - a.take_number
-    )[0]
+    .sort((a, b) => b.take_id - a.take_id)[0]
 
   if (!latest || !latest.script_diff) {
     return (
