@@ -864,3 +864,80 @@ async def test_l2_emits_idle_on_cancellation(tmp_dal: DAL) -> None:
     states = [p.state for p in emitted]
     assert states.count("idle") == 1, f"取消路径 idle 应恰好发一次，实际: {states}"
     assert states[-1] == "idle"
+
+
+# ---------------------------------------------------------------------------
+# 模型缺失自动下载：llm.status "downloading" 发射测试
+#
+# LlmStatusPayload 导入放函数体内，与既有发射测试保持同一约定。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_l2_emits_downloading_when_model_not_present(tmp_dal: DAL) -> None:
+    """model_present=False → _run_l2_async 发出 downloading，之后再发 loading/running。
+
+    断言 downloading 在 loading/running 之前出现。
+    ensure_model_ready 用 AsyncMock（被 await 调用）。
+    """
+    from backend.core.events import LLM_STATUS, LlmStatusPayload  # noqa: PLC0415
+
+    scene_id = tmp_dal.create_scene("scene_dl_emit")
+    stub_runner = _make_stub_l2_runner()
+    stub_svc = _make_stub_llm_service()
+    stub_svc.model_present = False          # 模型不在本地
+    stub_svc.model_loaded = False           # 加载后第一次推理
+    stub_svc.ensure_model_ready = AsyncMock()  # 模拟 await ensure_model_ready()
+
+    session = SessionState()
+    session.activate_scene(scene_id)
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=stub_runner)
+
+    emitted: list[LlmStatusPayload] = []
+    orch.subscribe(LLM_STATUS, lambda p: emitted.append(p))  # type: ignore[arg-type]
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
+    await orch._l2_task  # type: ignore[attr-defined]
+
+    states = [p.state for p in emitted]
+    assert "downloading" in states, f"应发出 downloading，实际: {states}"
+    dl_idx = states.index("downloading")
+    # downloading 必须在第一个 loading/running 之前
+    first_load_run = next(
+        (i for i, s in enumerate(states) if s in ("loading", "running")), None
+    )
+    assert first_load_run is not None
+    assert dl_idx < first_load_run, f"downloading 应先于 loading/running，实际: {states}"
+    # ensure_model_ready 被调用一次
+    stub_svc.ensure_model_ready.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_l2_no_downloading_when_model_present(tmp_dal: DAL) -> None:
+    """model_present=True → downloading 不出现，ensure_model_ready 不调用。"""
+    from backend.core.events import LLM_STATUS, LlmStatusPayload  # noqa: PLC0415
+
+    scene_id = tmp_dal.create_scene("scene_no_dl")
+    stub_runner = _make_stub_l2_runner()
+    stub_svc = _make_stub_llm_service()
+    stub_svc.model_present = True           # 模型已在
+    stub_svc.model_loaded = True
+    stub_svc.ensure_model_ready = AsyncMock()
+
+    session = SessionState()
+    session.activate_scene(scene_id)
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=stub_runner)
+
+    emitted: list[LlmStatusPayload] = []
+    orch.subscribe(LLM_STATUS, lambda p: emitted.append(p))  # type: ignore[arg-type]
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
+    await orch._l2_task  # type: ignore[attr-defined]
+
+    states = [p.state for p in emitted]
+    assert "downloading" not in states, f"model_present=True 不应发 downloading，实际: {states}"
+    stub_svc.ensure_model_ready.assert_not_awaited()

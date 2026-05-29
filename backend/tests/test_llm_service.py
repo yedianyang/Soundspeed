@@ -555,6 +555,161 @@ async def test_priority_defaults_from_task_config():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 模型路径解析器 + model_present + ensure_model_ready 测试
+#
+# resolve_model_path / model_present 导入放函数体内，RED 阶段这两个符号尚不存在，
+# 顶层 import 会炸 collection。
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_model_path_env_set_exists(tmp_path, monkeypatch) -> None:
+    """GEMMA_MODEL_PATH 设置且文件存在 → 直接返回，不调用任何 HF 函数。"""
+    import huggingface_hub  # noqa: PLC0415
+    from backend.llm.service import resolve_model_path  # noqa: PLC0415
+
+    fake_model = tmp_path / "model.gguf"
+    fake_model.write_bytes(b"fake")
+    monkeypatch.setenv("GEMMA_MODEL_PATH", str(fake_model))
+
+    hf_called = []
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: hf_called.append(1) or "/fake")
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *a, **kw: hf_called.append(2) or "/fake")
+
+    result = resolve_model_path(download=False)
+    assert result == str(fake_model)
+    assert hf_called == [], "GEMMA_MODEL_PATH 存在时不应调用任何 HF 函数"
+
+
+def test_resolve_model_path_env_set_missing(tmp_path, monkeypatch) -> None:
+    """GEMMA_MODEL_PATH 设置但文件不存在 → 跳过 env，走 HF cache 分支。"""
+    import huggingface_hub  # noqa: PLC0415
+    from backend.llm.service import resolve_model_path  # noqa: PLC0415
+
+    monkeypatch.setenv("GEMMA_MODEL_PATH", str(tmp_path / "nonexistent.gguf"))
+    monkeypatch.delenv("GEMMA_MODEL_PATH", raising=False)  # 实际让 env 为空，走 HF 分支
+
+    cache_path = str(tmp_path / "cached.gguf")
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: cache_path)
+
+    result = resolve_model_path(download=False)
+    assert result == cache_path
+
+
+def test_resolve_model_path_cache_hit(tmp_path, monkeypatch) -> None:
+    """GEMMA_MODEL_PATH 未设 + HF cache 命中 → 返回缓存路径（不下载）。"""
+    import huggingface_hub  # noqa: PLC0415
+    from backend.llm.service import resolve_model_path  # noqa: PLC0415
+
+    monkeypatch.delenv("GEMMA_MODEL_PATH", raising=False)
+    cache_path = str(tmp_path / "cached.gguf")
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: cache_path)
+
+    result = resolve_model_path(download=False)
+    assert result == cache_path
+
+
+def test_resolve_model_path_cache_sentinel(monkeypatch) -> None:
+    """try_to_load_from_cache 返回哨兵对象（truthy 非 str）→ 视为未命中，返回 None。
+
+    huggingface_hub 用 _CACHED_NO_EXIST 哨兵表示「已知不存在」，不是 None，
+    必须用 isinstance(result, str) 判断，不能判真值。
+    """
+    import huggingface_hub  # noqa: PLC0415
+    from backend.llm.service import resolve_model_path  # noqa: PLC0415
+
+    monkeypatch.delenv("GEMMA_MODEL_PATH", raising=False)
+    sentinel = object()  # truthy 但非 str，模拟 _CACHED_NO_EXIST
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: sentinel)
+
+    result = resolve_model_path(download=False)
+    assert result is None
+
+
+def test_resolve_model_path_cache_miss_no_download(monkeypatch) -> None:
+    """GEMMA_MODEL_PATH 未设 + cache miss + download=False → None。"""
+    import huggingface_hub  # noqa: PLC0415
+    from backend.llm.service import resolve_model_path  # noqa: PLC0415
+
+    monkeypatch.delenv("GEMMA_MODEL_PATH", raising=False)
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: None)
+
+    result = resolve_model_path(download=False)
+    assert result is None
+
+
+def test_resolve_model_path_download_true(tmp_path, monkeypatch) -> None:
+    """cache miss + download=True → 调 hf_hub_download，返回下载后路径。"""
+    import huggingface_hub  # noqa: PLC0415
+    from backend.llm.service import resolve_model_path  # noqa: PLC0415
+
+    monkeypatch.delenv("GEMMA_MODEL_PATH", raising=False)
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: None)
+    dl_path = str(tmp_path / "downloaded.gguf")
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *a, **kw: dl_path)
+
+    result = resolve_model_path(download=True)
+    assert result == dl_path
+
+
+@pytest.mark.asyncio
+async def test_model_present_true_when_client_loaded(monkeypatch) -> None:
+    """_client 已设（模型已加载）→ model_present=True。"""
+    from backend.llm.service import resolve_model_path  # noqa: PLC0415
+
+    _reset_service()
+    svc = get_service()
+    svc._client = StubClient()  # 直接注入，模拟已加载
+    assert svc.model_present is True
+    _reset_service()
+
+
+@pytest.mark.asyncio
+async def test_model_present_false_when_no_client_no_cache(monkeypatch) -> None:
+    """_client 未加载 + cache/env 均无 → model_present=False。"""
+    import huggingface_hub  # noqa: PLC0415
+
+    monkeypatch.delenv("GEMMA_MODEL_PATH", raising=False)
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: None)
+
+    _reset_service()
+    svc = get_service()
+    assert svc._client is None
+    assert svc.model_present is False
+    _reset_service()
+
+
+@pytest.mark.asyncio
+async def test_model_present_true_when_cache_hit(monkeypatch) -> None:
+    """_client 未加载但 cache 有文件 → model_present=True（无需下载）。"""
+    import huggingface_hub  # noqa: PLC0415
+
+    monkeypatch.delenv("GEMMA_MODEL_PATH", raising=False)
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: "/fake/path.gguf")
+
+    _reset_service()
+    svc = get_service()
+    assert svc._client is None
+    assert svc.model_present is True
+    _reset_service()
+
+
+@pytest.mark.asyncio
+async def test_ensure_model_ready_resolves_path(tmp_path, monkeypatch) -> None:
+    """ensure_model_ready() 调用 resolve_model_path(True) 并存 _model_path。"""
+    import huggingface_hub  # noqa: PLC0415
+
+    monkeypatch.delenv("GEMMA_MODEL_PATH", raising=False)
+    fake_path = str(tmp_path / "model.gguf")
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: fake_path)
+
+    _reset_service()
+    svc = get_service()
+    await svc.ensure_model_ready()
+    assert svc._model_path == fake_path
+    _reset_service()
+
+
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_real_gemma_infer():
