@@ -88,7 +88,7 @@ export type TakeChangedMsg = Pick<
   "take_id" | "scene_id" | "take_number" | "status" | "script_diff"
 >
 
-export type LlmState = "idle" | "loading" | "running"
+export type LlmState = "idle" | "loading" | "running" | "downloading"
 
 export interface LlmStatusMsg {
   state: LlmState

@@ -32,6 +32,7 @@ const LLM_CHIP: Record<LlmState, { tone: "ok" | "warn"; detail: string }> = {
   idle: { tone: "ok", detail: "Idle" },
   loading: { tone: "warn", detail: "Loading…" },
   running: { tone: "warn", detail: "L2" },
+  downloading: { tone: "warn", detail: "Downloading…" },
 }
 
 export default function AdminHome() {
