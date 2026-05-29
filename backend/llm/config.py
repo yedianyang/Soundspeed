@@ -18,10 +18,13 @@ TASK_CONFIG: dict[str, dict] = {
         "system": "你是一个场记查询助手，帮助导演和录音师快速查找场记信息。",
     },
     "l2_take": {
-        "max_tokens": 512,
+        # v0.2 schema 含 corrected_segments，实测短 take 输出 ~2000 token；
+        # 长 take（剧本 100+ 行 / 5+ 分钟转录）需要 4096 上限保底。
+        # 配合 n_ctx=8192（client.py），input ~3000 + output 4096 仍有余量。
+        "max_tokens": 4096,
         "temperature": 0.2,
         "priority": 2,
-        # TODO(1.G): 接入时按 L2 整合需求细化 system prompt
+        # TODO(1.G.2): prompt 重写，划清 corrected_segments vs line_matches 边界
         "system": "整合 take 信息，生成剧本 diff 和摘要。",
     },
     "script_parse": {
