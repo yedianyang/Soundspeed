@@ -676,6 +676,108 @@ def test_debug_asr_absent_without_dev_flag(tmp_dal: DAL, monkeypatch) -> None:
     assert resp.status_code == 404
 
 
+# ── dev /debug/script 注入剧本 ───────────────────────────────────────────────
+
+
+def test_debug_script_inserts_script_and_lines(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV=1：POST /debug/script → 200；script + lines 写入 DB 顺序正确。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    scene_id = tmp_dal.create_scene("scene_script1")
+    tmp_dal.set_active_scene(scene_id)
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {_TOKEN}"}
+
+    resp = client.post(
+        "/api/v1/debug/script",
+        json={
+            "scene_id": scene_id,
+            "lines": [
+                {"character": "演员A", "text": "我不走。"},
+                {"character": None, "text": "场景说明"},
+                {"character": "演员B", "text": "你必须走。"},
+            ],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scene_id"] == scene_id
+    assert body["line_count"] == 3
+    script_id = body["script_id"]
+
+    # script 行写入正确
+    script = tmp_dal.get_latest_script(scene_id)
+    assert script is not None
+    assert script["script_id"] == script_id
+
+    lines = tmp_dal.list_script_lines(script_id)
+    assert len(lines) == 3
+    assert lines[0]["line_no"] == 1
+    assert lines[0]["text"] == "我不走。"
+    assert lines[0]["character"] == "演员A"
+    assert lines[1]["line_no"] == 2
+    assert lines[1]["character"] is None
+    assert lines[2]["line_no"] == 3
+    assert lines[2]["text"] == "你必须走。"
+
+
+def test_debug_script_uses_active_scene_when_no_scene_id(tmp_dal: DAL, monkeypatch) -> None:
+    """scene_id 省略时回退 active scene。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    scene_id = tmp_dal.create_scene("scene_script_active")
+    tmp_dal.set_active_scene(scene_id)
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {_TOKEN}"}
+
+    resp = client.post(
+        "/api/v1/debug/script",
+        json={"lines": [{"character": "A", "text": "台词一"}]},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["scene_id"] == scene_id
+
+
+def test_debug_script_422_no_active_scene(tmp_dal: DAL, monkeypatch) -> None:
+    """scene_id 未传 + 无 active scene → 422。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {_TOKEN}"}
+
+    resp = client.post(
+        "/api/v1/debug/script",
+        json={"lines": [{"character": "A", "text": "台词"}]},
+        headers=headers,
+    )
+    assert resp.status_code == 422
+    assert "no active scene" in resp.json()["detail"]
+
+
+def test_debug_script_absent_without_dev_flag(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV 未设 → POST /debug/script → 404（路由未挂载）。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.delenv("SOUNDSPEED_DEV", raising=False)
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/debug/script",
+        json={"lines": [{"character": "A", "text": "台词"}]},
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert resp.status_code == 404
+
+
 def test_create_app_stores_llm_service(tmp_dal: DAL, monkeypatch) -> None:
     """create_app(orch, llm_service=stub) → app.state.llm_service is stub。"""
     from unittest.mock import MagicMock
