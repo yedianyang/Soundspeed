@@ -15,7 +15,7 @@ import { MARK_ORDER } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 import type { Status } from "@/types/take"
 import type { LlmState } from "@/types/api"
-import { endTake, pickActiveScene, startTake, useScenes } from "@/lib/api"
+import { endTake, pickActiveScene, startTake, useScenes, useTakes } from "@/lib/api"
 import { useLiveConnection } from "@/hooks/useLiveConnection"
 import { useSessionStore } from "@/store/session"
 import { StatusChip, LevelMeter } from "./components/StatusChip"
@@ -45,6 +45,16 @@ export default function AdminHome() {
   // ---- scene / take / llm（来自后端 / store）----
   const { data: scenes } = useScenes()
   const activeScene = pickActiveScene(scenes)
+
+  // takes 列表 + seedTakes 桥接挂在 AdminHome（始终挂载），不在 HistoryTakes（桌面端条件挂载）。
+  // 否则未打开 History 时 LLMFeedback 读空 Map，且重连时无活跃 observer → invalidate 不 refetch，
+  // §3.3 恢复链断开。react-query v5 无 onSuccess，用 effect 桥接。
+  const { data: takesData } = useTakes()
+  const seedTakes = useSessionStore((s) => s.seedTakes)
+  useEffect(() => {
+    if (takesData) seedTakes(takesData)
+  }, [takesData, seedTakes])
+
   const currentTake = useSessionStore((s) => s.currentTake)
   const startRecordingLocal = useSessionStore((s) => s.startRecordingLocal)
   const stopRecordingLocal = useSessionStore((s) => s.stopRecordingLocal)

@@ -1,5 +1,5 @@
-import { useState, useRef, type ReactNode, type PointerEvent } from "react"
-import { ChevronDown, ChevronRight, ChevronUp } from "lucide-react"
+import { useState } from "react"
+import { ChevronRight, ChevronUp } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
@@ -10,62 +10,26 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { STATUS_DOT, STATUS_LABEL, MARK_ORDER } from "@/lib/constants"
+import { STATUS_DOT, STATUS_LABEL, MARK_ORDER, speakerColor } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 import { mutedCard } from "@/lib/styles"
-import type { Status, Take } from "@/types/take"
-import { HISTORY_TAKES } from "@/data/mock"
+import type { TakeDTO, TakeStatus, LineMatch } from "@/types/api"
+import { useTake } from "@/lib/api"
+import { useSessionStore } from "@/store/session"
 
-function TapDropdown({
-  trigger,
-  children,
-}: {
-  trigger: ReactNode
-  children: ReactNode
-}) {
-  const [open, setOpen] = useState(false)
-  const startRef = useRef<{ x: number; y: number } | null>(null)
-
-  // 单击弹菜单，与底部控制条统一；密集列表里滚动时不误触：
-  // pointerdown 记起点，pointerup 时若位移超阈值判为滚动、不弹。比 1s 长按更快，又挡住滑动误触。
-  const handlePointerDown = (e: PointerEvent<HTMLButtonElement>) => {
-    e.preventDefault() // 阻止 Radix Trigger 默认 pointerdown 立即打开，改由手势判定
-    startRef.current = { x: e.clientX, y: e.clientY }
-  }
-  const handlePointerUp = (e: PointerEvent<HTMLButtonElement>) => {
-    const start = startRef.current
-    startRef.current = null
-    if (!start) return
-    const moved =
-      Math.abs(e.clientX - start.x) > 10 || Math.abs(e.clientY - start.y) > 10
-    if (!moved) setOpen(true)
-  }
-
-  return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          onPointerDown={handlePointerDown}
-          onPointerUp={handlePointerUp}
-          className="gap-0.5 h-7 px-1.5 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform select-none"
-        >
-          <span className="font-mono text-[10px]">{trigger}</span>
-          <ChevronDown className="size-3 text-muted-foreground" />
-        </Button>
-      </DropdownMenuTrigger>
-      {children}
-    </DropdownMenu>
-  )
+const DIFF_LABEL: Record<LineMatch["diff_type"], string> = {
+  match: "匹配",
+  missing: "漏词",
+  substitution: "改词",
+  insertion: "加词",
 }
 
 function StatusBadge({
   status,
   onChange,
 }: {
-  status: Status
-  onChange: (status: Status) => void
+  status: TakeStatus
+  onChange: (status: TakeStatus) => void
 }) {
   return (
     <DropdownMenu>
@@ -76,8 +40,8 @@ function StatusBadge({
         </Badge>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">
-        <DropdownMenuLabel>修改状态</DropdownMenuLabel>
-        {(MARK_ORDER as Status[]).map((s) => (
+        <DropdownMenuLabel>修改状态（本地）</DropdownMenuLabel>
+        {(MARK_ORDER as TakeStatus[]).map((s) => (
           <DropdownMenuItem
             key={s}
             className={cn(s === status && "bg-accent")}
@@ -92,137 +56,159 @@ function StatusBadge({
   )
 }
 
+// 展开后的详情：拉 getTake → segments + L2 摘要 + line_matches。
+function TakeDetail({ takeId }: { takeId: number }) {
+  const { data, isLoading, isError } = useTake(takeId, true)
+
+  if (isLoading) {
+    return <p className="text-sm text-muted-foreground">加载中…</p>
+  }
+  if (isError || !data) {
+    return <p className="text-sm text-destructive">详情加载失败</p>
+  }
+
+  const diff = data.script_diff
+
+  return (
+    <div className="space-y-3">
+      {/* transcript segments */}
+      {data.segments.length > 0 ? (
+        <div className="space-y-1.5">
+          {data.segments.map((seg) => (
+            <p key={seg.segment_id} className="text-sm">
+              {seg.speaker && (
+                <span className={cn("font-medium mr-1", speakerColor(seg.speaker))}>
+                  {seg.speaker}：
+                </span>
+              )}
+              {seg.text}
+            </p>
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground/60">无转录片段</p>
+      )}
+
+      {/* L2 摘要 + line_matches */}
+      <div className="flex items-center gap-2">
+        <div className="flex-1 h-px bg-border" />
+        <span className="text-[10px] text-muted-foreground whitespace-nowrap">L2</span>
+        <div className="flex-1 h-px bg-border" />
+      </div>
+      {diff ? (
+        <div className="space-y-2">
+          {diff.script_diff_summary ? (
+            <p className="text-sm text-foreground">{diff.script_diff_summary}</p>
+          ) : (
+            <p className="text-sm text-muted-foreground/60">无偏差摘要</p>
+          )}
+          {diff.line_matches.length > 0 && (
+            <div className="space-y-1">
+              {diff.line_matches.map((lm, i) => (
+                <div key={i} className="flex items-baseline gap-2 text-xs">
+                  <span className="font-mono text-muted-foreground w-10 flex-shrink-0">
+                    {lm.line_no >= 0 ? `L${lm.line_no}` : "—"}
+                  </span>
+                  <span className="text-muted-foreground flex-shrink-0">
+                    {DIFF_LABEL[lm.diff_type]}
+                  </span>
+                  {lm.detail && <span className="text-foreground">{lm.detail}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground/60">L2 未完成 / 无剧本</p>
+      )}
+    </div>
+  )
+}
+
 export function HistoryTakes() {
-  const [overrides, setOverrides] = useState<Record<string, Status>>({})
-  const [sceneOverrides, setSceneOverrides] = useState<Record<string, number>>({})
-  const [shotOverrides, setShotOverrides] = useState<Record<string, number>>({})
-  const [noOverrides, setNoOverrides] = useState<Record<string, number>>({})
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // takes 由 AdminHome 的 useTakes + seedTakes 桥接填充（始终挂载），此处只读 store。
+  const takesMap = useSessionStore((s) => s.takes)
 
-  const getStatus = (take: Take) => overrides[take.id] ?? take.status
-  const getScene = (take: Take) => sceneOverrides[take.id] ?? take.scene
-  const getShot = (take: Take) => shotOverrides[take.id] ?? take.shot
-  const getNo = (take: Take) => noOverrides[take.id] ?? take.no
+  // 本地展示态（scope guard：状态 override 不持久化，无端点）。
+  const [statusOverrides, setStatusOverrides] = useState<Record<number, TakeStatus>>({})
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
 
-  const toggleExpand = (id: string) => {
+  const takes: TakeDTO[] = Array.from(takesMap.values()).sort(
+    (a, b) => a.scene_id - b.scene_id || a.take_number - b.take_number
+  )
+
+  const getStatus = (t: TakeDTO) => statusOverrides[t.take_id] ?? t.status
+
+  const toggleExpand = (id: number) => {
     setExpanded((prev) => {
       const next = new Set(prev)
-      if (next.has(id)) {
-        next.delete(id)
-      } else {
-        next.add(id)
-      }
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
       return next
     })
   }
 
+  if (takes.length === 0) {
+    return (
+      <p className="py-8 text-sm text-muted-foreground/60 text-center">
+        暂无 take，开始录制后出现
+      </p>
+    )
+  }
+
   return (
     <div className="py-4 space-y-2.5">
-      {HISTORY_TAKES.map((take) => (
-        <Card
-          key={take.id}
-          className={cn(mutedCard, "w-full text-left hover:bg-muted transition-colors")}
-        >
-          <CardContent className="p-4 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-0.5 sm:gap-1 flex-wrap">
-                <TapDropdown trigger={<>Scene {getScene(take)}</>}>
-                  <DropdownMenuContent align="start">
-                    <DropdownMenuLabel>修改 Scene</DropdownMenuLabel>
-                    {[1, 2, 3, 4].map((n) => (
-                      <DropdownMenuItem
-                        key={n}
-                        className={cn(n === getScene(take) && "bg-accent")}
-                        onClick={() => setSceneOverrides((prev) => ({ ...prev, [take.id]: n }))}
-                      >
-                        Scene {n}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </TapDropdown>
-
-                <TapDropdown trigger={<>Shot {getShot(take)}</>}>
-                  <DropdownMenuContent align="start">
-                    <DropdownMenuLabel>修改 Shot</DropdownMenuLabel>
-                    {[1, 2, 3, 4].map((n) => (
-                      <DropdownMenuItem
-                        key={n}
-                        className={cn(n === getShot(take) && "bg-accent")}
-                        onClick={() => setShotOverrides((prev) => ({ ...prev, [take.id]: n }))}
-                      >
-                        Shot {n}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </TapDropdown>
-
-                <TapDropdown trigger={<>Take {getNo(take)}</>}>
-                  <DropdownMenuContent align="start">
-                    <DropdownMenuLabel>修改 Take</DropdownMenuLabel>
-                    {[1, 2, 3, 4, 5].map((n) => (
-                      <DropdownMenuItem
-                        key={n}
-                        className={cn(n === getNo(take) && "bg-accent")}
-                        onClick={() => setNoOverrides((prev) => ({ ...prev, [take.id]: n }))}
-                      >
-                        Take {n}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </TapDropdown>
-
-                <StatusBadge
-                  status={getStatus(take)}
-                  onChange={(s) => setOverrides((prev) => ({ ...prev, [take.id]: s }))}
-                />
-              </div>
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] font-mono text-muted-foreground">14:30</span>
+      {takes.map((take) => {
+        const isExpanded = expanded.has(take.take_id)
+        const summary = take.script_diff?.script_diff_summary
+        return (
+          <Card
+            key={take.take_id}
+            className={cn(mutedCard, "w-full text-left hover:bg-muted transition-colors")}
+          >
+            <CardContent className="p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="font-mono text-xs text-muted-foreground">
+                    Scene {take.scene_id} · Take {take.take_number}
+                  </span>
+                  {take.shot && (
+                    <span className="font-mono text-[10px] text-muted-foreground/70">
+                      {take.shot}
+                    </span>
+                  )}
+                  <StatusBadge
+                    status={getStatus(take)}
+                    onChange={(s) =>
+                      setStatusOverrides((prev) => ({ ...prev, [take.take_id]: s }))
+                    }
+                  />
+                </div>
                 <Button
                   variant="ghost"
                   size="icon-sm"
                   className="size-6 rounded-full"
-                  onClick={() => toggleExpand(take.id)}
+                  onClick={() => toggleExpand(take.take_id)}
                 >
-                  {expanded.has(take.id) ? (
+                  {isExpanded ? (
                     <ChevronUp className="size-3.5" />
                   ) : (
                     <ChevronRight className="size-3.5" />
                   )}
                 </Button>
               </div>
-            </div>
-            {expanded.has(take.id) ? (
-              <div className="space-y-2">
-                {take.lines.map((line, i) => (
-                  <p key={i} className="text-sm">
-                    <span className="text-primary font-medium">{line.speaker}：</span>
-                    {line.text}
-                  </p>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground line-clamp-2">
-                {take.lines.map((l) => l.text).join("  ")}
-              </p>
-            )}
-            {take.note && (
-              <div className="flex items-center gap-2">
-                <div className="flex-1 h-px bg-border" />
-                <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-                  Note
-                </span>
-                <div className="flex-1 h-px bg-border" />
-              </div>
-            )}
-            {take.note && (
-              <p className="text-xs text-muted-foreground">
-                {take.note}
-              </p>
-            )}
-          </CardContent>
-        </Card>
-      ))}
+
+              {isExpanded ? (
+                <TakeDetail takeId={take.take_id} />
+              ) : (
+                <p className="text-sm text-muted-foreground line-clamp-2">
+                  {summary ?? "（展开查看转录）"}
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        )
+      })}
     </div>
   )
 }

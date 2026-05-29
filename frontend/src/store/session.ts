@@ -136,8 +136,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
 
       // 单操作员假设：startRecordingLocal 后第一条 take_id 未知的 take.changed 绑定 currentTake。
+      // 还要求 m.script_diff === null：只在 start/end 帧绑定，绝不被上一条 take 的 L2-success
+      // 迟到帧（script_diff !== null）误绑——否则下一条 take 已开始、take_id 仍 null 时会绑错。
       let currentTake = state.currentTake
-      if (currentTake.recording && currentTake.take_id === null) {
+      if (
+        currentTake.recording &&
+        currentTake.take_id === null &&
+        m.script_diff === null
+      ) {
         currentTake = {
           ...currentTake,
           take_id: m.take_id,
