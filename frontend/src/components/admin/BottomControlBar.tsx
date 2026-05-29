@@ -24,6 +24,8 @@ interface BottomControlBarProps {
   mark: Status
   onCycleMark: () => void
   elapsed: number
+  recDisabled?: boolean
+  recHint?: string | null
 }
 
 export default function BottomControlBar({
@@ -32,6 +34,8 @@ export default function BottomControlBar({
   mark,
   onCycleMark,
   elapsed,
+  recDisabled = false,
+  recHint = null,
 }: BottomControlBarProps) {
   return (
     <div className="flex-shrink-0 border-t bg-background">
@@ -96,18 +100,26 @@ export default function BottomControlBar({
         <Button
           variant="ghost"
           onClick={onToggleRecording}
+          disabled={recDisabled}
           className={cn(
             "absolute right-4 bottom-2 size-20 rounded-full text-white shadow-lg transition-all active:scale-95 border-0",
             isRecording
               ? "bg-red-600 hover:bg-red-600 ring-4 ring-red-500/20"
-              : "bg-red-500 hover:bg-red-500 ring-2 ring-red-500/10"
+              : "bg-red-500 hover:bg-red-500 ring-2 ring-red-500/10",
+            recDisabled && "opacity-50 cursor-not-allowed"
           )}
-          title={isRecording ? "停止录制" : "开始录制"}
+          title={recDisabled ? recHint ?? "无法录制" : isRecording ? "停止录制" : "开始录制"}
         >
           <span className="text-xs font-mono tracking-wider font-semibold">
             {isRecording ? formatElapsed(elapsed) : "REC"}
           </span>
         </Button>
+
+        {recHint && !isRecording && (
+          <span className="absolute right-4 bottom-24 text-[10px] font-mono text-destructive whitespace-nowrap">
+            {recHint}
+          </span>
+        )}
       </div>
 
       {/* Log */}

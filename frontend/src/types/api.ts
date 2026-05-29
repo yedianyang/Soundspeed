@@ -3,6 +3,17 @@
 
 export type TakeStatus = "keeper" | "ng" | "hold" | "tbd"
 
+// ── Scene DTO（GET /api/v1/scenes，spec v0.3 §2.5）──
+
+export interface SceneDTO {
+  scene_id: number
+  scene_code: string
+  description: string | null
+  shoot_date: string | null
+  is_active: boolean
+  created_at: number
+}
+
 // ── L2 输出：takes.script_diff JSON 顶层形状（docs/specs/2026-05-27-l2-pipeline.md §）──
 
 export interface LineMatch {

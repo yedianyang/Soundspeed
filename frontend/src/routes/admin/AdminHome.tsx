@@ -10,9 +10,14 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import BottomControlBar from "@/components/admin/BottomControlBar"
-import { INPUT_DEVICE, INPUT_CHANNELS, LLM_STATES } from "@/data/mock"
+import { INPUT_DEVICE, INPUT_CHANNELS } from "@/data/mock"
 import { MARK_ORDER } from "@/lib/constants"
+import { cn } from "@/lib/utils"
 import type { Status } from "@/types/take"
+import type { LlmState } from "@/types/api"
+import { endTake, pickActiveScene, startTake, useScenes } from "@/lib/api"
+import { useLiveConnection } from "@/hooks/useLiveConnection"
+import { useSessionStore } from "@/store/session"
 import { StatusChip, LevelMeter } from "./components/StatusChip"
 import { LiveTranscript } from "./components/LiveTranscript"
 import { ScriptPanel } from "./components/ScriptPanel"
@@ -22,16 +27,34 @@ import SettingsDialog from "@/components/admin/SettingsDialog"
 
 const MOBILE_TABS = ["live", "script", "history", "llm"] as const
 
+// llm.status → header LLM chip 展示（spec §3.5）。
+const LLM_CHIP: Record<LlmState, { tone: "ok" | "warn"; detail: string }> = {
+  idle: { tone: "ok", detail: "Idle" },
+  loading: { tone: "warn", detail: "Loading…" },
+  running: { tone: "warn", detail: "L2" },
+}
+
 export default function AdminHome() {
   const [mobileTab, setMobileTab] = useState("live")
   const [sideTab, setSideTab] = useState("script")
-  const [llmIndex, setLlmIndex] = useState(0)
   const [settingsOpen, setSettingsOpen] = useState(false)
+
+  // ---- WS 连接（admin-scoped，挂一次）----
+  useLiveConnection()
+
+  // ---- scene / take / llm（来自后端 / store）----
+  const { data: scenes } = useScenes()
+  const activeScene = pickActiveScene(scenes)
+  const currentTake = useSessionStore((s) => s.currentTake)
+  const startRecordingLocal = useSessionStore((s) => s.startRecordingLocal)
+  const stopRecordingLocal = useSessionStore((s) => s.stopRecordingLocal)
+  const llmState = useSessionStore((s) => s.llm.state)
 
   // ---- recording state (lifted from BottomControlBar) ----
   const [isRecording, setIsRecording] = useState(false)
   const [mark, setMark] = useState<Status>("ng")
   const [elapsed, setElapsed] = useState(0)
+  const [recError, setRecError] = useState<string | null>(null)
   const elapsedRef = useRef(elapsed)
 
   useEffect(() => {
@@ -47,12 +70,38 @@ export default function AdminHome() {
     return () => clearInterval(id)
   }, [isRecording])
 
-  const handleToggleRecording = () => {
+  const handleToggleRecording = async () => {
     if (isRecording) {
+      // 先停本地（UX 立即响应），再通知后端；失败仅记日志，不回滚（take 已开始）。
       setIsRecording(false)
-    } else {
-      setElapsed(0)
-      setIsRecording(true)
+      stopRecordingLocal()
+      try {
+        await endTake()
+      } catch (err) {
+        console.error("endTake failed", err)
+      }
+      return
+    }
+
+    // 开始：必须有活跃场次。
+    if (!activeScene) {
+      setRecError("无活跃场次")
+      return
+    }
+    setRecError(null)
+    // 先翻转本地态（recording=true, take_id=null），再 POST：后端在返回 HTTP 响应前就 publish
+    // take.changed，WS 帧往往早于 await 解析到达。若等 await 后再置 recording，绑定门会错过这帧、
+    // take_id 永不绑定。失败时回滚。
+    startRecordingLocal(activeScene.scene_id, null)
+    setElapsed(0)
+    setIsRecording(true)
+    try {
+      await startTake(activeScene.scene_id, null)
+    } catch (err) {
+      console.error("startTake failed", err)
+      stopRecordingLocal()
+      setIsRecording(false)
+      setRecError("开始录制失败")
     }
   }
 
@@ -109,11 +158,26 @@ export default function AdminHome() {
             </StatusChip>
             <StatusChip
               label="LLM"
-              tone={LLM_STATES[llmIndex].tone}
-              detail={LLM_STATES[llmIndex].detail}
+              tone={LLM_CHIP[llmState].tone}
+              detail={LLM_CHIP[llmState].detail}
               className="flex-shrink-0"
-              onClick={() => setLlmIndex((i) => (i + 1) % LLM_STATES.length)}
             />
+            {/* ---- 状态栏：当前场次 / take / 录制态（真实数据）---- */}
+            <div className="hidden sm:flex items-center gap-1.5 h-9 px-3 rounded-full bg-muted/70 flex-shrink-0 font-mono text-[10px] text-muted-foreground">
+              <span
+                className={cn(
+                  "size-1.5 rounded-full flex-shrink-0",
+                  isRecording ? "bg-destructive animate-pulse" : "bg-muted-foreground/40"
+                )}
+              />
+              <span className="text-foreground">
+                {activeScene ? activeScene.scene_code : "—"}
+              </span>
+              {currentTake.take_number != null && (
+                <span>· T{currentTake.take_number}</span>
+              )}
+              {currentTake.shot && <span>· {currentTake.shot}</span>}
+            </div>
           </div>
 
           <div className="flex items-center gap-1 flex-shrink-0">
@@ -214,6 +278,8 @@ export default function AdminHome() {
         mark={mark}
         onCycleMark={handleCycleMark}
         elapsed={elapsed}
+        recDisabled={!activeScene && !isRecording}
+        recHint={recError ?? (!activeScene ? "无活跃场次" : null)}
       />
     </div>
   )

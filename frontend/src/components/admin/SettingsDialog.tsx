@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import {
   Dialog,
   DialogContent,
@@ -75,6 +76,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
   const connection = useSessionStore((s) => s.connection)
   const setToken = useSessionStore((s) => s.setToken)
   const [tokenInput, setTokenInput] = useState<string>(storeToken ?? "")
+  const queryClient = useQueryClient()
 
   const handleSaveToken = () => {
     const v = tokenInput.trim()
@@ -85,6 +87,12 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
     }
     // 写 localStorage 不会通知 useLiveConnection；更新 store.token 才会翻转连接态并触发重连。
     setToken(v || null)
+    // 首次填 token 时 scenes/takes 此前因 401 settle 在 error，key 没变不会自动 refetch；
+    // 显式 invalidate 让它们带新 token 重取（否则 REC 一直停在「无活跃场次」直到硬刷新）。
+    if (v) {
+      queryClient.invalidateQueries({ queryKey: ["scenes"] })
+      queryClient.invalidateQueries({ queryKey: ["takes"] })
+    }
   }
 
   const toggleSpeakerSelection = (speakerId: string) => {

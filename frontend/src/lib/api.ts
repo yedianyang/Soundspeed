@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
 import { API_BASE } from "@/lib/config"
 import { useSessionStore } from "@/store/session"
-import type { TakeDTO, TakeDetailDTO } from "@/types/api"
+import type { SceneDTO, TakeDTO, TakeDetailDTO } from "@/types/api"
 
 export class ApiError extends Error {
   status: number
@@ -32,6 +32,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ── REST ──
 
+export async function getScenes(): Promise<SceneDTO[]> {
+  const data = await request<{ scenes: SceneDTO[] }>(`/api/v1/scenes`)
+  return data.scenes
+}
+
+// 取活跃场次（is_active），无则退回第一条，全空返回 undefined。
+export function pickActiveScene(scenes: SceneDTO[] | undefined): SceneDTO | undefined {
+  if (!scenes || scenes.length === 0) return undefined
+  return scenes.find((s) => s.is_active) ?? scenes[0]
+}
+
 export async function getTakes(sceneId?: number): Promise<TakeDTO[]> {
   const qs = sceneId !== undefined ? `?scene_id=${sceneId}` : ""
   const data = await request<{ takes: TakeDTO[] }>(`/api/v1/takes${qs}`)
@@ -58,10 +69,19 @@ export function endTake(): Promise<void> {
 
 // ── react-query 查询键 + hooks ──
 
+export const scenesQueryKey = () => ["scenes"] as const
+
 export const takesQueryKey = (sceneId?: number) =>
   ["takes", sceneId ?? null] as const
 
 export const takeQueryKey = (id: number) => ["take", id] as const
+
+export function useScenes() {
+  return useQuery({
+    queryKey: scenesQueryKey(),
+    queryFn: getScenes,
+  })
+}
 
 export function useTakes(sceneId?: number) {
   return useQuery({
