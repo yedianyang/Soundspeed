@@ -17,8 +17,10 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { miniPill } from "@/lib/styles"
+import { API_BASE, LS_TOKEN_KEY } from "@/lib/config"
+import { useSessionStore } from "@/store/session"
 import { Check, ChevronDown, ChevronRight } from "lucide-react"
-import { Plus, Trash2, User, AudioLines, Link2 } from "lucide-react"
+import { Plus, Trash2, User, AudioLines, Link2, Server } from "lucide-react"
 
 // ---- 数据模型 ----
 
@@ -67,6 +69,23 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
   // 合并说话人
   const [mergeSource, setMergeSource] = useState("")
   const [mergeTarget, setMergeTarget] = useState("")
+
+  // 服务器连接：admin token（localStorage 持久化 + 同步 store 触发重连）
+  const storeToken = useSessionStore((s) => s.token)
+  const connection = useSessionStore((s) => s.connection)
+  const setToken = useSessionStore((s) => s.setToken)
+  const [tokenInput, setTokenInput] = useState<string>(storeToken ?? "")
+
+  const handleSaveToken = () => {
+    const v = tokenInput.trim()
+    if (v) {
+      localStorage.setItem(LS_TOKEN_KEY, v)
+    } else {
+      localStorage.removeItem(LS_TOKEN_KEY)
+    }
+    // 写 localStorage 不会通知 useLiveConnection；更新 store.token 才会翻转连接态并触发重连。
+    setToken(v || null)
+  }
 
   const toggleSpeakerSelection = (speakerId: string) => {
     setSelectedSpeakers((prev) => {
@@ -162,6 +181,58 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
         </DialogHeader>
 
         <div className="grid gap-5 py-2 max-h-[70vh] overflow-y-auto pr-1">
+          {/* ========== 服务器连接 ========== */}
+          <div className="grid gap-2">
+            <div className="flex items-center gap-2">
+              <Server className="size-4 text-primary" />
+              <span className="text-sm font-medium">服务器连接</span>
+              <span
+                className={`ml-auto ${miniPill(
+                  connection === "open" ? "primary" : "neutral",
+                  "text-[10px]"
+                )}`}
+              >
+                {connection === "open"
+                  ? "已连接"
+                  : connection === "connecting"
+                    ? "连接中…"
+                    : connection === "no-token"
+                      ? "未鉴权"
+                      : "已断开"}
+              </span>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-xs text-muted-foreground">API 地址</span>
+              <span className="font-mono text-xs text-foreground break-all">{API_BASE}</span>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-xs text-muted-foreground">Admin Token</span>
+              <div className="flex gap-2">
+                <Input
+                  type="password"
+                  placeholder="粘贴后端启动时打印的 admin token"
+                  value={tokenInput}
+                  onChange={(e) => setTokenInput(e.target.value)}
+                  onBlur={handleSaveToken}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleSaveToken()
+                  }}
+                  className="flex-1"
+                />
+                <Button variant="secondary" size="sm" onClick={handleSaveToken}>
+                  保存
+                </Button>
+              </div>
+              {connection === "no-token" && (
+                <span className="text-xs text-destructive">
+                  未填写 admin token，连接未鉴权。
+                </span>
+              )}
+            </div>
+          </div>
+
+          <Separator />
+
           {/* ========== 音频输入 ========== */}
           <div className="grid gap-2">
             <span className="text-sm font-medium">音频输入设备</span>
