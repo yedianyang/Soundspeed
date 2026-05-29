@@ -69,6 +69,9 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
 
             orch.subscribe(topic, _forward)
         yield
+        # shutdown：清 loop 引用。loop 停后若仍有同步 handler 触发 broadcast
+        # （后台线程尚未收束），_loop is None 守卫使其安全 no-op，防 coroutine 泄漏。
+        cm.set_loop(None)
 
     app = FastAPI(title="Soundspeed API", lifespan=lifespan)
 

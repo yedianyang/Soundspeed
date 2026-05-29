@@ -272,3 +272,105 @@ def test_ws_disconnect_cleans_up(tmp_dal: DAL, monkeypatch) -> None:
         # 退出 ws 上下文：TestClient join 服务端 task，
         # except WebSocketDisconnect 里 cm.disconnect 跑完才返回 → _active 应空。
         assert len(cm._active) == 0  # type: ignore[attr-defined]
+
+
+# ── 切片 B：codex review BLOCKING 修复回归测试 ─────────────────────────────────
+#
+# 这些测试直接构造 ConnectionManager（ws.py 此时已存在，非 RED 阶段模块缺失），
+# 不经 TestClient，单元级覆盖 WS loop lifecycle / Future 处理两个 BLOCKING。
+
+
+def test_log_future_exception_ignores_cancelled() -> None:
+    """BLOCKING 2：done-callback 对已 cancelled 的 Future 不自炸。
+
+    concurrent.futures.Future.exception() 对 cancelled future 抛 CancelledError，
+    若 callback 不先判 fut.cancelled() 就取 exception()，callback 自身崩。
+    修前：_log_future_exception 直接 fut.exception() → CancelledError 冒泡。
+    修后：callback 开头 if fut.cancelled(): return → 安全 no-op。
+    """
+    from concurrent.futures import Future
+
+    from backend.api.ws import ConnectionManager
+
+    fut: Future[object] = Future()
+    fut.cancel()
+    assert fut.cancelled()
+
+    # 不抛即通过（修前会抛 CancelledError）。
+    ConnectionManager._log_future_exception(fut)
+
+
+def test_broadcast_noop_after_loop_cleared() -> None:
+    """shutdown 清 loop（set_loop(None)）后 broadcast 安全 no-op，不抛。
+
+    覆盖 lifespan shutdown 段 cm.set_loop(None) 后的安全性。命中 _loop is None 守卫，
+    基线已绿（保留作回归，确保 None 守卫永远在 is_running() 之前短路）。
+    """
+    from backend.api.ws import ConnectionManager
+    from backend.core.events import TAKE_CHANGED, TakeChangedPayload
+
+    cm = ConnectionManager()
+    cm.set_loop(None)
+
+    payload = TakeChangedPayload(
+        take_id=1,
+        scene_id=1,
+        take_number=1,
+        status="tbd",
+        script_diff=None,
+    )
+    # 不抛即通过（None 守卫 no-op）。
+    cm.broadcast(TAKE_CHANGED, payload)
+
+
+def test_broadcast_noop_when_loop_not_running() -> None:
+    """BLOCKING 1：loop 已建但未跑（stopped-but-not-closed）→ 跨线程 broadcast no-op。
+
+    创建但从不 run 的 loop：is_closed() 为 False、is_running() 为 False。修前
+    broadcast 只查 is_closed()，会走 else 分支 run_coroutine_threadsafe 把 coroutine
+    调度到不跑的 loop → coroutine 泄漏。修后 is_running() 守卫直接 no-op。
+
+    用 spy 替换 asyncio.run_coroutine_threadsafe 检测是否被调用：修前被调（RED），
+    修后不被调（GREEN）。本测试在主线程跑，主线程无 running loop，
+    asyncio.get_running_loop() 抛 RuntimeError → running=None → 命中跨线程 else 分支。
+    """
+    import asyncio as _asyncio
+
+    from backend.api.ws import ConnectionManager
+    from backend.core.events import TAKE_CHANGED, TakeChangedPayload
+
+    loop = _asyncio.new_event_loop()  # 建但从不 run → not closed, not running
+    try:
+        assert not loop.is_closed()
+        assert not loop.is_running()
+
+        cm = ConnectionManager()
+        cm.set_loop(loop)
+
+        called = False
+
+        def _spy(coro: object, target_loop: object):  # noqa: ANN202
+            nonlocal called
+            called = True
+            coro.close()  # 防真泄漏（仅 spy 内）  # type: ignore[attr-defined]
+
+        import backend.api.ws as ws_mod
+
+        orig = ws_mod.asyncio.run_coroutine_threadsafe
+        ws_mod.asyncio.run_coroutine_threadsafe = _spy  # type: ignore[assignment]
+        try:
+            payload = TakeChangedPayload(
+                take_id=1,
+                scene_id=1,
+                take_number=1,
+                status="tbd",
+                script_diff=None,
+            )
+            cm.broadcast(TAKE_CHANGED, payload)
+        finally:
+            ws_mod.asyncio.run_coroutine_threadsafe = orig  # type: ignore[assignment]
+
+        # 修前 called=True（调度到死 loop，泄漏）；修后 called=False（is_running 守卫 no-op）。
+        assert called is False
+    finally:
+        loop.close()
