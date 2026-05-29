@@ -723,6 +723,94 @@ def test_entrypoint_build_app_healthz(tmp_path, monkeypatch) -> None:
     assert app.state.llm_service is get_service()
 
 
+# ── 1.J-1.L v0.3：GET /scenes + DEV 自动播种 ────────────────────────────────
+
+
+def test_list_scenes_empty_returns_200(tmp_dal: DAL, monkeypatch) -> None:
+    """GET /api/v1/scenes（带 token，空 DB）→ 200，body {"scenes":[]}。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.get("/api/v1/scenes", headers={"Authorization": f"Bearer {_TOKEN}"})
+    assert resp.status_code == 200
+    assert resp.json() == {"scenes": []}
+
+
+def test_list_scenes_returns_scenes_with_is_active(tmp_dal: DAL, monkeypatch) -> None:
+    """GET /api/v1/scenes → 返回已建 scene，含 is_active 字段。"""
+    sid = tmp_dal.create_scene("TestScene", description="desc")
+    tmp_dal.set_active_scene(sid)
+
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.get("/api/v1/scenes", headers={"Authorization": f"Bearer {_TOKEN}"})
+    assert resp.status_code == 200
+    scenes = resp.json()["scenes"]
+    assert len(scenes) == 1
+    scene = scenes[0]
+    assert scene["scene_id"] == sid
+    assert scene["scene_code"] == "TestScene"
+    assert scene["is_active"] == 1
+
+
+def test_list_scenes_without_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
+    """GET /api/v1/scenes 无 Authorization 头 → 401。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.get("/api/v1/scenes")
+    assert resp.status_code == 401
+
+
+def test_dev_seed_creates_active_scene(tmp_path, monkeypatch) -> None:
+    """build_app() + SOUNDSPEED_DEV=1 + 新鲜 DB → 恰好一个 active scene。
+
+    断言走 orchestrator.dal.list_scenes()，直接查同一连接，不依赖 GET 端点。
+    """
+    from backend.api.entrypoint import build_app  # noqa: PLC0415
+
+    db_file = tmp_path / "seed_test.db"
+    monkeypatch.setenv("SOUNDSPEED_DB", str(db_file))
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+
+    app = build_app()
+    scenes = app.state.orchestrator.dal.list_scenes()
+    assert len(scenes) == 1, f"播种后应有 1 个 scene，实际 {len(scenes)} 个"
+    assert scenes[0]["scene_code"] == "Scene_1"
+    assert scenes[0]["is_active"] == 1
+
+
+def test_dev_seed_idempotent_on_restart(tmp_path, monkeypatch) -> None:
+    """build_app() 二次调用（同一 DB）→ 仍只有 1 个 scene（不重复播种）。"""
+    from backend.api.entrypoint import build_app  # noqa: PLC0415
+
+    db_file = tmp_path / "seed_idem.db"
+    monkeypatch.setenv("SOUNDSPEED_DB", str(db_file))
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+
+    build_app()  # 第一次：播种
+    app2 = build_app()  # 第二次：已有 scene，不再播种
+    scenes = app2.state.orchestrator.dal.list_scenes()
+    assert len(scenes) == 1, f"重启后仍应只有 1 个 scene，实际 {len(scenes)} 个"
+
+
+def test_no_dev_seed_without_flag(tmp_path, monkeypatch) -> None:
+    """build_app() 不带 SOUNDSPEED_DEV → DB 保持空（不播种）。"""
+    from backend.api.entrypoint import build_app  # noqa: PLC0415
+
+    db_file = tmp_path / "no_seed.db"
+    monkeypatch.setenv("SOUNDSPEED_DB", str(db_file))
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.delenv("SOUNDSPEED_DEV", raising=False)
+
+    app = build_app()
+    scenes = app.state.orchestrator.dal.list_scenes()
+    assert scenes == [], f"不带 SOUNDSPEED_DEV 时 scenes 应为空，实际 {scenes}"
+
+
 def test_broadcast_noop_when_loop_not_running() -> None:
     """BLOCKING 1：loop 已建但未跑（stopped-but-not-closed）→ 跨线程 broadcast no-op。
 
