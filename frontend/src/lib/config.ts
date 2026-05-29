@@ -6,6 +6,6 @@ export const API_BASE = (import.meta.env.VITE_API_BASE ?? "http://localhost:8000
 // http→ws、https→wss 一并覆盖（正则只锚定开头的 http）。
 export const WS_BASE = API_BASE.replace(/^http/, "ws")
 
-// localStorage key（admin token + api base 持久化，见 SettingsDialog 服务器连接段）。
+// localStorage key（admin token 持久化，见 SettingsDialog 服务器连接段）。
+// API base 取自 VITE_API_BASE，运行时不可编辑（iPad-over-LAN 可编辑地址是后续 follow-up）。
 export const LS_TOKEN_KEY = "soundspeed.adminToken"
-export const LS_API_BASE_KEY = "soundspeed.apiBase"

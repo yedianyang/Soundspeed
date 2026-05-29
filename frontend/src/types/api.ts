@@ -10,7 +10,7 @@ export interface SceneDTO {
   scene_code: string
   description: string | null
   shoot_date: string | null
-  is_active: boolean
+  is_active: number // SQLite 0 | 1，非 bool；pickActiveScene 的 truthy 检查照常工作
   created_at: number
 }
 

@@ -1,7 +1,7 @@
 import { speakerColor } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 import { useSessionStore, type LiveSeg } from "@/store/session"
-import { TakeDivider } from "./TakeBlock"
+import { TakeDivider } from "./TakeDivider"
 
 // 渲染用条目：合并两声道后按 start_frame 升序。
 // key 用「声道内位置」idx：每个声道 append-only + 仅替换末尾 partial，索引不会平移/收缩，

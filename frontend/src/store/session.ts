@@ -1,5 +1,5 @@
 import { create } from "zustand"
-import { API_BASE, LS_API_BASE_KEY, LS_TOKEN_KEY } from "@/lib/config"
+import { LS_TOKEN_KEY } from "@/lib/config"
 import type {
   AsrMsg,
   LlmState,
@@ -32,14 +32,8 @@ function readToken(): string | null {
   return v && v.trim() ? v : null
 }
 
-function readApiBase(): string {
-  if (typeof localStorage === "undefined") return API_BASE
-  return localStorage.getItem(LS_API_BASE_KEY) ?? API_BASE
-}
-
 interface SessionState {
-  // 配置 / 鉴权
-  apiBase: string
+  // 鉴权（API base 取自 config.ts 的 API_BASE，不可编辑，故不入 store）
   token: string | null
   connection: ConnectionState
 
@@ -74,7 +68,6 @@ const initialCurrentTake: CurrentTake = {
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
-  apiBase: readApiBase(),
   token: readToken(),
   connection: readToken() ? "connecting" : "no-token",
 
@@ -93,6 +86,15 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   applyAsr: (ch, isFinal, p) =>
     set((state) => {
+      // 丢弃来自其他 take 的迟到帧（跨 take 泄漏）。两侧 != null 守卫：dev 注入器（take_id=null）
+      // 与 currentTake 绑定前的窗口仍正常工作。
+      if (
+        p.take_id != null &&
+        state.currentTake.take_id != null &&
+        p.take_id !== state.currentTake.take_id
+      ) {
+        return {}
+      }
       const key = ch === 1 ? "ch1" : "ch2"
       const list = state.segments[key]
       const seg: LiveSeg = {
@@ -117,7 +119,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       const existing = takes.get(m.take_id)
       if (existing) {
         // patch-merge：只覆盖 take.changed 的 5 字段，保留 shot/start_ts/end_ts/notes 等。
-        takes.set(m.take_id, { ...existing, ...m })
+        // script_diff 同 seedTakes：不向下降级到 null（与 P1-1 对称的纵深防御）。单条有序 WS 上
+        // 发布序为 start(null)→end(null)→L2(non-null)，本不会产生 null-after-non-null，但对齐
+        // 防御形状，杜绝该类隐患。
+        takes.set(m.take_id, {
+          ...existing,
+          ...m,
+          script_diff: m.script_diff ?? existing.script_diff ?? null,
+        })
       } else {
         // 新 take：插入部分条目，其余字段等 getTakes/getTake 补齐。
         takes.set(m.take_id, {
@@ -135,14 +144,15 @@ export const useSessionStore = create<SessionState>((set) => ({
         })
       }
 
-      // 单操作员假设：startRecordingLocal 后第一条 take_id 未知的 take.changed 绑定 currentTake。
-      // 还要求 m.script_diff === null：只在 start/end 帧绑定，绝不被上一条 take 的 L2-success
-      // 迟到帧（script_diff !== null）误绑——否则下一条 take 已开始、take_id 仍 null 时会绑错。
+      // currentTake 绑定。take.start 与 take.end 都发 status=tbd / script_diff=null 的 take.changed，
+      // 二者不可区分；用 take_id 单调递增（autoincrement）兜底：recording 期间只要来的是 start/end 帧
+      // （script_diff===null）且 take_id 比当前更大（或尚未绑定）就（重）绑定。可重绑 → 若低 id 帧抢先
+      // 到达，后续更高 id 帧会自我纠正到最新 take。
       let currentTake = state.currentTake
       if (
         currentTake.recording &&
-        currentTake.take_id === null &&
-        m.script_diff === null
+        m.script_diff === null &&
+        (currentTake.take_id === null || m.take_id > currentTake.take_id)
       ) {
         currentTake = {
           ...currentTake,
@@ -155,12 +165,18 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { takes, currentTake }
     }),
 
-  // getTakes 快照永远不旧于任何同字段 WS 消息（DB 先写后 publish），故全量覆盖每个 take_id 条目。
+  // getTakes 全量覆盖每个 take_id 条目（getTakes 权威）。例外：script_diff 不向下降级到 null——
+  // getTakes 快照读可能早于某条 L2 DB 写，而那条的 WS 帧已把 store 的 script_diff 填好；若 seed
+  // 直接覆盖会把刚到的 L2 摘要抹回 null。故 script_diff 取 incoming ?? existing ?? null。
   seedTakes: (list) =>
     set((state) => {
       const takes = new Map(state.takes)
       for (const t of list) {
-        takes.set(t.take_id, t)
+        const existing = takes.get(t.take_id)
+        takes.set(t.take_id, {
+          ...t,
+          script_diff: t.script_diff ?? existing?.script_diff ?? null,
+        })
       }
       return { takes }
     }),
