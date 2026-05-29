@@ -18,12 +18,22 @@ portal 线程里同步驱动 event loop，POST 返回后即可直接断言 _l2_t
 """
 from __future__ import annotations
 
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from backend.api.app import create_app
-from backend.core.events import TAKE_END, TAKE_START, TakeEndPayload, TakeStartPayload
+from backend.core.events import (
+    ASR_FINAL_CH1,
+    TAKE_END,
+    TAKE_START,
+    AsrFinalPayload,
+    TakeEndPayload,
+    TakeStartPayload,
+)
 from backend.core.orchestrator import Orchestrator, create_orchestrator
 from backend.core.session import SessionState
 from backend.db.dal import DAL
@@ -147,3 +157,118 @@ def test_take_end_creates_l2_task_when_deps_injected(tmp_dal: DAL, monkeypatch) 
 
     # 不 await：仅断言 task 被创建（决策 1 防回归核心断言）
     assert orch._l2_task is not None  # type: ignore[attr-defined]
+
+
+# ── 切片 B：WS + 事件转发 ──────────────────────────────────────────────────────
+#
+# WS 测试必须用 `with TestClient(app) as client:`——只有 with 块才触发 lifespan，
+# loop ref / orchestrator 订阅才生效。集合外的裸 TestClient 不跑 lifespan。
+#
+# ConnectionManager 一律通过 client.app.state.connection_manager 访问，
+# 测试文件顶层不 import ws.py 符号——RED 阶段 ws.py 还不存在，顶层 import 会让整个
+# 文件 collection 失败，连切片 A 的 5 个测试一起变红，分不清是 feature-missing 还是
+# import 炸了。
+
+
+def test_ws_without_token_rejected(tmp_dal: DAL, monkeypatch) -> None:
+    """/ws 无 token → 握手被拒，close code 1008（不 accept）。
+
+    断 code == 1008 而非仅断 WebSocketDisconnect：RED 阶段 /ws 路由还不存在，
+    连不存在的 WS 路由本就抛 WebSocketDisconnect（关闭码非 1008），只断异常类型会假绿。
+    断 1008 才真测到鉴权拒绝。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    app = create_app(create_orchestrator(tmp_dal))
+
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect("/ws"):
+                pass
+    assert exc_info.value.code == 1008
+
+
+def test_ws_with_valid_token_connects(tmp_dal: DAL, monkeypatch) -> None:
+    """/ws?token=<TOKEN> → 连上不被拒。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    app = create_app(create_orchestrator(tmp_dal))
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws:
+            # 连上即可——能进入 with 块说明握手成功（accept 了）。
+            assert ws is not None
+
+
+def test_take_changed_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
+    """连上 ws 后 POST /take/start → ws 收到一条 take.changed（loop 线程内投递路径）。
+
+    端到端真实链路：take/start → _on_take_start 写库 → publish(TAKE_CHANGED) →
+    CM.broadcast（loop 线程内，走 create_task 路径）→ ws.send_json。
+
+    必须先 create_scene：_on_take_start 在 publish 之前 start_take 写库，scene 不存在
+    会让它在 publish 前抛异常并被 publish 吞掉，take.changed 永不发，receive_json 死挂。
+    """
+    scene_id = tmp_dal.create_scene("scene_ws_take")
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    app = create_app(create_orchestrator(tmp_dal))
+
+    headers = {"Authorization": f"Bearer {_TOKEN}"}
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws:
+            resp = client.post(
+                "/api/v1/take/start",
+                json={"scene_id": scene_id, "shot": "A"},
+                headers=headers,
+            )
+            assert resp.status_code == 200
+
+            msg = ws.receive_json()
+            assert msg["topic"] == "take.changed"
+            assert msg["payload"]["scene_id"] == scene_id
+            assert msg["payload"]["take_id"] is not None
+            assert msg["payload"]["take_number"] == 1
+
+
+def test_asr_final_forwarded_from_background_thread(tmp_dal: DAL, monkeypatch) -> None:
+    """连上 ws 后，从后台线程 publish(ASR_FINAL_CH1, ...) → ws 收到 asr.final.ch1。
+
+    跨线程路径（run_coroutine_threadsafe）：模拟未来 1.A ASR 线程触发同步 handler。
+    take 未 active 时 _on_asr_final 直接 return（不写库），桥接转发仍应发生——
+    转发是订阅 CM.broadcast，与内置 segment handler 互不影响。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+
+    payload = AsrFinalPayload(
+        text="hello from background",
+        start_frame=0,
+        end_frame=1000,
+        speaker="A",
+        take_id=None,
+        is_partial=False,
+    )
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws:
+            t = threading.Thread(target=lambda: orch.publish(ASR_FINAL_CH1, payload))
+            t.start()
+            t.join()
+
+            msg = ws.receive_json()
+            assert msg["topic"] == "asr.final.ch1"
+            assert msg["payload"]["text"] == "hello from background"
+            assert msg["payload"]["speaker"] == "A"
+
+
+def test_ws_disconnect_cleans_up(tmp_dal: DAL, monkeypatch) -> None:
+    """连上再退出 with → cm._active 为空（连接清理）。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    app = create_app(create_orchestrator(tmp_dal))
+
+    with TestClient(app) as client:
+        cm = client.app.state.connection_manager
+        with client.websocket_connect(f"/ws?token={_TOKEN}"):
+            pass
+        # 退出 ws 上下文：TestClient join 服务端 task，
+        # except WebSocketDisconnect 里 cm.disconnect 跑完才返回 → _active 应空。
+        assert len(cm._active) == 0  # type: ignore[attr-defined]
