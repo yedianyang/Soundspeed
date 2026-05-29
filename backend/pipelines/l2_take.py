@@ -121,30 +121,8 @@ _VALID_DIFF_TYPES = frozenset({"match", "missing", "substitution", "insertion"})
 
 
 def _build_system_prompt() -> str:
-    """从 TASK_CONFIG["l2_take"]["system"] 读取模板，追加格式约束。"""
-    base = TASK_CONFIG["l2_take"]["system"]
-    format_constraint = (
-        "\n\n职责：\n"
-        "1. 剧本偏差检测：对比剧本台词与转录记录，识别漏词/改词/加词。\n"
-        "2. 错别字修正：检查转录文本中的明显错别字（同音字、形近字误识别），输出修正结果到 corrected_segments 字段。\n"
-        "\n输出格式要求（严格遵守）：\n"
-        "- 只输出合法 JSON，不要 markdown 代码块，不要注释，不要额外解释。\n"
-        "- JSON schema：\n"
-        "  {\n"
-        '    "script_diff_summary": "<str 或 null>",\n'
-        '    "line_matches": [\n'
-        '      {"line_no": <int>, "diff_type": "<match|missing|substitution|insertion>", "detail": "<str 或 null>"}\n'
-        "    ],\n"
-        '    "corrected_segments": [\n'
-        '      {"idx": <int>, "original": "<str>", "corrected": "<str>"}\n'
-        "    ]\n"
-        "  }\n"
-        "- line_matches 只列出 script_lines 提供的行，不自创行号。\n"
-        "- insertion 类型（演员台词剧本无对应行）line_no 固定填 -1。\n"
-        "- corrected_segments 只列出真正有修改的 segment，未改动的不出现；无需修正时输出空列表 []。\n"
-        "- idx 是转录记录列表的下标（从 0 开始），对应 user message 中转录记录前的序号。"
-    )
-    return f"{base}{format_constraint}"
+    """返回 TASK_CONFIG["l2_take"]["system"]（prompt v1，含完整格式约束）。"""
+    return TASK_CONFIG["l2_take"]["system"]
 
 
 def _build_script_lines_block(script_lines: list[dict]) -> str:
@@ -224,7 +202,10 @@ def _build_user_message(input_data: L2Input) -> str:
         f"## Take {input_data.take_number} 转录记录（含下标索引）\n\n"
         f"{transcript_block}\n"
         f"{previous_section}\n"
-        "请按要求输出 JSON 报告，包含偏差检测（line_matches）和错别字修正（corrected_segments）。"
+        "任务：①找出转录中剧本完全没有对应的内容标为 insertion（line_no=-1），"
+        "②逐行比对剧本标 match/substitution/missing，"
+        "③识别 ASR 错别字放入 corrected_segments。\n"
+        "直接输出 JSON。"
     )
 
 

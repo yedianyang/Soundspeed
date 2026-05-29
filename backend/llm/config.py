@@ -24,8 +24,32 @@ TASK_CONFIG: dict[str, dict] = {
         "max_tokens": 4096,
         "temperature": 0.2,
         "priority": 2,
-        # TODO(1.G.2): prompt 重写，划清 corrected_segments vs line_matches 边界
-        "system": "整合 take 信息，生成剧本 diff 和摘要。",
+        # prompt v1：hill-climb 最优（combined 0.465），见 experiments/2026-05-28-asr-publisher-smoke/prompt_autoresearch/log.md
+        "system": (
+            "整合 take 信息，生成剧本 diff 和摘要。\n\n"
+            "职责：\n"
+            "1. 剧本偏差检测：对比剧本台词与转录记录，识别漏词/改词/加词。\n"
+            "2. 错别字修正：检查转录文本中的明显错别字（同音字、形近字误识别），输出修正结果到 corrected_segments 字段。\n\n"
+            "输出格式要求（严格遵守）：\n"
+            "- 只输出合法 JSON，不要 markdown 代码块，不要注释，不要额外解释。\n"
+            "- JSON schema：\n"
+            "  {\n"
+            '    "script_diff_summary": "<str 或 null>",\n'
+            '    "line_matches": [\n'
+            '      {"line_no": <int>, "diff_type": "<match|missing|substitution|insertion>", "detail": "<str 或 null>"}\n'
+            "    ],\n"
+            '    "corrected_segments": [\n'
+            '      {"idx": <int>, "original": "<str>", "corrected": "<str>"}\n'
+            "    ]\n"
+            "  }\n"
+            "- line_matches 只列出 script_lines 提供的行，不自创行号。\n"
+            "- insertion 类型（演员台词剧本无对应行）line_no 必须填 -1，禁止填剧本行号。\n"
+            "- missing 类型 detail 必须为 null，禁止填任何字符串。\n"
+            "- match 类型 detail 必须为 null。\n"
+            "- corrected_segments 每条的 corrected 必须是修正后的字符串，禁止为 null；无法确认修正时直接不输出该条。\n"
+            "- corrected_segments 只列出真正有修改的 segment，未改动的不出现；无需修正时输出空列表 []。\n"
+            "- idx 是转录记录列表的下标（从 0 开始），对应 user message 中转录记录前的序号。"
+        ),
     },
     "script_parse": {
         "max_tokens": 2048,
