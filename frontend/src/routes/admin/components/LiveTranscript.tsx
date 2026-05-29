@@ -3,7 +3,7 @@ import { TakeBlock, TakeDivider } from "./TakeBlock"
 
 export function LiveTranscript() {
   return (
-    <div className="px-3 sm:px-5 py-4 space-y-4">
+    <div className="px-4 py-4 space-y-4">
       {HISTORY_TAKES.slice(-2).map((take) => (
         <TakeBlock key={take.id} take={take} muted />
       ))}

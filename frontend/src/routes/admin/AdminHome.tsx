@@ -90,20 +90,28 @@ export default function AdminHome() {
     <div className="h-dvh w-screen flex flex-col bg-muted/50 text-foreground overflow-hidden">
       {/* ============ Header ============ */}
       <header className="flex-shrink-0 bg-background">
-        <div className="px-3 sm:px-5 h-11 flex items-center justify-between gap-2 border-b">
+        <div className="px-4 h-11 flex items-center justify-between gap-2 border-b">
           <div className="flex items-center gap-2 min-w-0">
             <Button variant="ghost" size="icon-sm" className="rounded-full text-muted-foreground flex-shrink-0" title="导入已录制文件">
               <Folder className="size-4" />
             </Button>
-            <StatusChip label="Input" tone="ok" detail={INPUT_DEVICE} detailClassName="hidden sm:inline">
-              {Array.from({ length: INPUT_CHANNELS }, (_, i) => (
-                <LevelMeter key={i} count={5} color={i === 0 ? "bg-green-500" : "bg-primary"} />
-              ))}
+            <StatusChip label="Input" tone="ok" detail={INPUT_DEVICE} className="min-w-0">
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                {Array.from({ length: INPUT_CHANNELS }, (_, i) => (
+                  <LevelMeter
+                    key={i}
+                    count={5}
+                    color={i === 0 ? "bg-green-500" : "bg-primary"}
+                    className={i > 0 ? "hidden sm:flex" : undefined}
+                  />
+                ))}
+              </div>
             </StatusChip>
             <StatusChip
               label="LLM"
               tone={LLM_STATES[llmIndex].tone}
               detail={LLM_STATES[llmIndex].detail}
+              className="flex-shrink-0"
               onClick={() => setLlmIndex((i) => (i + 1) % LLM_STATES.length)}
             />
           </div>
@@ -130,7 +138,7 @@ export default function AdminHome() {
       </header>
 
       {/* ============ Main ============ */}
-      <main className="flex-1 min-h-0 p-2 sm:p-3 flex flex-col md:flex-row gap-2 sm:gap-3">
+      <main className="flex-1 min-h-0 p-4 flex flex-col md:flex-row gap-3">
         {/* ---- Mobile：单 Card 内 Tabs 切换 ---- */}
         <Card size="sm" className="md:hidden flex-1 min-h-0 p-0 gap-0 overflow-hidden">
           <Tabs value={mobileTab} onValueChange={setMobileTab} className="flex-1 min-h-0 flex flex-col p-3 pb-0 gap-3">
