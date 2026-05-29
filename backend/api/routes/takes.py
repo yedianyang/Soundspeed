@@ -157,3 +157,17 @@ async def get_take(
         {**take.__dict__, "segments": segments},
         from_attributes=True,
     )
+
+
+@router.get("/scenes")
+async def list_scenes(
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict[str, list[dict]]:
+    """列出所有场次（spec v0.3 §2.5）。
+
+    dal.list_scenes() 返回 list[dict]，直接透传（不需要 DTO 投影）。
+    字段：scene_id, scene_code, description, shoot_date, is_active, created_at。
+    """
+    dal = request.app.state.orchestrator.dal
+    return {"scenes": dal.list_scenes()}
