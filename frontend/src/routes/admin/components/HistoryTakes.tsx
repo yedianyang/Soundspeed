@@ -1,4 +1,4 @@
-import { useState, useRef, type ReactNode } from "react"
+import { useState, useRef, type ReactNode, type PointerEvent } from "react"
 import { ChevronDown, ChevronRight, ChevronUp } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -16,7 +16,7 @@ import { mutedCard } from "@/lib/styles"
 import type { Status, Take } from "@/types/take"
 import { HISTORY_TAKES } from "@/data/mock"
 
-function LongPressDropdown({
+function TapDropdown({
   trigger,
   children,
 }: {
@@ -24,24 +24,21 @@ function LongPressDropdown({
   children: ReactNode
 }) {
   const [open, setOpen] = useState(false)
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [pressing, setPressing] = useState(false)
+  const startRef = useRef<{ x: number; y: number } | null>(null)
 
-  const startPress = () => {
-    setPressing(true)
-    const id = setTimeout(() => {
-      setPressing(false)
-      setOpen(true)
-    }, 1000)
-    timerRef.current = id
+  // 单击弹菜单，与底部控制条统一；密集列表里滚动时不误触：
+  // pointerdown 记起点，pointerup 时若位移超阈值判为滚动、不弹。比 1s 长按更快，又挡住滑动误触。
+  const handlePointerDown = (e: PointerEvent<HTMLButtonElement>) => {
+    e.preventDefault() // 阻止 Radix Trigger 默认 pointerdown 立即打开，改由手势判定
+    startRef.current = { x: e.clientX, y: e.clientY }
   }
-
-  const endPress = () => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current)
-      timerRef.current = null
-    }
-    setPressing(false)
+  const handlePointerUp = (e: PointerEvent<HTMLButtonElement>) => {
+    const start = startRef.current
+    startRef.current = null
+    if (!start) return
+    const moved =
+      Math.abs(e.clientX - start.x) > 10 || Math.abs(e.clientY - start.y) > 10
+    if (!moved) setOpen(true)
   }
 
   return (
@@ -50,27 +47,12 @@ function LongPressDropdown({
         <Button
           variant="ghost"
           size="sm"
-          onPointerDown={(e) => {
-            e.preventDefault()
-            startPress()
-          }}
-          onPointerUp={endPress}
-          onPointerLeave={endPress}
-          className="relative overflow-hidden gap-0.5 h-7 px-1.5 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform select-none"
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
+          className="gap-0.5 h-7 px-1.5 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform select-none"
         >
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <div
-              className="rounded-full bg-primary/15 transition-transform duration-1000 ease-linear"
-              style={{
-                width: '200%',
-                height: '200%',
-                transform: pressing ? 'scale(1)' : 'scale(0)',
-                transformOrigin: 'center',
-              }}
-            />
-          </div>
-          <span className="relative z-10 font-mono text-[10px]">{trigger}</span>
-          <ChevronDown className="relative z-10 size-3 text-muted-foreground" />
+          <span className="font-mono text-[10px]">{trigger}</span>
+          <ChevronDown className="size-3 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
       {children}
@@ -144,7 +126,7 @@ export function HistoryTakes() {
           <CardContent className="p-4 space-y-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-0.5 sm:gap-1 flex-wrap">
-                <LongPressDropdown trigger={<>Scene {getScene(take)}</>}>
+                <TapDropdown trigger={<>Scene {getScene(take)}</>}>
                   <DropdownMenuContent align="start">
                     <DropdownMenuLabel>修改 Scene</DropdownMenuLabel>
                     {[1, 2, 3, 4].map((n) => (
@@ -157,9 +139,9 @@ export function HistoryTakes() {
                       </DropdownMenuItem>
                     ))}
                   </DropdownMenuContent>
-                </LongPressDropdown>
+                </TapDropdown>
 
-                <LongPressDropdown trigger={<>Shot {getShot(take)}</>}>
+                <TapDropdown trigger={<>Shot {getShot(take)}</>}>
                   <DropdownMenuContent align="start">
                     <DropdownMenuLabel>修改 Shot</DropdownMenuLabel>
                     {[1, 2, 3, 4].map((n) => (
@@ -172,9 +154,9 @@ export function HistoryTakes() {
                       </DropdownMenuItem>
                     ))}
                   </DropdownMenuContent>
-                </LongPressDropdown>
+                </TapDropdown>
 
-                <LongPressDropdown trigger={<>Take {getNo(take)}</>}>
+                <TapDropdown trigger={<>Take {getNo(take)}</>}>
                   <DropdownMenuContent align="start">
                     <DropdownMenuLabel>修改 Take</DropdownMenuLabel>
                     {[1, 2, 3, 4, 5].map((n) => (
@@ -187,7 +169,7 @@ export function HistoryTakes() {
                       </DropdownMenuItem>
                     ))}
                   </DropdownMenuContent>
-                </LongPressDropdown>
+                </TapDropdown>
 
                 <StatusBadge
                   status={getStatus(take)}
