@@ -42,6 +42,7 @@ def build_app() -> FastAPI:
     if os.environ.get("SOUNDSPEED_DEV") == "1" and not dal.list_scenes():
         seed_id = dal.create_scene("Scene_1")
         dal.set_active_scene(seed_id)
+        dal.update_scene_heading(seed_id, int_ext="室外", time_of_day="日", location="街道")
 
     llm_service = get_service()
     orchestrator = create_orchestrator(dal, llm_service=llm_service)

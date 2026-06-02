@@ -64,12 +64,12 @@ def test_apply_migrations_idempotent(tmp_path: Path) -> None:
 
 
 def test_apply_migrations_user_version(tmp_path: Path) -> None:
-    """迁移后 PRAGMA user_version 等于 1。"""
+    """迁移后 PRAGMA user_version 等于当前最高版本（v2 后为 2）。"""
     db_path = tmp_path / "test.db"
     apply_migrations(db_path)
     conn = _raw_conn(db_path)
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert version == 1
+    assert version == 2
     conn.close()
 
 

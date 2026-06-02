@@ -164,10 +164,50 @@ async def list_scenes(
     request: Request,
     _: None = Depends(require_admin),
 ) -> dict[str, list[dict]]:
-    """列出所有场次（spec v0.3 §2.5）。
+    """列出所有场次（含 slugline 三列：int_ext / time_of_day / location）。
 
     dal.list_scenes() 返回 list[dict]，直接透传（不需要 DTO 投影）。
-    字段：scene_id, scene_code, description, shoot_date, is_active, created_at。
     """
     dal = request.app.state.orchestrator.dal
     return {"scenes": dal.list_scenes()}
+
+
+# ── 读剧本端点（scene heading 票加，2026-06-01）────────────────────────────────
+
+
+class ScriptLineOut(BaseModel):
+    """剧本行投影（spec §2.3）。"""
+
+    line_no: int
+    character: str | None
+    text: str
+
+
+class ScriptOut(BaseModel):
+    """单场次剧本响应（spec §2.3）。"""
+
+    script_id: int
+    version: int
+    lines: list[ScriptLineOut]
+
+
+@router.get("/scenes/{scene_id}/script")
+async def get_scene_script(
+    scene_id: int,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict[str, ScriptOut | None]:
+    """取指定场次最新剧本及行列表。
+
+    无剧本或 scene 不存在 → {"script": null}（200，不 404）。
+    行按 line_no 升序（dal.list_script_lines 已保证）。
+    """
+    dal = request.app.state.orchestrator.dal
+    script_meta = dal.get_latest_script(scene_id)
+    if script_meta is None:
+        return {"script": None}
+    script_id = script_meta["script_id"]
+    version = script_meta["version"]
+    raw_lines = dal.list_script_lines(script_id)
+    lines = [ScriptLineOut(line_no=r["line_no"], character=r["character"], text=r["text"]) for r in raw_lines]
+    return {"script": ScriptOut(script_id=script_id, version=version, lines=lines)}

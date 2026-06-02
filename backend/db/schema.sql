@@ -14,7 +14,10 @@ CREATE TABLE IF NOT EXISTS scenes (
     shoot_date  TEXT,                               -- 拍摄日期，ISO 8601 格式（YYYY-MM-DD）
     is_active   INTEGER NOT NULL DEFAULT 0          -- 1 = 当前活跃场次，0 = 非活跃
         CHECK (is_active IN (0, 1)),
-    created_at  REAL    NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS REAL))
+    created_at  REAL    NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS REAL)),
+    int_ext     TEXT,                               -- 内外景：室内 / 室外（slugline 结构化，v2）
+    time_of_day TEXT,                               -- 时间：日 / 夜 / 晨 …（slugline 结构化，v2）
+    location    TEXT                                -- 场景地点：街道 / 咖啡馆 …（slugline 结构化，v2）
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_scenes_scene_code
@@ -218,4 +221,4 @@ BEGIN
         VALUES (NEW.line_id, NEW.text, NEW.character);
 END;
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;

@@ -103,6 +103,9 @@ class DebugScriptBody(BaseModel):
 
     scene_id: int | None = None
     lines: list[ScriptLineIn]
+    int_ext: str | None = None      # slugline 内外景（可选，注入时同步写 scenes 表）
+    time_of_day: str | None = None  # slugline 时间（可选）
+    location: str | None = None     # slugline 地点（可选）
 
 
 @router.post("/script")
@@ -141,6 +144,15 @@ async def debug_script(
     script_id = dal.insert_script(scene_id, raw_text)
     for i, ln in enumerate(valid_lines, start=1):
         dal.insert_script_line(script_id, i, ln.character, ln.text)
+
+    # 若 heading 字段任一非空，同步更新 scene 的 slugline 列（部分更新，不清空已有值）
+    if body.int_ext is not None or body.time_of_day is not None or body.location is not None:
+        dal.update_scene_heading(
+            scene_id,
+            int_ext=body.int_ext,
+            time_of_day=body.time_of_day,
+            location=body.location,
+        )
 
     return {
         "script_id": script_id,

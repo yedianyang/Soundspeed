@@ -16,6 +16,7 @@ MIGRATIONS_DIR = Path(__file__).parent
 # 每个版本对应一个 .sql 文件
 MIGRATION_FILES: dict[int, str] = {
     1: "v1_init.sql",
+    2: "v2_scene_heading.sql",
 }
 
 

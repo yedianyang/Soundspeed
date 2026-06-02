@@ -208,12 +208,43 @@ class DAL:
         return row["scene_id"] if row else None
 
     def list_scenes(self) -> list[dict]:
-        """返回所有场次的基本信息列表。"""
+        """返回所有场次的基本信息列表（含 slugline 三列）。"""
         rows = self._conn.execute(
-            "SELECT scene_id, scene_code, description, shoot_date, is_active, created_at "
+            "SELECT scene_id, scene_code, description, shoot_date, is_active, created_at, "
+            "int_ext, time_of_day, location "
             "FROM scenes ORDER BY scene_id ASC;"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def update_scene_heading(
+        self,
+        scene_id: int,
+        *,
+        int_ext: str | None = None,
+        time_of_day: str | None = None,
+        location: str | None = None,
+    ) -> None:
+        """部分更新场次 slugline 字段。
+
+        只写非 None 且非空白的字段（COALESCE 保留原值），避免把未传字段清空。
+        None 或空白字符串（包括空串 "" 和纯空白 "   "）均视为「不更新该字段，保留原值」。
+        三者全为 None 或空白时等同 no-op。
+        """
+        def _normalize(v: str | None) -> str | None:
+            """空串/纯空白归一为 None，以便 COALESCE 保留原值。"""
+            if v is None:
+                return None
+            return v if v.strip() else None
+
+        with self._write_tx() as conn:
+            conn.execute(
+                "UPDATE scenes SET "
+                "int_ext     = COALESCE(?, int_ext), "
+                "time_of_day = COALESCE(?, time_of_day), "
+                "location    = COALESCE(?, location) "
+                "WHERE scene_id = ?;",
+                (_normalize(int_ext), _normalize(time_of_day), _normalize(location), scene_id),
+            )
 
     # ── takes ────────────────────────────────────────────────────────────────
 
