@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
 import { API_BASE } from "@/lib/config"
 import { useSessionStore } from "@/store/session"
-import type { SceneDTO, ScriptDTO, TakeDTO, TakeDetailDTO } from "@/types/api"
+import type { SceneDTO, ScriptDTO, TakeDTO, TakeDetailDTO, TranscriptSegmentDTO } from "@/types/api"
 
 export class ApiError extends Error {
   status: number
@@ -73,6 +73,19 @@ export function endTake(): Promise<void> {
     method: "POST",
     body: JSON.stringify({}),
   })
+}
+
+// 纠正某条 segment 的 speaker 归属（PATCH，落库）。speaker=null 表示置「未知」。
+// null 必须显式带进 body（不能省略字段），后端用它区分「置未知」与「漏传」。
+export function correctSegmentSpeaker(
+  takeId: number,
+  segmentId: number,
+  speaker: string | null,
+): Promise<TranscriptSegmentDTO> {
+  return request<TranscriptSegmentDTO>(
+    `/api/v1/takes/${takeId}/segments/${segmentId}`,
+    { method: "PATCH", body: JSON.stringify({ speaker }) },
+  )
 }
 
 // dev-only 合成 ASR 注入（后端仅 SOUNDSPEED_DEV=1 挂载 /api/v1/debug/asr）。

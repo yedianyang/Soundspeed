@@ -413,6 +413,27 @@ class DAL:
         rows = self._conn.execute(base, params).fetchall()
         return [_row_to_segment(r) for r in rows]
 
+    def get_segment(self, segment_id: int) -> TranscriptSegment | None:
+        """按 segment_id 获取单条片段，不存在返回 None。"""
+        row = self._conn.execute(
+            "SELECT * FROM transcript_segments WHERE segment_id = ?;",
+            (segment_id,),
+        ).fetchone()
+        return _row_to_segment(row) if row else None
+
+    def update_segment_speaker(self, segment_id: int, speaker: str | None) -> int:
+        """改单条片段的 speaker，返回受影响行数（0 = segment 不存在）。
+
+        归属（take 匹配）与 ch1 限制由 route 层先用 get_segment 校验，不进 WHERE。
+        speaker=None 表示置「未知」（schema 允许 NULL）。
+        """
+        with self._write_tx() as conn:
+            cur = conn.execute(
+                "UPDATE transcript_segments SET speaker = ? WHERE segment_id = ?;",
+                (speaker, segment_id),
+            )
+        return cur.rowcount
+
     # ── scripts ──────────────────────────────────────────────────────────────
 
     def insert_script(

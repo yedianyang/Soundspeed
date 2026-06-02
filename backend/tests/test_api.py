@@ -1028,3 +1028,101 @@ def test_broadcast_noop_when_loop_not_running() -> None:
         assert called is False
     finally:
         loop.close()
+
+
+# ── PATCH /takes/{take_id}/segments/{segment_id} ───────────────────────────
+
+_AUTH = {"Authorization": f"Bearer {_TOKEN}"}
+
+
+def _seeded(tmp_dal: DAL) -> tuple[int, int, int]:
+    """造 scene + take + ch1(有 speaker) + ch2(无 speaker)；返回 (take_id, ch1_seg, ch2_seg)。"""
+    sid = tmp_dal.create_scene("scene_patch")
+    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    ch1 = tmp_dal.insert_segment(tid, 1, "SPEAKER_00", "你好", 0, 16000)
+    ch2 = tmp_dal.insert_segment(tid, 2, None, "杂音", 0, 16000)
+    return tid, ch1, ch2
+
+
+def test_patch_segment_speaker_valid(tmp_dal: DAL, monkeypatch) -> None:
+    tid, ch1, _ = _seeded(tmp_dal)
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(
+        f"/api/v1/takes/{tid}/segments/{ch1}", json={"speaker": "SPEAKER_01"}, headers=_AUTH
+    )
+    assert resp.status_code == 200
+    assert resp.json()["speaker"] == "SPEAKER_01"
+    assert tmp_dal.get_segment(ch1).speaker == "SPEAKER_01"
+
+
+def test_patch_segment_speaker_null(tmp_dal: DAL, monkeypatch) -> None:
+    tid, ch1, _ = _seeded(tmp_dal)
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(
+        f"/api/v1/takes/{tid}/segments/{ch1}", json={"speaker": None}, headers=_AUTH
+    )
+    assert resp.status_code == 200
+    assert resp.json()["speaker"] is None
+    assert tmp_dal.get_segment(ch1).speaker is None
+
+
+def test_patch_segment_speaker_blank_422(tmp_dal: DAL, monkeypatch) -> None:
+    tid, ch1, _ = _seeded(tmp_dal)
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(
+        f"/api/v1/takes/{tid}/segments/{ch1}", json={"speaker": "   "}, headers=_AUTH
+    )
+    assert resp.status_code == 422
+
+
+def test_patch_segment_missing_404(tmp_dal: DAL, monkeypatch) -> None:
+    tid, _, _ = _seeded(tmp_dal)
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(
+        f"/api/v1/takes/{tid}/segments/99999", json={"speaker": "X"}, headers=_AUTH
+    )
+    assert resp.status_code == 404
+
+
+def test_patch_segment_wrong_take_404(tmp_dal: DAL, monkeypatch) -> None:
+    tid, ch1, _ = _seeded(tmp_dal)
+    other = tmp_dal.start_take(tmp_dal.create_scene("other"), 1, 2000.0)
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(
+        f"/api/v1/takes/{other}/segments/{ch1}", json={"speaker": "X"}, headers=_AUTH
+    )
+    assert resp.status_code == 404
+
+
+def test_patch_segment_take_not_found_404(tmp_dal: DAL, monkeypatch) -> None:
+    _, ch1, _ = _seeded(tmp_dal)
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(
+        f"/api/v1/takes/99999/segments/{ch1}", json={"speaker": "X"}, headers=_AUTH
+    )
+    assert resp.status_code == 404
+
+
+def test_patch_segment_ch2_422(tmp_dal: DAL, monkeypatch) -> None:
+    tid, _, ch2 = _seeded(tmp_dal)
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(
+        f"/api/v1/takes/{tid}/segments/{ch2}", json={"speaker": "X"}, headers=_AUTH
+    )
+    assert resp.status_code == 422
+
+
+def test_patch_segment_no_token_401(tmp_dal: DAL, monkeypatch) -> None:
+    tid, ch1, _ = _seeded(tmp_dal)
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(f"/api/v1/takes/{tid}/segments/{ch1}", json={"speaker": "X"})
+    assert resp.status_code == 401
+
+
+def test_patch_segment_does_not_touch_script_diff(tmp_dal: DAL, monkeypatch) -> None:
+    tid, ch1, _ = _seeded(tmp_dal)
+    tmp_dal.update_take_l2_output(tid, {"script_diff_summary": "原始", "line_matches": [], "corrected_segments": []})
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    client.patch(f"/api/v1/takes/{tid}/segments/{ch1}", json={"speaker": "SPEAKER_09"}, headers=_AUTH)
+    detail = client.get(f"/api/v1/takes/{tid}", headers=_AUTH).json()
+    assert detail["script_diff"]["script_diff_summary"] == "原始"

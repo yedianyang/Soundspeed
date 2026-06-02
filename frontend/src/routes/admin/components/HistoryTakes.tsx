@@ -1,4 +1,5 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import { ChevronRight, ChevronUp } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -13,10 +14,11 @@ import {
 import { STATUS_DOT, STATUS_LABEL, MARK_ORDER, speakerColor } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 import { mutedCard } from "@/lib/styles"
-import type { TakeDTO, TakeStatus } from "@/types/api"
-import { useTake } from "@/lib/api"
+import type { TakeDTO, TakeStatus, TranscriptSegmentDTO } from "@/types/api"
+import { useTake, correctSegmentSpeaker, takeQueryKey } from "@/lib/api"
 import { useSessionStore } from "@/store/session"
 import { ScriptDiffView } from "./ScriptDiffView"
+import { SpeakerLabel } from "./SpeakerLabel"
 
 function StatusBadge({
   status,
@@ -50,9 +52,29 @@ function StatusBadge({
   )
 }
 
-// 展开后的详情：拉 getTake → segments + L2 摘要 + line_matches。
-function TakeDetail({ takeId }: { takeId: number }) {
+// 展开后的详情：拉 getTake → segments（speaker 可纠正）+ L2 摘要 + line_matches。
+function TakeDetail({
+  takeId,
+  corrected,
+  onCorrected,
+}: {
+  takeId: number
+  corrected: boolean
+  onCorrected: () => void
+}) {
   const { data, isLoading, isError } = useTake(takeId, true)
+  const queryClient = useQueryClient()
+  // 纠正失败的 segment（轻量错误反馈，无 toast 库）。
+  const [failedSegId, setFailedSegId] = useState<number | null>(null)
+
+  // 候选 = 本 take 出现过的 distinct speaker（含当前条自身）+ null（未知）。
+  const candidates = useMemo<(string | null)[]>(() => {
+    const ids = new Set<string>()
+    for (const seg of data?.segments ?? []) {
+      if (seg.speaker) ids.add(seg.speaker)
+    }
+    return [...ids, null]
+  }, [data])
 
   if (isLoading) {
     return <p className="text-sm text-muted-foreground">加载中…</p>
@@ -63,20 +85,49 @@ function TakeDetail({ takeId }: { takeId: number }) {
 
   const diff = data.script_diff
 
+  async function handleCorrect(seg: TranscriptSegmentDTO, next: string | null) {
+    // 点当前值是 no-op：不发 PATCH、不标记已纠正。
+    if (next === seg.speaker) return
+    try {
+      await correctSegmentSpeaker(takeId, seg.segment_id, next)
+      await queryClient.invalidateQueries({ queryKey: takeQueryKey(takeId) })
+      setFailedSegId(null)
+      onCorrected()
+    } catch (err) {
+      // 失败：不改本地 UI（以 refetch 为准），标记该条以显示错误提示。
+      console.error("纠正说话人失败", err)
+      setFailedSegId(seg.segment_id)
+    }
+  }
+
   return (
     <div className="space-y-3">
-      {/* transcript segments */}
+      {/* transcript segments：ch1 speaker 可点纠正；ch2 speaker 恒 null，沿用纯文本分支即不显示 label（达成 ch2 不可改，无需 disabled） */}
       {data.segments.length > 0 ? (
         <div className="space-y-1.5">
           {data.segments.map((seg) => (
-            <p key={seg.segment_id} className="text-sm">
-              {seg.speaker && (
-                <span className={cn("font-medium mr-1", speakerColor(seg.speaker))}>
-                  {seg.speaker}：
-                </span>
+            <div key={seg.segment_id}>
+              <p className="text-sm">
+                {seg.ch === 1 ? (
+                  <SpeakerLabel
+                    speaker={seg.speaker}
+                    options={candidates}
+                    onChange={(next) => handleCorrect(seg, next)}
+                  />
+                ) : (
+                  seg.speaker && (
+                    <span className={cn("font-medium mr-1", speakerColor(seg.speaker))}>
+                      {seg.speaker}：
+                    </span>
+                  )
+                )}
+                {seg.ch === 1 ? " " : null}
+                {seg.text}
+              </p>
+              {failedSegId === seg.segment_id && (
+                <p className="text-xs text-destructive">说话人纠正失败，请重试</p>
               )}
-              {seg.text}
-            </p>
+            </div>
           ))}
         </div>
       ) : (
@@ -89,6 +140,9 @@ function TakeDetail({ takeId }: { takeId: number }) {
         <span className="text-[10px] text-muted-foreground whitespace-nowrap">L2</span>
         <div className="flex-1 h-px bg-border" />
       </div>
+      {corrected && (
+        <p className="text-[11px] text-muted-foreground/80">说话人已纠正，剧本分析未更新</p>
+      )}
       <ScriptDiffView diff={diff} />
     </div>
   )
@@ -101,6 +155,8 @@ export function HistoryTakes() {
   // 本地展示态（scope guard：状态 override 不持久化，无端点）。
   const [statusOverrides, setStatusOverrides] = useState<Record<number, TakeStatus>>({})
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  // 本会话纠正过的 take（放父组件，避免 TakeDetail 折叠 unmount 丢失提示态）。
+  const [correctedTakes, setCorrectedTakes] = useState<Set<number>>(new Set())
 
   const takes: TakeDTO[] = Array.from(takesMap.values()).sort(
     (a, b) => a.scene_id - b.scene_id || a.take_number - b.take_number
@@ -168,7 +224,13 @@ export function HistoryTakes() {
               </div>
 
               {isExpanded ? (
-                <TakeDetail takeId={take.take_id} />
+                <TakeDetail
+                  takeId={take.take_id}
+                  corrected={correctedTakes.has(take.take_id)}
+                  onCorrected={() =>
+                    setCorrectedTakes((prev) => new Set(prev).add(take.take_id))
+                  }
+                />
               ) : (
                 <p className="text-sm text-muted-foreground line-clamp-2">
                   {summary ?? "（展开查看转录）"}

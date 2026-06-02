@@ -605,3 +605,45 @@ def test_dal_as_context_manager(tmp_path: Path) -> None:
     # 块已退出，连接已关闭
     with pytest.raises(sqlite3.ProgrammingError):
         dal.list_scenes()
+
+
+# ── get_segment / update_segment_speaker ──────────────────────────────────
+
+
+def test_get_segment_returns_row(tmp_dal: DAL) -> None:
+    sid = tmp_dal.create_scene("S1")
+    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    seg_id = tmp_dal.insert_segment(tid, 1, "SPEAKER_00", "你好", 0, 16000)
+    seg = tmp_dal.get_segment(seg_id)
+    assert seg is not None
+    assert seg.take_id == tid
+    assert seg.ch == 1
+    assert seg.speaker == "SPEAKER_00"
+
+
+def test_get_segment_missing_returns_none(tmp_dal: DAL) -> None:
+    assert tmp_dal.get_segment(99999) is None
+
+
+def test_update_segment_speaker_changes_value(tmp_dal: DAL) -> None:
+    sid = tmp_dal.create_scene("S1")
+    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    seg_id = tmp_dal.insert_segment(tid, 1, "SPEAKER_00", "你好", 0, 16000)
+    affected = tmp_dal.update_segment_speaker(seg_id, "SPEAKER_01")
+    assert affected == 1
+    seg = tmp_dal.get_segment(seg_id)
+    assert seg is not None and seg.speaker == "SPEAKER_01"
+
+
+def test_update_segment_speaker_to_none(tmp_dal: DAL) -> None:
+    sid = tmp_dal.create_scene("S1")
+    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    seg_id = tmp_dal.insert_segment(tid, 1, "SPEAKER_00", "你好", 0, 16000)
+    affected = tmp_dal.update_segment_speaker(seg_id, None)
+    assert affected == 1
+    seg = tmp_dal.get_segment(seg_id)
+    assert seg is not None and seg.speaker is None
+
+
+def test_update_segment_speaker_missing_returns_zero(tmp_dal: DAL) -> None:
+    assert tmp_dal.update_segment_speaker(99999, "X") == 0

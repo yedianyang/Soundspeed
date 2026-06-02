@@ -33,11 +33,11 @@ export const SPEAKER_TEXT: Record<string, string> = {
 }
 
 // ---- 实时转录 speaker 分色 ----
-// 真实 diarize 输出是 speaker_0 / speaker_1 / ...，上面的 SZA/YY 命名映射是 mock 期的，
-// 对 live 数据兜不住。改用确定性哈希把任意 speaker 字符串映射到固定调色板，保证同一 speaker
-// 每次渲染同色。null（ch2 设计上无 speaker）→ muted。
+// 真实 diarize 输出是 SPEAKER_0x，确定性哈希把任意 speaker 字符串映射到固定调色板，
+// 保证同一 speaker 每次渲染同色。text / dot 两套调色板按同一 hash index 取色（不漂移）。
+// null（未知 / ch2 无 speaker）→ muted。
 
-const SPEAKER_PALETTE = [
+const SPEAKER_TEXT_PALETTE = [
   "text-primary",
   "text-secondary-foreground",
   "text-green-600",
@@ -45,12 +45,28 @@ const SPEAKER_PALETTE = [
   "text-purple-600",
 ] as const
 
-export function speakerColor(speaker: string | null): string {
-  if (!speaker) return "text-muted-foreground"
-  // 简单稳定哈希（djb2 变体），取模映射到调色板。
+const SPEAKER_DOT_PALETTE = [
+  "bg-primary",
+  "bg-secondary-foreground",
+  "bg-green-600",
+  "bg-orange-600",
+  "bg-purple-600",
+] as const
+
+function speakerHashIndex(speaker: string): number {
   let hash = 0
   for (let i = 0; i < speaker.length; i++) {
     hash = (hash * 31 + speaker.charCodeAt(i)) | 0
   }
-  return SPEAKER_PALETTE[Math.abs(hash) % SPEAKER_PALETTE.length]
+  return Math.abs(hash) % SPEAKER_TEXT_PALETTE.length
+}
+
+export function speakerColor(speaker: string | null): string {
+  if (!speaker) return "text-muted-foreground"
+  return SPEAKER_TEXT_PALETTE[speakerHashIndex(speaker)]
+}
+
+export function speakerDot(speaker: string | null): string {
+  if (!speaker) return "bg-muted-foreground"
+  return SPEAKER_DOT_PALETTE[speakerHashIndex(speaker)]
 }

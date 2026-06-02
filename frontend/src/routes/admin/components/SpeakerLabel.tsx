@@ -5,49 +5,60 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { SPEAKER_OPTIONS, SPEAKER_DOT, SPEAKER_TEXT } from "@/lib/constants"
+import { speakerColor, speakerDot } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 
+const UNKNOWN_LABEL = "未知"
+
+// 可切换说话人 label。speaker=null 显示「未知」；options 含 null 代表「未知」候选。
+// disabled（ch2）→ 渲染为不可点纯文本。配色统一走 speakerColor/speakerDot 哈希。
 export function SpeakerLabel({
   speaker,
+  options,
   onChange,
-  muted = false,
+  disabled = false,
 }: {
-  speaker: string
-  onChange: (speaker: string) => void
-  muted?: boolean
+  speaker: string | null
+  options: (string | null)[]
+  onChange: (speaker: string | null) => void
+  disabled?: boolean
 }) {
-  const dotColor = muted
-    ? "bg-muted-foreground/40"
-    : (SPEAKER_DOT[speaker] || "bg-muted-foreground")
-  const textColor = muted
-    ? "text-muted-foreground/60"
-    : (SPEAKER_TEXT[speaker] || "text-muted-foreground")
+  const label = speaker ?? UNKNOWN_LABEL
+  const textColor = speakerColor(speaker)
+  const dotColor = speakerDot(speaker)
+
+  if (disabled) {
+    return (
+      <span className={cn("inline-flex items-center gap-1 font-medium select-none", textColor)}>
+        <span className={cn("size-1.5 rounded-full flex-shrink-0", dotColor)} />
+        {label}：
+      </span>
+    )
+  }
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <span
           className={cn(
-            "inline-flex items-center gap-1 cursor-pointer select-none rounded-md px-1 -ml-1 transition-colors",
+            "inline-flex items-center gap-1 font-medium cursor-pointer select-none rounded-md px-1 -ml-1 transition-colors hover:bg-muted",
             textColor,
-            muted ? "hover:bg-muted/40" : "hover:bg-muted"
           )}
         >
           <span className={cn("size-1.5 rounded-full flex-shrink-0", dotColor)} />
-          {speaker}：
+          {label}：
         </span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">
         <DropdownMenuLabel>切换说话人</DropdownMenuLabel>
-        {SPEAKER_OPTIONS.map((s) => (
+        {options.map((opt) => (
           <DropdownMenuItem
-            key={s}
-            className={cn(s === speaker && "bg-accent")}
-            onClick={() => onChange(s)}
+            key={opt ?? "__unknown__"}
+            className={cn(opt === speaker && "bg-accent")}
+            onClick={() => onChange(opt)}
           >
-            <span className={cn("size-1.5 rounded-full mr-2", SPEAKER_DOT[s] || "bg-muted-foreground")} />
-            {s}
+            <span className={cn("size-1.5 rounded-full mr-2", speakerDot(opt))} />
+            {opt ?? UNKNOWN_LABEL}
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>

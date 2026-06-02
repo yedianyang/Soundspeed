@@ -159,6 +159,42 @@ async def get_take(
     )
 
 
+class PatchSegmentBody(BaseModel):
+    """PATCH /takes/{take_id}/segments/{segment_id} 请求体。
+
+    speaker 为必填字段（缺字段 → pydantic 422），值可为 null（置「未知」）。
+    """
+
+    speaker: str | None
+
+
+@router.patch("/takes/{take_id}/segments/{segment_id}")
+async def correct_segment_speaker(
+    take_id: int,
+    segment_id: int,
+    body: PatchSegmentBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> SegmentOut:
+    """纠正单条 segment 的 speaker（说话人归属）。L2 不重跑、不发 WS。
+
+    处理顺序定死边界：空白串 422 → 不存在/不属该 take 404 → ch2 422 → update。
+    """
+    if isinstance(body.speaker, str) and not body.speaker.strip():
+        raise HTTPException(status_code=422, detail="speaker must not be blank")
+
+    dal = request.app.state.orchestrator.dal
+    seg = dal.get_segment(segment_id)
+    if seg is None or seg.take_id != take_id:
+        raise HTTPException(status_code=404, detail="segment not found in take")
+    if seg.ch == 2:
+        raise HTTPException(status_code=422, detail="ch2 segment speaker is immutable")
+
+    dal.update_segment_speaker(segment_id, body.speaker)
+    updated = dal.get_segment(segment_id)
+    return SegmentOut.model_validate(updated, from_attributes=True)
+
+
 @router.get("/scenes")
 async def list_scenes(
     request: Request,
