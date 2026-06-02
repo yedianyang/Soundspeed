@@ -148,3 +148,25 @@ segment 渲染处（71-80 行）：speaker 从纯 `<span>` 换成 `<SpeakerLabel
 - codex 第二意见关键吸收点：404 边界（wrong-take 用 404 非 403）；`null` 编码必须显式传 PATCH body；候选不排除当前条自身；ch2 前后端都拦；PATCH 后 refetch（不乐观更新）；L2 stale 用前端本地态提示；后端/前端测试清单。
 - 与 codex 分歧并由用户裁定：组件路线——codex 倾向新建 `SegmentSpeakerMenu`（改动面窄），用户选**复用改造 `SpeakerLabel`**（救活死代码）。代价是要同时改 onChange 契约 / 配色 / 候选来源，§3.2 已写明改造点。
 - codex 工作树 review（第二轮）P2：stale 标记原写在 `TakeDetail`，会被折叠 unmount 丢失；已上提到父组件 `HistoryTakes`（§3.4）。
+- 实时更新 bug（手动验收发现）：纠正后 take detail 不实时刷新、要整页刷新。排查（probe + playwright）证明数据/重渲染均正常，根因是 Radix `asChild` trigger 复用同一 DOM 节点、重渲染却不重绘文本。修法：`<SpeakerLabel key={String(seg.speaker)} …>`，speaker 变即强制重挂载。纯前端，无 spec 决策变更。
+
+---
+
+## 6. 补充：take detail 备注区（ch2 语音 + 预留 typing memo）（2026-06-02 追加）
+
+需求来源：用户手动验收第 8 项。ch2 = 物理第二音频通道（环境音 / 旁白类，`speaker` 恒空，靠 `debug/asr` 注入，当前 dev 无数据）。用户指出：手动键入的 **typing memo** 与 ch2 语音备注**同语义层级**（都是这条 take 的「备注」），故备注区做成通用结构、预留 typing memo，本次只显示 ch2、不实现 typing memo。
+
+### 6.1 设计（纯前端，不碰后端）
+
+- `TakeDetail` 把 `data.segments` 按 `ch` 分两组：ch1（主对话）、ch2（备注）。
+- **ch1**：现状不变——转录区，speaker 可点纠正（§3.3 + key 修法）。
+- **ch2**：若该 take 有 ch2 segment，在 `ScriptDiffView`（L2 区）**下方**渲染「备注」块：
+  - 一条细分隔 + 小标题 **「备注」**。
+  - 逐条列 ch2 的 `text`，muted 小字；ch2 `speaker` 恒空 → 不显示说话人标签、不可点（符合 §「锁定决策」ch2 不可改）。
+- **通用命名 / 结构**：这块语义是「备注 / memo」，不写死 ch2（如组件 `MemoSection`、变量 `memoItems`）。typing memo 将来接入同一块、同层级，不重构。
+- **typing memo**：本次**只预留命名/结构，不实现**输入 UI、不动后端（YAGNI）。
+- **空状态**：既无 ch2、也无 memo → 整块不渲染（现有所有 take 都不显示，零影响）。
+
+### 6.2 验收
+
+无自动化（前端无测试框架）。手动：`POST /api/v1/debug/asr` 注一条 ch2（runbook ch2「boom 杂音」样例）→ 展开该 take → L2 区下方出现「备注」块、含该条文本；其它无 ch2 的 take 不显示该块。runbook §7 补一条。

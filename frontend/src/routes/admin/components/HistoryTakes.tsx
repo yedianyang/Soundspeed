@@ -11,7 +11,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { STATUS_DOT, STATUS_LABEL, MARK_ORDER, speakerColor } from "@/lib/constants"
+import { STATUS_DOT, STATUS_LABEL, MARK_ORDER } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 import { mutedCard } from "@/lib/styles"
 import type { TakeDTO, TakeStatus, TranscriptSegmentDTO } from "@/types/api"
@@ -84,6 +84,9 @@ function TakeDetail({
   }
 
   const diff = data.script_diff
+  // 按通道分组：ch1 = 主对话（speaker 可纠正）；ch2 = 备注（语音备注，与将来 typing memo 同层级）。
+  const ch1Segs = data.segments.filter((s) => s.ch === 1)
+  const memoItems = data.segments.filter((s) => s.ch === 2)
 
   async function handleCorrect(seg: TranscriptSegmentDTO, next: string | null) {
     // 点当前值是 no-op：不发 PATCH、不标记已纠正。
@@ -102,26 +105,19 @@ function TakeDetail({
 
   return (
     <div className="space-y-3">
-      {/* transcript segments：ch1 speaker 可点纠正；ch2 speaker 恒 null，沿用纯文本分支即不显示 label（达成 ch2 不可改，无需 disabled） */}
-      {data.segments.length > 0 ? (
+      {/* ch1 主对话转录：speaker 可点纠正。key 绑 speaker 强制 SpeakerLabel 重挂载，
+          绕过 Radix asChild trigger 复用 DOM、重渲染却不重绘文本的问题（数据/重渲染本身正常，见排查记录）。 */}
+      {ch1Segs.length > 0 ? (
         <div className="space-y-1.5">
-          {data.segments.map((seg) => (
+          {ch1Segs.map((seg) => (
             <div key={seg.segment_id}>
               <p className="text-sm">
-                {seg.ch === 1 ? (
-                  <SpeakerLabel
-                    speaker={seg.speaker}
-                    options={candidates}
-                    onChange={(next) => handleCorrect(seg, next)}
-                  />
-                ) : (
-                  seg.speaker && (
-                    <span className={cn("font-medium mr-1", speakerColor(seg.speaker))}>
-                      {seg.speaker}：
-                    </span>
-                  )
-                )}
-                {seg.ch === 1 ? " " : null}
+                <SpeakerLabel
+                  key={String(seg.speaker)}
+                  speaker={seg.speaker}
+                  options={candidates}
+                  onChange={(next) => handleCorrect(seg, next)}
+                />{" "}
                 {seg.text}
               </p>
               {failedSegId === seg.segment_id && (
@@ -144,6 +140,23 @@ function TakeDetail({
         <p className="text-[11px] text-muted-foreground/80">说话人已纠正，剧本分析未更新</p>
       )}
       <ScriptDiffView diff={diff} />
+
+      {/* 备注区：ch2 语音备注（speaker 恒空、不可点）。通用结构——将来 typing memo（手输备注）
+          接入同一区、同层级（本次只预留，不实现输入/存储）。无 ch2 + 无 memo → 整块不渲染。 */}
+      {memoItems.length > 0 && (
+        <div className="space-y-1.5 pt-1">
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-px bg-border" />
+            <span className="text-[10px] text-muted-foreground whitespace-nowrap">备注</span>
+            <div className="flex-1 h-px bg-border" />
+          </div>
+          {memoItems.map((m) => (
+            <p key={m.segment_id} className="text-xs text-muted-foreground">
+              {m.text}
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
