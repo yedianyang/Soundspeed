@@ -95,7 +95,7 @@ PRAGMA user_version = 2;
 
 ## 测试 / 验收
 
-后端（TDD，`.venv/bin/python`，Python 3.14.5，**禁用 anaconda**）：
+后端（TDD，`.venv/bin/python`，Python 3.12，**禁用 anaconda**）：
 - 迁移：临时 DB 应用迁移后 `user_version==2` 且 `scenes` 有三列；v1→v2 升级幂等（重复 apply 不报错）。
 - DAL：`update_scene_heading` 部分更新（只写非 None）；`list_scenes` 返回三列。
 - 端点：`/debug/script` 带 heading → scene 三列被更新；`GET /scenes/{id}/script` 有剧本返回 lines（按 line_no 升序、character null 与非 null 都正确序列化），无剧本返回 `{script: null}`。

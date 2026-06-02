@@ -62,7 +62,7 @@
 - Windows：本轮不验证，spec 与实验 README 留 TODO
 
 ### 软件
-- Python 3.11 或 3.12，spike 目录内独立 venv（不污染项目 3.14 venv）
+- Python 3.11 或 3.12，spike 目录内独立 venv（不污染项目 venv）
 - llama-cpp-python 最新稳定版，Metal 后端（`CMAKE_ARGS="-DGGML_METAL=on"`）
 - 模型：Gemma 4 E4B GGUF，Q4_K_M 量化档起步（用户提供本地副本路径）
 - 控制变量：n_ctx=4096，n_gpu_layers=-1（全卸载到 GPU），seed 固定

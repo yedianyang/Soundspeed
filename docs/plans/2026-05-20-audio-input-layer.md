@@ -6,7 +6,7 @@
 
 **Architecture:** 一个 `AudioSource` 抽象基类用模板方法封装通用流水线（拆声道、顺序过 ChannelProcessor、组装 AudioChunk、seq/start_frame 记账）；`DeviceSource` 和 `FileSource` 只实现 `_open` / `_read_raw_block` / `_close` 三个钩子。每声道一个有状态 `soxr.ResampleStream`，顺序处理。输出 `AudioChunk` 容器，`channels` 是各声道独立的单声道数组。
 
-**Tech Stack:** Python 3.14（Cactus venv）、numpy、soxr（重采样）、soundfile（文件读取）、sounddevice（设备采集）、pytest。
+**Tech Stack:** Python 3.12（Cactus venv）、numpy、soxr（重采样）、soundfile（文件读取）、sounddevice（设备采集）、pytest。
 
 设计依据：`docs/specs/2026-05-20-audio-input-layer.md` v0.3。
 
@@ -95,7 +95,7 @@ pythonpath = ["."]
 line-length = 100
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.12"
 ignore_missing_imports = true
 ```
 
