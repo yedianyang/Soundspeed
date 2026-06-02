@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { miniPill } from "@/lib/styles"
 import { API_BASE, LS_TOKEN_KEY } from "@/lib/config"
 import { DEV_ASR_SAMPLE, DEV_SCRIPT_SAMPLE } from "@/data/devFixtures"
@@ -106,6 +107,13 @@ function parseDebugAsr(raw: string): { segs: DebugAsrSeg[]; error: string | null
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+// slugline heading 三个输入的配置（key 对应 DebugScriptHeading）。
+const HEADING_FIELDS = [
+  { key: "int_ext", label: "内外景", placeholder: "室外" },
+  { key: "time_of_day", label: "时间", placeholder: "日" },
+  { key: "location", label: "地点", placeholder: "街道" },
+] as const
 
 const DEBUG_SCRIPT_PLACEHOLDER = `SZA：你昨天为什么没告诉我真相。
 YY：因为我不想让你再卷进来。
@@ -256,6 +264,8 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
   const [runStatus, setRunStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
   const [scriptText, setScriptText] = useState(DEV_SCRIPT_SAMPLE)
   const [scriptStatus, setScriptStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
+  // slugline heading（随剧本注入写到场次）。预填默认场景头。
+  const [heading, setHeading] = useState({ int_ext: "室外", time_of_day: "日", location: "街道" })
 
   const handleInjectScript = async () => {
     if (running) return
@@ -271,11 +281,15 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
     setRunning(true)
     try {
       // sceneId 省略 → 后端用活跃场次；这里显式传 activeScene 与 UI 显示一致。
-      const res = await injectDebugScript(lines, activeScene.scene_id)
+      // heading 空串由 injectDebugScript 内部过滤（不清掉已有 heading）。
+      const res = await injectDebugScript(lines, activeScene.scene_id, heading)
       setScriptStatus({
         kind: "done",
         msg: `注入 ${res.line_count} 行剧本到 Scene ${res.scene_id}`,
       })
+      // 让剧本面板立刻看到新剧本 + heading。
+      queryClient.invalidateQueries({ queryKey: ["scenes"] })
+      queryClient.invalidateQueries({ queryKey: ["scene-script"] })
     } catch (err) {
       console.error("inject script failed", err)
       setScriptStatus({ kind: "error", msg: "请求失败（看 console / 是否 SOUNDSPEED_DEV=1）" })
@@ -410,67 +424,296 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
         <DialogHeader>
           <DialogTitle>设置</DialogTitle>
           <DialogDescription>
-            配置音频输入、演员与说话人绑定
+            配置音频输入、演员与说话人绑定，开发者选项含服务器连接与测试工具
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-5 py-2 max-h-[70vh] overflow-y-auto pr-1">
-          {/* ========== 服务器连接 ========== */}
-          <div className="grid gap-2">
-            <div className="flex items-center gap-2">
-              <Server className="size-4 text-primary" />
-              <span className="text-sm font-medium">服务器连接</span>
-              <span
-                className={`ml-auto ${miniPill(
-                  connection === "open" ? "primary" : "neutral",
-                  "text-[10px]"
-                )}`}
-              >
-                {connection === "open"
-                  ? "已连接"
-                  : connection === "connecting"
-                    ? "连接中…"
-                    : connection === "no-token"
-                      ? "未鉴权"
-                      : "已断开"}
-              </span>
+        <Tabs defaultValue="general" className="py-2">
+          <TabsList className="w-full flex-shrink-0">
+            <TabsTrigger value="general">常规</TabsTrigger>
+            <TabsTrigger value="dev">开发者</TabsTrigger>
+          </TabsList>
+
+          {/* ============ 常规 tab ============ */}
+          <TabsContent value="general" className="grid gap-5 max-h-[70vh] overflow-y-auto pr-1">
+            {/* ========== 音频输入 ========== */}
+            <div className="grid gap-2">
+              <span className="text-sm font-medium">音频输入设备</span>
+              <Select defaultValue="default">
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="选择输入设备" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">系统默认</SelectItem>
+                  <SelectItem value="mic1">内置麦克风</SelectItem>
+                  <SelectItem value="usb">USB 音频接口 (Zoom H6)</SelectItem>
+                  <SelectItem value="bluetooth">蓝牙输入</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
-            <div className="grid gap-1">
-              <span className="text-xs text-muted-foreground">API 地址</span>
-              <span className="font-mono text-xs text-foreground break-all">{API_BASE}</span>
-            </div>
-            <div className="grid gap-1">
-              <span className="text-xs text-muted-foreground">Admin Token</span>
-              <div className="flex gap-2">
-                <Input
-                  type="password"
-                  placeholder="粘贴后端启动时打印的 admin token"
-                  value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
-                  onBlur={handleSaveToken}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") handleSaveToken()
-                  }}
-                  className="flex-1"
-                />
-                <Button variant="secondary" size="sm" onClick={handleSaveToken}>
-                  保存
-                </Button>
+
+            <Separator />
+
+            {/* ========== 演员 / 说话人 双栏 ========== */}
+            <div className="grid grid-cols-1 sm:grid-cols-[1fr_1.5fr] gap-4">
+              {/* ---- 左栏：演员 ---- */}
+              <div className="grid gap-3 content-start">
+                <span className="text-sm font-medium">演员</span>
+
+                <div className="grid gap-2">
+                  {actors.map((actor) => {
+                    const bound = getBoundSpeakers(actor)
+                    const isSelected = selectedActor === actor
+                    return (
+                      <button
+                        key={actor}
+                        onClick={() => setSelectedActor(actor)}
+                        className={`
+                          flex flex-col gap-1 rounded-2xl px-3 py-2 text-left transition-colors
+                          ${isSelected
+                            ? "bg-primary/10 ring-1 ring-primary/30"
+                            : "bg-muted/50 hover:bg-muted"
+                          }
+                        `}
+                      >
+                        <div className="flex items-center gap-2">
+                          <User className="size-4 text-primary flex-shrink-0" />
+                          <span className="text-sm font-medium">{actor}</span>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="ml-auto text-muted-foreground hover:text-destructive flex-shrink-0 -mr-1"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleRemoveActor(actor)
+                            }}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </div>
+                        {bound.length > 0 && (
+                          <div className="flex flex-wrap gap-1 pl-6">
+                            {bound.map((sid) => (
+                              <span
+                                key={sid}
+                                className={miniPill("neutral", "text-[10px]")}
+                              >
+                                {sid}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+
+                {/* 添加演员 */}
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="新演员姓名"
+                    value={newActorName}
+                    onChange={(e) => setNewActorName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleAddActor()
+                    }}
+                    className="flex-1"
+                  />
+                  <Button variant="secondary" size="icon-sm" onClick={handleAddActor}>
+                    <Plus className="size-4" />
+                  </Button>
+                </div>
               </div>
-              {connection === "no-token" && (
-                <span className="text-xs text-destructive">
-                  未填写 admin token，连接未鉴权。
-                </span>
-              )}
+
+              {/* ---- 右栏：已识别说话人（可多选） ---- */}
+              <div className="grid gap-3 content-start">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">已识别说话人</span>
+                  <span className="text-xs text-muted-foreground">
+                    勾选后点击绑定
+                  </span>
+                </div>
+
+                {/* 未绑定说话人 — 始终展开 */}
+                <div className="grid gap-2">
+                  {speakers.filter((s) => !getBoundActor(s.id)).map((speaker) => {
+                    const isChecked = selectedSpeakers.has(speaker.id)
+                    return (
+                      <div
+                        key={speaker.id}
+                        className={`
+                          flex items-center gap-2 rounded-2xl px-3 py-2 transition-colors
+                          ${isChecked ? "bg-primary/5 ring-1 ring-primary/20" : "bg-muted/50"}
+                        `}
+                      >
+                        <div
+                          className={`
+                            size-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 cursor-pointer
+                            transition-colors
+                            ${isChecked
+                              ? "bg-primary border-primary"
+                              : "border-muted-foreground/30 bg-transparent"
+                            }
+                          `}
+                          onClick={() => toggleSpeakerSelection(speaker.id)}
+                        >
+                          {isChecked && <Check className="size-3 text-primary-foreground" />}
+                        </div>
+                        <AudioLines className="size-4 text-primary flex-shrink-0" />
+                        <span className="text-sm font-medium flex-1">{speaker.id}</span>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="text-muted-foreground hover:text-destructive flex-shrink-0 -mr-1"
+                          onClick={() => handleRemoveSpeaker(speaker.id)}
+                        >
+                          <Trash2 className="size-3.5" />
+                        </Button>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* 已绑定说话人 — 可折叠 */}
+                {speakers.some((s) => getBoundActor(s.id)) && (
+                  <BoundSpeakersCollapse
+                    speakers={speakers}
+                    getBoundActor={getBoundActor}
+                    selectedSpeakers={selectedSpeakers}
+                    toggleSpeakerSelection={toggleSpeakerSelection}
+                    handleRemoveSpeaker={handleRemoveSpeaker}
+                  />
+                )}
+
+                {/* 绑定按钮 */}
+                <Button
+                  variant="default"
+                  size="sm"
+                  className="w-full gap-1.5"
+                  disabled={!selectedActor || selectedSpeakers.size === 0}
+                  onClick={handleBindSelected}
+                >
+                  <Link2 className="size-4" />
+                  绑定到 {selectedActor || "…"}
+                  {selectedSpeakers.size > 0 && ` (${selectedSpeakers.size})`}
+                </Button>
+
+                {/* 合并说话人 */}
+                {speakers.length >= 2 && (
+                  <div className="grid gap-2 pt-1">
+                    <span className="text-xs text-muted-foreground">合并说话人</span>
+                    <div className="flex items-center gap-2">
+                      <Select value={mergeSource} onValueChange={setMergeSource}>
+                        <SelectTrigger className="flex-1">
+                          <SelectValue placeholder="源" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {speakers.map((s) => (
+                            <SelectItem key={s.id} value={s.id}>{s.id}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <span className="text-xs text-muted-foreground flex-shrink-0">→</span>
+                      <Select value={mergeTarget} onValueChange={setMergeTarget}>
+                        <SelectTrigger className="flex-1">
+                          <SelectValue placeholder="目标" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {speakers.map((s) => (
+                            <SelectItem key={s.id} value={s.id}>{s.id}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="flex-shrink-0"
+                        disabled={!mergeSource || !mergeTarget || mergeSource === mergeTarget}
+                        onClick={handleMerge}
+                      >
+                        合并
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
 
-          <Separator />
+            <Separator />
 
-          {/* ========== 开发 / 测试（仅 dev 构建） ========== */}
-          {DEV && (
-            <>
-              <div className="grid gap-2">
+            {/* ========== 界面语言 ========== */}
+            <div className="grid gap-2">
+              <span className="text-sm font-medium">界面语言</span>
+              <Select defaultValue="zh">
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="选择语言" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="zh">简体中文</SelectItem>
+                  <SelectItem value="en">English</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </TabsContent>
+
+          {/* ============ 开发者 tab ============ */}
+          <TabsContent value="dev" className="grid gap-5 max-h-[70vh] overflow-y-auto pr-1">
+            {/* ========== 服务器连接 ========== */}
+            <div className="grid gap-2">
+              <div className="flex items-center gap-2">
+                <Server className="size-4 text-primary" />
+                <span className="text-sm font-medium">服务器连接</span>
+                <span
+                  className={`ml-auto ${miniPill(
+                    connection === "open" ? "primary" : "neutral",
+                    "text-[10px]"
+                  )}`}
+                >
+                  {connection === "open"
+                    ? "已连接"
+                    : connection === "connecting"
+                      ? "连接中…"
+                      : connection === "no-token"
+                        ? "未鉴权"
+                        : "已断开"}
+                </span>
+              </div>
+              <div className="grid gap-1">
+                <span className="text-xs text-muted-foreground">API 地址</span>
+                <span className="font-mono text-xs text-foreground break-all">{API_BASE}</span>
+              </div>
+              <div className="grid gap-1">
+                <span className="text-xs text-muted-foreground">Admin Token</span>
+                <div className="flex gap-2">
+                  <Input
+                    type="password"
+                    placeholder="粘贴后端启动时打印的 admin token"
+                    value={tokenInput}
+                    onChange={(e) => setTokenInput(e.target.value)}
+                    onBlur={handleSaveToken}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleSaveToken()
+                    }}
+                    className="flex-1"
+                  />
+                  <Button variant="secondary" size="sm" onClick={handleSaveToken}>
+                    保存
+                  </Button>
+                </div>
+                {connection === "no-token" && (
+                  <span className="text-xs text-destructive">
+                    未填写 admin token，连接未鉴权。
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* ========== 开发 / 测试（仅 dev 构建） ========== */}
+            {DEV && (
+              <>
+                <Separator />
+
+                <div className="grid gap-2">
                 <div className="flex items-center gap-2">
                   <FlaskConical className="size-4 text-primary" />
                   <span className="text-sm font-medium">开发 / 测试</span>
@@ -483,6 +726,21 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                 <span className="text-xs font-medium text-foreground">
                   剧本（可选，注入后 L2 才能产出真实 diff）
                 </span>
+                {/* slugline heading：随剧本写到场次，剧本面板头部显示 */}
+                <div className="grid grid-cols-3 gap-2">
+                  {HEADING_FIELDS.map(({ key, label, placeholder }) => (
+                    <div key={key} className="grid gap-1">
+                      <span className="text-[10px] text-muted-foreground">{label}</span>
+                      <Input
+                        value={heading[key]}
+                        onChange={(e) => setHeading((h) => ({ ...h, [key]: e.target.value }))}
+                        placeholder={placeholder}
+                        className="h-8 text-xs"
+                        disabled={running}
+                      />
+                    </div>
+                  ))}
+                </div>
                 <Textarea
                   value={scriptText}
                   onChange={(e) => setScriptText(e.target.value)}
@@ -563,230 +821,10 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                   L2 摘要需 Gemma 权重，否则降级（script_diff 为空）。
                 </span>
               </div>
-
-              <Separator />
-            </>
-          )}
-
-          {/* ========== 音频输入 ========== */}
-          <div className="grid gap-2">
-            <span className="text-sm font-medium">音频输入设备</span>
-            <Select defaultValue="default">
-              <SelectTrigger className="w-full">
-                <SelectValue placeholder="选择输入设备" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="default">系统默认</SelectItem>
-                <SelectItem value="mic1">内置麦克风</SelectItem>
-                <SelectItem value="usb">USB 音频接口 (Zoom H6)</SelectItem>
-                <SelectItem value="bluetooth">蓝牙输入</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <Separator />
-
-          {/* ========== 演员 / 说话人 双栏 ========== */}
-          <div className="grid grid-cols-1 sm:grid-cols-[1fr_1.5fr] gap-4">
-            {/* ---- 左栏：演员 ---- */}
-            <div className="grid gap-3 content-start">
-              <span className="text-sm font-medium">演员</span>
-
-              <div className="grid gap-2">
-                {actors.map((actor) => {
-                  const bound = getBoundSpeakers(actor)
-                  const isSelected = selectedActor === actor
-                  return (
-                    <button
-                      key={actor}
-                      onClick={() => setSelectedActor(actor)}
-                      className={`
-                        flex flex-col gap-1 rounded-2xl px-3 py-2 text-left transition-colors
-                        ${isSelected
-                          ? "bg-primary/10 ring-1 ring-primary/30"
-                          : "bg-muted/50 hover:bg-muted"
-                        }
-                      `}
-                    >
-                      <div className="flex items-center gap-2">
-                        <User className="size-4 text-primary flex-shrink-0" />
-                        <span className="text-sm font-medium">{actor}</span>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          className="ml-auto text-muted-foreground hover:text-destructive flex-shrink-0 -mr-1"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleRemoveActor(actor)
-                          }}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </Button>
-                      </div>
-                      {bound.length > 0 && (
-                        <div className="flex flex-wrap gap-1 pl-6">
-                          {bound.map((sid) => (
-                            <span
-                              key={sid}
-                              className={miniPill("neutral", "text-[10px]")}
-                            >
-                              {sid}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-
-              {/* 添加演员 */}
-              <div className="flex gap-2">
-                <Input
-                  placeholder="新演员姓名"
-                  value={newActorName}
-                  onChange={(e) => setNewActorName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") handleAddActor()
-                  }}
-                  className="flex-1"
-                />
-                <Button variant="secondary" size="icon-sm" onClick={handleAddActor}>
-                  <Plus className="size-4" />
-                </Button>
-              </div>
-            </div>
-
-            {/* ---- 右栏：已识别说话人（可多选） ---- */}
-            <div className="grid gap-3 content-start">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium">已识别说话人</span>
-                <span className="text-xs text-muted-foreground">
-                  勾选后点击绑定
-                </span>
-              </div>
-
-              {/* 未绑定说话人 — 始终展开 */}
-              <div className="grid gap-2">
-                {speakers.filter((s) => !getBoundActor(s.id)).map((speaker) => {
-                  const isChecked = selectedSpeakers.has(speaker.id)
-                  return (
-                    <div
-                      key={speaker.id}
-                      className={`
-                        flex items-center gap-2 rounded-2xl px-3 py-2 transition-colors
-                        ${isChecked ? "bg-primary/5 ring-1 ring-primary/20" : "bg-muted/50"}
-                      `}
-                    >
-                      <div
-                        className={`
-                          size-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 cursor-pointer
-                          transition-colors
-                          ${isChecked
-                            ? "bg-primary border-primary"
-                            : "border-muted-foreground/30 bg-transparent"
-                          }
-                        `}
-                        onClick={() => toggleSpeakerSelection(speaker.id)}
-                      >
-                        {isChecked && <Check className="size-3 text-primary-foreground" />}
-                      </div>
-                      <AudioLines className="size-4 text-primary flex-shrink-0" />
-                      <span className="text-sm font-medium flex-1">{speaker.id}</span>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="text-muted-foreground hover:text-destructive flex-shrink-0 -mr-1"
-                        onClick={() => handleRemoveSpeaker(speaker.id)}
-                      >
-                        <Trash2 className="size-3.5" />
-                      </Button>
-                    </div>
-                  )
-                })}
-              </div>
-
-              {/* 已绑定说话人 — 可折叠 */}
-              {speakers.some((s) => getBoundActor(s.id)) && (
-                <BoundSpeakersCollapse
-                  speakers={speakers}
-                  getBoundActor={getBoundActor}
-                  selectedSpeakers={selectedSpeakers}
-                  toggleSpeakerSelection={toggleSpeakerSelection}
-                  handleRemoveSpeaker={handleRemoveSpeaker}
-                />
-              )}
-
-              {/* 绑定按钮 */}
-              <Button
-                variant="default"
-                size="sm"
-                className="w-full gap-1.5"
-                disabled={!selectedActor || selectedSpeakers.size === 0}
-                onClick={handleBindSelected}
-              >
-                <Link2 className="size-4" />
-                绑定到 {selectedActor || "…"}
-                {selectedSpeakers.size > 0 && ` (${selectedSpeakers.size})`}
-              </Button>
-
-              {/* 合并说话人 */}
-              {speakers.length >= 2 && (
-                <div className="grid gap-2 pt-1">
-                  <span className="text-xs text-muted-foreground">合并说话人</span>
-                  <div className="flex items-center gap-2">
-                    <Select value={mergeSource} onValueChange={setMergeSource}>
-                      <SelectTrigger className="flex-1">
-                        <SelectValue placeholder="源" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {speakers.map((s) => (
-                          <SelectItem key={s.id} value={s.id}>{s.id}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <span className="text-xs text-muted-foreground flex-shrink-0">→</span>
-                    <Select value={mergeTarget} onValueChange={setMergeTarget}>
-                      <SelectTrigger className="flex-1">
-                        <SelectValue placeholder="目标" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {speakers.map((s) => (
-                          <SelectItem key={s.id} value={s.id}>{s.id}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="flex-shrink-0"
-                      disabled={!mergeSource || !mergeTarget || mergeSource === mergeTarget}
-                      onClick={handleMerge}
-                    >
-                      合并
-                    </Button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <Separator />
-
-          {/* ========== 界面语言 ========== */}
-          <div className="grid gap-2">
-            <span className="text-sm font-medium">界面语言</span>
-            <Select defaultValue="zh">
-              <SelectTrigger className="w-full">
-                <SelectValue placeholder="选择语言" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="zh">简体中文</SelectItem>
-                <SelectItem value="en">English</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
+              </>
+            )}
+          </TabsContent>
+        </Tabs>
       </DialogContent>
     </Dialog>
   )

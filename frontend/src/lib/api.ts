@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
 import { API_BASE } from "@/lib/config"
 import { useSessionStore } from "@/store/session"
-import type { SceneDTO, TakeDTO, TakeDetailDTO } from "@/types/api"
+import type { SceneDTO, ScriptDTO, TakeDTO, TakeDetailDTO } from "@/types/api"
 
 export class ApiError extends Error {
   status: number
@@ -41,6 +41,14 @@ export async function getScenes(): Promise<SceneDTO[]> {
 export function pickActiveScene(scenes: SceneDTO[] | undefined): SceneDTO | undefined {
   if (!scenes || scenes.length === 0) return undefined
   return scenes.find((s) => s.is_active) ?? scenes[0]
+}
+
+// 取某场最新剧本（GET /scenes/{id}/script）。无剧本 → 后端返回 {script:null}，这里返回 null。
+export async function getSceneScript(sceneId: number): Promise<ScriptDTO | null> {
+  const data = await request<{ script: ScriptDTO | null }>(
+    `/api/v1/scenes/${sceneId}/script`,
+  )
+  return data.script
 }
 
 export async function getTakes(sceneId?: number): Promise<TakeDTO[]> {
@@ -96,13 +104,30 @@ export interface DebugScriptResult {
   line_count: number
 }
 
+// 可选 slugline heading，随注入剧本一起写到场次（后端部分更新，只写非空字段）。
+export interface DebugScriptHeading {
+  int_ext?: string
+  time_of_day?: string
+  location?: string
+}
+
 export function injectDebugScript(
   lines: DebugScriptLine[],
   sceneId?: number,
+  heading?: DebugScriptHeading,
 ): Promise<DebugScriptResult> {
+  const body: Record<string, unknown> = { lines }
+  if (sceneId !== undefined) body.scene_id = sceneId
+  // 后端已忽略空串（DAL 归一为不更新）；这里仍过滤空字段，避免发送无意义的空值。
+  if (heading) {
+    for (const key of ["int_ext", "time_of_day", "location"] as const) {
+      const v = heading[key]?.trim()
+      if (v) body[key] = v
+    }
+  }
   return request<DebugScriptResult>(`/api/v1/debug/script`, {
     method: "POST",
-    body: JSON.stringify(sceneId !== undefined ? { scene_id: sceneId, lines } : { lines }),
+    body: JSON.stringify(body),
   })
 }
 
@@ -115,10 +140,21 @@ export const takesQueryKey = (sceneId?: number) =>
 
 export const takeQueryKey = (id: number) => ["take", id] as const
 
+export const sceneScriptQueryKey = (sceneId: number | null | undefined) =>
+  ["scene-script", sceneId ?? null] as const
+
 export function useScenes() {
   return useQuery({
     queryKey: scenesQueryKey(),
     queryFn: getScenes,
+  })
+}
+
+export function useSceneScript(sceneId: number | null | undefined) {
+  return useQuery({
+    queryKey: sceneScriptQueryKey(sceneId),
+    queryFn: () => getSceneScript(sceneId as number),
+    enabled: sceneId != null,
   })
 }
 

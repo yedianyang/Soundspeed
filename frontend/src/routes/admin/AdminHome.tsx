@@ -162,7 +162,6 @@ export default function AdminHome() {
                     key={i}
                     count={5}
                     color={i === 0 ? "bg-green-500" : "bg-primary"}
-                    className={i > 0 ? "hidden sm:flex" : undefined}
                   />
                 ))}
               </div>

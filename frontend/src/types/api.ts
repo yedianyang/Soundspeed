@@ -12,6 +12,23 @@ export interface SceneDTO {
   shoot_date: string | null
   is_active: number // SQLite 0 | 1，非 bool；pickActiveScene 的 truthy 检查照常工作
   created_at: number
+  int_ext: string | null // slugline 内外景：室内 / 室外（v2，可能 null）
+  time_of_day: string | null // slugline 时间：日 / 夜 …（v2，可能 null）
+  location: string | null // slugline 地点：街道 / 咖啡馆 …（v2，可能 null）
+}
+
+// ── Script DTO（GET /api/v1/scenes/{scene_id}/script，spec 2026-06-01 §2.3）──
+
+export interface ScriptLineDTO {
+  line_no: number
+  character: string | null // null → 动作描述（无说话人）；有值 → 台词说话人
+  text: string
+}
+
+export interface ScriptDTO {
+  script_id: number
+  version: number
+  lines: ScriptLineDTO[]
 }
 
 // ── L2 输出：takes.script_diff JSON 顶层形状（docs/specs/2026-05-27-l2-pipeline.md §）──
