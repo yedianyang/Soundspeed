@@ -172,19 +172,55 @@ def get_or_create_scene(
 - 多场 + `scene_code != null` → `get_or_create_scene(scene_code, int_ext=…, time_of_day=…, location=…)`。
 - 多场 + `scene_code == null` → 生成新唯一 `scene_code`（**append-only**：推荐「导入批次标识 + 场内序号」，保证 `ux_scenes_scene_code` 不撞、体现每次导入新建语义；具体格式 3.C 定）→ `get_or_create_scene(新code, …)`。
 
-**2. 按场替换（起新版本）：**
-```
-script_id = insert_script(scene_id, raw_text_of_scene)   # version=None → 自动 MAX+1
-for i, line in enumerate(scene.lines, start=1):
-    insert_script_line(script_id, i, line.character, line.text)
-```
-旧版本 script + script_lines **留库不删**（历史）。
+**2. 入库（无重复直接写，有重复走确认）：** 命中已有脚本的场**不静默替换**，走 §5.1 的 preview/confirm。底层写入动作仍是 `insert_script(scene_id, raw_text_of_scene)`（version=None 自增）+ 循环 `insert_script_line(script_id, i, character, text)`，旧版本 script + script_lines **留库不删**（历史）。
 
 **3. 不回算已有 take、不更新 heading**（§0 分叉 3）。
 
 **4. 行清洗（3.C 落实）：** 解析器对脏数据宽容，可能产出 `text` 为空串的 `ParsedLine`（§4 容错 / `_parse_chunk_output` 的 `get("text","")`）。3.C 入库前 **filter 掉 `text.strip()` 为空的行**，不写空 `script_lines` 行（对齐 §4「丢脏数据」，与 `/debug/script` 的空行过滤一致，debug.py:134）。`character` 为空串的也归一为 `None`（舞台指示）。
 
-**raw_text 入库口径：** 每场 `raw_text` = 该场 `lines` 重新拼接（全角冒号 `角色：台词`，舞台指示行直出 text），与 `/debug/script`（debug.py:139）一致，保证 `scripts.raw_text` 可读且格式统一。
+**5. 跳过清洗后全空的场（防版本链覆盖）：** 某场清洗后无任何有效行 → **整场跳过**：不 `insert_script`、多场路径也**不 `get_or_create_scene`**（不建空场）。理由：空 re-import 若写一个空版本，`get_latest_script` 会返回该空版本 → L2 丢掉该场 diff 基准。故**清洗判空必须在定 scene_id 之前**。副作用：纯 slugline 无对白的场也被跳过、不建场（MVP 可接受）。全批跳光 → 返回空 → 端点 422。
+
+**raw_text 入库口径：** 每场 `raw_text` = 该场**清洗后** `lines` 重新拼接（全角冒号 `角色：text`，舞台指示行直出 text），与 `/debug/script`（debug.py:139）一致，保证 `scripts.raw_text` 可读且格式统一。
+
+---
+
+## 5.1 重复场确认替换流程（preview / confirm，3.C/3.D/3.E）
+
+> **决策（2026-06-03 用户拍板）：** 重复场替换走「确认 + diff 对比」，不静默覆盖；无重复直接入库。blast radius：3.C 拆 preview/confirm 两阶段、3.D 两阶段端点、3.E 左右对比弹窗。这是对原 §5「直接插新版本」的 reframe。
+
+「按场替换」**不静默发生**：命中已有脚本的场要让场记看 diff 确认是否替换，避免误导入覆盖好脚本的版本链（与步骤 5 跳过空场同一价值——不让可疑导入污染版本链）。
+
+**定义：**
+- **重复场** = 该场 `get_or_create_scene` 命中已有 `scene_code`（`created=False`）**且** `get_latest_script(scene_id)` 非空（已有脚本版本）。
+- **无重复场** = 新建场（`created=True`）或命中但该场尚无脚本（首次导入）。
+
+**阶段 1 — preview（解析 + 只读分类，解析只发生这一次，零写）：**
+1. 解析 `raw_text → ParsedScene[]`（§4），行清洗 + 跳过全空场（步骤 4/5）。
+2. **只读分类（关键：preview 绝不写库、绝不建场）**：用 `list_scenes()` 建 `{scene_code: scene_id}` 映射 + `get_latest_script(scene_id)` 判有无脚本，逐场判定：
+   - 单场（current_scene）→ scene_id=`get_active_scene_id()`；该场有脚本 → 重复，否则无重复。
+   - 多场有号 → scene_code 在映射 → 命中场，有脚本则**重复**、无脚本则无重复（首次导入）；不在映射 → **新场**（无重复）。
+   - 多场无号 → 合成 code（每次唯一）→ 必不在映射 → 新场（无重复，append-only）。
+   ⚠ **`get_or_create_scene` 不在 preview 调**——它有 INSERT 副作用，会给每个新场建孤儿空场、破坏「零写」承诺。preview 只用上述只读方法（全在 main），**零 2.x 依赖，可今天用真 DAL 集成测**。
+3. 分支：
+   - **整批无重复** → 直接全部入库（走阶段 2 的写逻辑、无 decisions），返回 `{status:"imported", scenes:[…]}`。一步完成、无弹窗。
+   - **存在重复场** → **不写任何东西**，返回 `{status:"needs_confirmation", plan:<结构化导入计划>, conflicts:[{scene_id, scene_code, original:{raw_text,lines}, incoming:{raw_text,lines}}]}`。
+
+**阶段 2 — confirm（写阶段，唯一调 `get_or_create_scene` 的地方）：**
+- 输入：`plan`（阶段 1 解析结果）+ `decisions`（每个重复场 `replace | skip`）。
+- 写：对每个要写的场调 `get_or_create_scene`（真建场/复用，**2.x 方法，整个 3.C 只在这里依赖 2.x**）→ `insert_script` 新版本 → `insert_script_line`。无重复场全写；重复场按 `decisions`（`replace` 写、`skip` 不写）。「整批无重复」分支也复用本写逻辑（视作全 write）。
+- 注：preview 的 scene_id 是只读 snapshot；confirm 真建场以 `get_or_create_scene` 为准（snapshot 与写之间若有并发建场，靠 `get_or_create_scene` 的 IntegrityError 兜底，单用户低风险）。
+
+**解析只发生一次（硬约束）：** LLM 解析不确定，preview 与 confirm **不能各解析一遍**（结果会漂移、对比失真）。preview 的 `ParsedScene[]` 必须带到 confirm。MVP：结构化 `plan` 随 preview 返回、confirm 回传（无状态，剧本结构化数据不大）；备选：后端 `plan_token` 暂存（免回传，需临时存储 + TTL）。3.D 定。
+
+**对比数据粒度：** 后端给 `original` 与 `incoming` 两边的 `raw_text` + 结构化 `lines`（character/text 列表）；逐行 diff 渲染由前端（3.E）做。
+
+**current_scene 多场（统一 §0 分叉 1 单场路径的边缘）：** `target=current_scene` 时把解析出的多场**合并成一个新版本**（所有场的 lines 顺序拼成一个 script）对当前 active scene。当前场已有脚本 → 走重复确认（original=当前场最新版 vs incoming=合并内容）；无脚本 → 直接写。不丢场、不产生 N 个版本、替换前必确认。
+
+**⚠ dup 检测是 best-effort（基于 `scene_code` 身份匹配）**，两类「人眼觉得是重复」的场**不会触发确认弹窗**——记此以校准信任：
+- **误归一化（§3.1）**：手动建场 `"Scene_3"` vs 解析器抽 `"3"`，字符串不等 → 分类「新场无重复」→ 直接写、无弹窗、建出平行场。`normalize_scene_code`（2.x/3.x 共享）落地前，这个洞恰在「人眼会认为是重复」的 re-import 上。
+- **无号场 append-only**：合成 `import:{batch_id}:{n}` 每次唯一 → 永不命中 → 重导同一无号多场剧本总是 append、不提示。
+
+即心智模型「重导就弹窗」实际是「`scene_code` 命中才弹窗」。
 
 ---
 
@@ -198,17 +234,19 @@ for i, line in enumerate(scene.lines, start=1):
 
 三条输入**提取层不同，汇入解析器同一入口**（`raw_text → ParsedScene[]`，§4）。拍照 = spike（3.G 定 vision vs OCR）尚未落地，3.H gate 在 3.G 结论，本 spec 不展开实现，只钉「拍照=当前场、不走分场」。
 
-「粘贴单场 vs 多场」如何判定目标（导入到当前场，还是按解析结果多场建场）由**端点参数显式声明**（§7），不靠解析器猜，避免单场剧本被误判成「替换当前场」或反之。
+「粘贴单场 vs 多场」如何判定目标（导入到当前场，还是按解析结果多场建场）由**端点参数显式声明**（§7），不靠解析器猜。`target=current_scene` 即使解析出多场也**合并成当前场的一个新版本**（§5.1），不丢场也不误建多场；替换当前场已有脚本时走确认。
 
 ---
 
 ## 7. API 端点形态（3.D 概要，3.D 定稿）
 
-- **`POST /api/v1/scripts/import`**（粘贴主入口）：body 含 `raw_text` + 目标声明（如 `target: "current_scene" | "multi_scene"`）→ 解析器 → §5 入库。`target=current_scene` 走单场路径（active scene），`multi_scene` 走分场 + scene_code 分流。
-- **`POST /api/v1/scripts/upload`**（3.F）：收文件 txt/pdf/docx → 提取纯文本 → 复用 import 同一流程。
+两阶段 import（preview / confirm，见 §5.1）：
+- **`POST /api/v1/scripts/import`**（阶段 1 preview，粘贴主入口）：body `{raw_text, target: "current_scene" | "multi_scene"}` → 解析 + 分类。**无重复** → 直接入库返回 `{status:"imported", scenes:[…]}`；**有重复** → 不写，返回 `{status:"needs_confirmation", plan, conflicts:[{scene_id, scene_code, original, incoming}]}`。
+- **`POST /api/v1/scripts/import/confirm`**（阶段 2，仅 needs_confirmation 后）：body `{plan, decisions:[{scene_id, action:"replace"|"skip"}]}` → 按决策写（§5.1 阶段 2）。
+- **`POST /api/v1/scripts/upload`**（3.F）：收文件 txt/pdf/docx → 提取纯文本 → 复用 import 同一两阶段流程。
 - **`/debug/script`**：**保留**作结构化注入 debug 工具（dev-only，跳过解析器，直收结构化 lines），不被 import 端点取代。
 
-**错误口径（3.D 定细节）：** 单场路径无 active scene → 422；解析器零场 / 全空 → 422。具体请求/响应 schema 与错误码由 3.D 定稿。
+**错误口径（3.D 定细节）：** 单场路径无 active scene → 422；解析器零场 / 全空（含全部场清洗后空）→ 422。具体请求/响应 schema 与错误码由 3.D 定稿。
 
 ---
 
@@ -225,6 +263,7 @@ for i, line in enumerate(scene.lines, start=1):
 |--------------|-----------------|
 | 解析器契约 raw text/图-文本 → `[{scene_code/slugline, lines}]`，1..N 场 | §4 |
 | 按场 upsert + 版本替换语义写清 | §5 + §2（DAL/schema 现状） |
+| 重复场确认替换 + diff 对比（2026-06-03 reframe，超出原 3.A 验收）| §5.1 |
 | scene 匹配/建场与 2.x 对齐方案 | §3 + §0 分叉 2 |
 | 拍照路径指向 3.G spike | §6 |
 | 拍照=当前场、粘贴/上传=多场 的路由写清 | §6 |
