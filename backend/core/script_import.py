@@ -41,7 +41,7 @@ batch_id 注入：
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from backend.pipelines.sp_script import ParsedScene
@@ -164,7 +164,7 @@ class ImportPlan:
                        incoming (dict)         — {raw_text: str, lines: list[tuple]}
     """
 
-    target: str
+    target: Literal["current_scene", "multi_scene"]
     new_scenes: list[dict] = field(default_factory=list)
     conflicts: list[dict] = field(default_factory=list)
 
@@ -184,7 +184,7 @@ def _clean_lines(
     返回 (character, text) 元组列表。
     """
     return [
-        (None if (ln.character or "") == "" else ln.character, ln.text)
+        (None if (ln.character or "").strip() == "" else ln.character, ln.text)
         for ln in scene.lines
         if ln.text.strip()
     ]
@@ -219,7 +219,7 @@ def _lines_to_plan_tuples(
 def plan_import(
     scenes: "list[ParsedScene]",
     *,
-    target: str,
+    target: Literal["current_scene", "multi_scene"],
     batch_id: str,
     dal: ScriptImportReadDAL,
 ) -> ImportPlan:
@@ -241,6 +241,10 @@ def plan_import(
         - 绝不调 get_or_create_scene（零写承诺）。
         - 清洗判空在定 scene_id 之前（spec §5 步骤 5）。
         - current_scene 路径合并所有场 lines 成一个版本。
+
+    调用方（3.D 端点）注意：返回的 plan 若 new_scenes 与 conflicts 均空
+    （全空场被跳过 / 输入无有效行）= 全空信号，端点应返回 422、不再调 apply_import
+    （spec §5 步骤 5）。
     """
     plan = ImportPlan(target=target)
     is_single = target == "current_scene"
@@ -309,7 +313,7 @@ def plan_import(
 
         # 定 scene_code
         if scene.scene_code is not None:
-            code: str | None = scene.scene_code
+            code = scene.scene_code
         else:
             code = f"import:{batch_id}:{synthetic_n}"
             synthetic_n += 1
@@ -320,7 +324,7 @@ def plan_import(
             "location": scene.slugline.location,
         }
 
-        if code is not None and code in scene_map:
+        if code in scene_map:
             # 命中已有场
             existing_scene_id = scene_map[code]
             existing_script = dal.get_latest_script(existing_scene_id)
@@ -392,6 +396,11 @@ def apply_import(
         - multi_scene 路径：new_scenes.scene_id 为 None 时调 get_or_create_scene 建场；
           scene_id 非 None（命中无脚本的已有场）直接使用。
         - 解析只发生一次（§5.1 硬约束）：plan 带完整 cleaned lines，apply 直接写。
+
+    ⚠ TOCTOU（spec §5.1 单用户低风险）：single_scene 用 plan 的 active scene snapshot
+      直接写，preview→confirm 之间若 active scene 被切换（多用户/后台）会写到旧场。本 core
+      不防；3.D confirm 端点应重校验 get_active_scene_id() 与 plan 一致、不一致返 409。
+      multi_scene conflict 的 scene_code 必非 None（单场 conflict code=None 被 is_single 隔离）。
     """
     decisions = decisions or {}
     results: list[tuple[int, int]] = []

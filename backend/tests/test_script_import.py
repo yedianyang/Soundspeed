@@ -40,6 +40,7 @@ import pytest
 from backend.core.script_import import (
     ImportPlan,
     NoActiveSceneError,
+    _clean_lines,
     apply_import,
     plan_import,
 )
@@ -682,3 +683,18 @@ def test_real_dal_plan_current_scene_conflict(tmp_dal: DAL) -> None:
     assert len(plan.conflicts) == 1
     assert plan.conflicts[0]["original"]["raw_text"] == "张三：旧内容"
     assert plan.conflicts[0]["incoming"]["raw_text"] == "张三：新内容"
+
+
+# ---------------------------------------------------------------------------
+# H1（DeepSeek review）行清洗：纯空白 character 归一为 None
+# ---------------------------------------------------------------------------
+
+
+def test_clean_lines_blank_character_to_none() -> None:
+    """H1：纯空白 character（LLM 抖动输出 '   '）归一为 None，不透传当角色名。"""
+    scene = _scene(lines=[("   ", "舞台指示文本"), ("罗湘", "台词"), ("", "另一指示")])
+    assert _clean_lines(scene) == [
+        (None, "舞台指示文本"),
+        ("罗湘", "台词"),
+        (None, "另一指示"),
+    ]
