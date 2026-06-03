@@ -1053,7 +1053,7 @@ _AUTH = {"Authorization": f"Bearer {_TOKEN}"}
 def _seeded(tmp_dal: DAL) -> tuple[int, int, int]:
     """造 scene + take + ch1(有 speaker) + ch2(无 speaker)；返回 (take_id, ch1_seg, ch2_seg)。"""
     sid = tmp_dal.create_scene("scene_patch")
-    tid = tmp_dal.start_take(sid, "1", 1000.0)
+    tid, _ = tmp_dal.start_take(sid, "1", 1000.0)
     ch1 = tmp_dal.insert_segment(tid, 1, "SPEAKER_00", "你好", 0, 16000)
     ch2 = tmp_dal.insert_segment(tid, 2, None, "杂音", 0, 16000)
     return tid, ch1, ch2
@@ -1101,7 +1101,7 @@ def test_patch_segment_missing_404(tmp_dal: DAL, monkeypatch) -> None:
 
 def test_patch_segment_wrong_take_404(tmp_dal: DAL, monkeypatch) -> None:
     tid, ch1, _ = _seeded(tmp_dal)
-    other = tmp_dal.start_take(tmp_dal.create_scene("other"), "1", 2000.0)
+    other, _ = tmp_dal.start_take(tmp_dal.create_scene("other"), "1", 2000.0)
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
     resp = client.patch(
         f"/api/v1/takes/{other}/segments/{ch1}", json={"speaker": "X"}, headers=_AUTH
@@ -1292,7 +1292,7 @@ def _make_take(tmp_dal: DAL, scene_code: str = "ScenePatch") -> tuple[int, int]:
     """建场+激活+开 take+结束 take，返回 (scene_id, take_id)。"""
     sid = tmp_dal.create_scene(scene_code)
     tmp_dal.set_active_scene(sid)
-    tid = tmp_dal.start_take(sid, "1", 1000.0)
+    tid, _ = tmp_dal.start_take(sid, "1", 1000.0)
     tmp_dal.end_take(tid, 1060.0, "tbd")
     return sid, tid
 
@@ -1344,9 +1344,9 @@ def test_patch_take_number_suffix_when_conflict(tmp_dal: DAL, monkeypatch) -> No
     sid = tmp_dal.create_scene("ScenePatchSuffix")
     tmp_dal.set_active_scene(sid)
     # 两次 start_take 在同 shot="1" 组内，分别拿到 number=1, 2
-    t1 = tmp_dal.start_take(sid, "1", 1000.0)   # shot="1", number=1
+    t1, _ = tmp_dal.start_take(sid, "1", 1000.0)   # shot="1", number=1
     tmp_dal.end_take(t1, 1010.0, "keeper")
-    t2 = tmp_dal.start_take(sid, "1", 1020.0)   # shot="1", number=2
+    t2, _ = tmp_dal.start_take(sid, "1", 1020.0)   # shot="1", number=2
     tmp_dal.end_take(t2, 1030.0, "ng")
 
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
@@ -1370,9 +1370,9 @@ def test_patch_take_scene_id_cross_scene_conflict_uses_suffix(tmp_dal: DAL, monk
     sid2 = tmp_dal.create_scene("ScenePatchCross2")
     tmp_dal.set_active_scene(sid1)
 
-    t1 = tmp_dal.start_take(sid1, "1", 1000.0)   # shot="1", number=1
+    t1, _ = tmp_dal.start_take(sid1, "1", 1000.0)   # shot="1", number=1
     tmp_dal.end_take(t1, 1010.0, "keeper")
-    t2 = tmp_dal.start_take(sid2, "1", 1020.0)   # shot="1", number=1（不同场）
+    t2, _ = tmp_dal.start_take(sid2, "1", 1020.0)   # shot="1", number=1（不同场）
     tmp_dal.end_take(t2, 1030.0, "keeper")
 
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)

@@ -93,6 +93,54 @@ class TakeNumberConflictError(Exception):
 # ── 内部辅助 ──────────────────────────────────────────────────────────────────
 
 
+def _next_take_number(conn: sqlite3.Connection, scene_id: int, shot: str) -> int:
+    """(scene_id, shot) 组内下一个可用 take_number（live MAX+1，软删号可复用）。
+
+    事务内调用版本，直接用传入的 conn，不开新事务。
+    空组返回 1。
+    """
+    row = conn.execute(
+        "SELECT COALESCE(MAX(take_number), 0) + 1 AS next_num "
+        "FROM takes WHERE scene_id = ? AND shot = ? AND deleted_at IS NULL;",
+        (scene_id, shot),
+    ).fetchone()
+    return int(row["next_num"])
+
+
+def _alloc_free_suffix(
+    conn: sqlite3.Connection,
+    scene_id: int,
+    shot: str,
+    take_number: int,
+    exclude_take_id: int,
+    start: str = "+",
+) -> str:
+    """在 (scene_id, shot, take_number) 下找一个空闲 take_suffix，从 start 开始顺位追加 '+'。
+
+    取占用集合（软删 + live 均算占用），排除 exclude_take_id 自身。
+    找到第一个不在占用集合中的 suffix 即返回。
+    超 _MAX_SUFFIX_ITER 次迭代抛 RuntimeError（含「后缀循环超过 N 次」子串）。
+    """
+    taken_rows = conn.execute(
+        "SELECT take_suffix FROM takes "
+        "WHERE scene_id = ? AND shot = ? AND take_number = ? AND take_id != ?;",
+        (scene_id, shot, take_number, exclude_take_id),
+    ).fetchall()
+    taken_suffixes = {r["take_suffix"] for r in taken_rows}
+
+    new_suffix = start
+    _iter = 0
+    while new_suffix in taken_suffixes:
+        _iter += 1
+        if _iter >= _MAX_SUFFIX_ITER:
+            raise RuntimeError(
+                f"后缀循环超过 {_MAX_SUFFIX_ITER} 次，"
+                f"scene_id={scene_id} shot={shot!r} take_number={take_number}"
+            )
+        new_suffix = new_suffix + "+"
+    return new_suffix
+
+
 def _row_to_take(row: sqlite3.Row) -> Take:
     performer_issues = row["performer_issues"]
     script_diff = row["script_diff"]
@@ -295,38 +343,58 @@ class DAL:
         if occupant is None:
             return  # no-op：'' 未被软删行占
 
-        # 找出该 scene+shot+number 下所有现存 suffix（软删 + live 均算占用）
-        taken_rows = conn.execute(
-            "SELECT take_suffix FROM takes "
-            "WHERE scene_id = ? AND shot = ? AND take_number = ? AND take_id != ?;",
-            (scene_id, shot, take_number, occupant["take_id"]),
-        ).fetchall()
-        taken_suffixes = {r["take_suffix"] for r in taken_rows}
-
-        # 从 '+' 开始顺位找空闲 suffix（MAX_ITER 守卫，DeepSeek #3）
-        new_suffix = "+"
-        _iter = 0
-        while new_suffix in taken_suffixes:
-            _iter += 1
-            if _iter >= _MAX_SUFFIX_ITER:
-                raise RuntimeError(
-                    f"_vacate_base_slot: 后缀循环超过 {_MAX_SUFFIX_ITER} 次，"
-                    f"scene_id={scene_id} shot={shot!r} take_number={take_number}"
-                )
-            new_suffix = new_suffix + "+"
-
+        # 从 '+' 开始顺位找空闲 suffix（_alloc_free_suffix 含 MAX_ITER 守卫）
+        new_suffix = _alloc_free_suffix(
+            conn, scene_id, shot, take_number, exclude_take_id=occupant["take_id"]
+        )
         conn.execute(
             "UPDATE takes SET take_suffix = ? WHERE take_id = ?;",
             (new_suffix, occupant["take_id"]),
         )
+
+    def _resolve_base_slot(
+        self,
+        conn: sqlite3.Connection,
+        target_scene: int,
+        target_shot: str,
+        target_number: int,
+        exclude_take_id: int,
+    ) -> tuple[str, str]:
+        """查目标四元 (target_scene, target_shot, target_number, '') 的占用状态，返回 (target_suffix, conflict_resolution)。
+
+        三态：
+        - '' 未被占用 → ("", "none")
+        - 被软删行占 → _vacate_base_slot 让出 '' → ("", "vacate")
+        - 被 live 行占 → 被编辑 take 加后缀 → (suffix, "suffix")
+
+        不对称规则（DeepSeek #4 注）：vacate 只动软删行；加后缀只动被编辑 take，live 占用者永不被挪。
+        调用时必须在写事务内（BEGIN IMMEDIATE 已持有），直接用传入 conn 操作，不开新事务。
+        """
+        occupant_row = conn.execute(
+            "SELECT take_id, deleted_at FROM takes "
+            "WHERE scene_id = ? AND shot = ? AND take_number = ? AND take_suffix = '' "
+            "AND take_id != ?;",
+            (target_scene, target_shot, target_number, exclude_take_id),
+        ).fetchone()
+
+        if occupant_row is None:
+            return ("", "none")
+        if occupant_row["deleted_at"] is not None:
+            self._vacate_base_slot(conn, target_scene, target_shot, target_number)
+            return ("", "vacate")
+        # live 行占用 → 被编辑 take 顺位加后缀（_alloc_free_suffix 含 MAX_ITER 守卫）
+        suffix = _alloc_free_suffix(
+            conn, target_scene, target_shot, target_number, exclude_take_id=exclude_take_id
+        )
+        return (suffix, "suffix")
 
     def start_take(
         self,
         scene_id: int,
         shot: str,
         start_ts: float,
-    ) -> int:
-        """新建 take 行（suffix=''），返回 take_id。
+    ) -> tuple[int, int]:
+        """新建 take 行（suffix=''），返回 (take_id, take_number)。
 
         take_number 由方法内部在 BEGIN IMMEDIATE 写事务内原子分配：
           1. 在 txn 内计算 (scene_id, shot) 组内 MAX(live take_number)+1
@@ -338,12 +406,7 @@ class DAL:
         """
         with self._write_tx() as conn:
             # 步骤 1：txn 内原子取号（scene+shot 分组，排除软删行）
-            row = conn.execute(
-                "SELECT COALESCE(MAX(take_number), 0) + 1 AS next_num "
-                "FROM takes WHERE scene_id = ? AND shot = ? AND deleted_at IS NULL;",
-                (scene_id, shot),
-            ).fetchone()
-            take_number = int(row["next_num"])
+            take_number = _next_take_number(conn, scene_id, shot)
             # 步骤 2：让出可能被软删行占着的干净 '' 号位
             self._vacate_base_slot(conn, scene_id, shot, take_number)
             # 步骤 3：插入新 take
@@ -352,7 +415,7 @@ class DAL:
                 "VALUES (?, ?, ?, ?);",
                 (scene_id, shot, take_number, start_ts),
             )
-        return cur.lastrowid  # type: ignore[return-value]
+        return cur.lastrowid, take_number  # type: ignore[return-value]
 
     def end_take(
         self,
@@ -829,50 +892,18 @@ class DAL:
             if take_number is None:
                 if is_cross_scene:
                     # 情形 A：移场，追加到目标 (scene, target_shot) 组 live MAX+1（软删号可复用）
-                    next_row = conn.execute(
-                        "SELECT COALESCE(MAX(take_number), 0) + 1 AS next_num "
-                        "FROM takes WHERE scene_id = ? AND shot = ? AND deleted_at IS NULL;",
-                        (target_scene, target_shot),
-                    ).fetchone()
-                    target_number = next_row["next_num"]
+                    target_number = _next_take_number(conn, target_scene, target_shot)
                     conflict_resolution = "append"
                     # 若目标四元 (target_scene, target_shot, target_number, '') 被软删行占着，先让出 ''
                     self._vacate_base_slot(conn, target_scene, target_shot, target_number)
                 elif is_shot_change:
                     # 决策 3：仅改 shot（同场），保留 take_number，落到目标 (scene, target_shot, number, '')
-                    # 需检查目标四元是否被占
                     target_number = cur_number
-                    occupant_row = conn.execute(
-                        "SELECT take_id, deleted_at FROM takes "
-                        "WHERE scene_id = ? AND shot = ? AND take_number = ? AND take_suffix = '' "
-                        "AND take_id != ?;",
-                        (target_scene, target_shot, target_number, take_id),
-                    ).fetchone()
-                    if occupant_row is None:
-                        target_suffix = ""
-                    elif occupant_row["deleted_at"] is not None:
-                        self._vacate_base_slot(conn, target_scene, target_shot, target_number)
-                        target_suffix = ""
-                    else:
-                        # live 行占用 → 被编辑 take 加后缀（live 占用者永不被挪）
-                        taken_rows = conn.execute(
-                            "SELECT take_suffix FROM takes "
-                            "WHERE scene_id = ? AND shot = ? AND take_number = ? AND take_id != ?;",
-                            (target_scene, target_shot, target_number, take_id),
-                        ).fetchall()
-                        taken_suffixes = {r["take_suffix"] for r in taken_rows}
-                        new_suffix = "+"
-                        _iter = 0
-                        while new_suffix in taken_suffixes:
-                            _iter += 1
-                            if _iter >= _MAX_SUFFIX_ITER:
-                                raise RuntimeError(
-                                    f"update_take_meta shot-change: 后缀循环超过 {_MAX_SUFFIX_ITER} 次"
-                                )
-                            new_suffix = new_suffix + "+"
-                        target_suffix = new_suffix
-                    if target_suffix:
-                        conflict_resolution = "suffix"
+                    target_suffix, res = self._resolve_base_slot(
+                        conn, target_scene, target_shot, target_number, exclude_take_id=take_id
+                    )
+                    if res == "suffix":
+                        conflict_resolution = res
                 else:
                     # 无 take_number，无跨场，无 shot 变更 → 不改编号
                     target_number = cur_number
@@ -883,38 +914,11 @@ class DAL:
                     # 不对称规则（DeepSeek #4）：
                     #   - 占用者是软删 → vacate 让出 ''，被编辑 take 落干净 ''
                     #   - 占用者是 live → 被编辑 take 顺位加后缀（live 行永不被挪）
-                    occupant_row = conn.execute(
-                        "SELECT take_id, deleted_at FROM takes "
-                        "WHERE scene_id = ? AND shot = ? AND take_number = ? AND take_suffix = '' "
-                        "AND take_id != ?;",
-                        (target_scene, target_shot, target_number, take_id),
-                    ).fetchone()
-
-                    if occupant_row is None:
-                        target_suffix = ""
-                    elif occupant_row["deleted_at"] is not None:
-                        self._vacate_base_slot(conn, target_scene, target_shot, target_number)
-                        target_suffix = ""
-                    else:
-                        taken_rows = conn.execute(
-                            "SELECT take_suffix FROM takes "
-                            "WHERE scene_id = ? AND shot = ? AND take_number = ? AND take_id != ?;",
-                            (target_scene, target_shot, target_number, take_id),
-                        ).fetchall()
-                        taken_suffixes = {r["take_suffix"] for r in taken_rows}
-                        new_suffix = "+"
-                        _iter = 0
-                        while new_suffix in taken_suffixes:
-                            _iter += 1
-                            if _iter >= _MAX_SUFFIX_ITER:
-                                raise RuntimeError(
-                                    f"update_take_meta: 后缀循环超过 {_MAX_SUFFIX_ITER} 次"
-                                )
-                            new_suffix = new_suffix + "+"
-                        target_suffix = new_suffix
-
-                    if target_suffix:
-                        conflict_resolution = "suffix"
+                    target_suffix, res = self._resolve_base_slot(
+                        conn, target_scene, target_shot, target_number, exclude_take_id=take_id
+                    )
+                    if res == "suffix":
+                        conflict_resolution = res
 
             # 汇总需要更新的字段
             set_clauses: list[str] = []
@@ -985,12 +989,7 @@ class DAL:
         注意：此方法用于外部读取「当前组下一号」供 UI 展示（决策 4），
         start_take 内部在写事务里重新原子计算，不直接用此值写库。
         """
-        row = self._conn.execute(
-            "SELECT COALESCE(MAX(take_number), 0) + 1 AS next_num "
-            "FROM takes WHERE scene_id = ? AND shot = ? AND deleted_at IS NULL;",
-            (scene_id, shot),
-        ).fetchone()
-        return int(row["next_num"])
+        return _next_take_number(self._conn, scene_id, shot)
 
     def get_or_create_scene(
         self,
@@ -1107,23 +1106,13 @@ class DAL:
             ).fetchone()
 
             if live_conflict is not None:
-                # 兜底：顺位找空闲 suffix
-                # 占用集合包含软删行（DeepSeek #2：不只 live），避免清 deleted_at 后撞软删行
-                taken_rows = conn.execute(
-                    "SELECT take_suffix FROM takes "
-                    "WHERE scene_id = ? AND shot = ? AND take_number = ? AND take_id != ?;",
-                    (scene_id, shot, take_number, take_id),
-                ).fetchall()
-                taken_suffixes = {r["take_suffix"] for r in taken_rows}
-                new_suffix = current_suffix + "+"
-                _iter = 0
-                while new_suffix in taken_suffixes:
-                    _iter += 1
-                    if _iter >= _MAX_SUFFIX_ITER:
-                        raise RuntimeError(
-                            f"restore_take: 后缀循环超过 {_MAX_SUFFIX_ITER} 次，take_id={take_id}"
-                        )
-                    new_suffix = new_suffix + "+"
+                # 兜底：顺位找空闲 suffix（_alloc_free_suffix 含 MAX_ITER 守卫）
+                # start=current_suffix+"+"：从当前 suffix 顺位追加，占用集合含软删行（DeepSeek #2）
+                new_suffix = _alloc_free_suffix(
+                    conn, scene_id, shot, take_number,
+                    exclude_take_id=take_id,
+                    start=current_suffix + "+",
+                )
                 conn.execute(
                     "UPDATE takes SET take_suffix = ? WHERE take_id = ?;",
                     (new_suffix, take_id),

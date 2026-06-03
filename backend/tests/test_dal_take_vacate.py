@@ -29,7 +29,7 @@ def test_next_take_number_reuses_soft_deleted_number(tmp_dal: DAL) -> None:
     sid = tmp_dal.create_scene("s_ntn_reuse")
     tmp_dal.start_take(sid, "1", 1000.0)   # → number=1
     tmp_dal.start_take(sid, "1", 1001.0)   # → number=2
-    t3 = tmp_dal.start_take(sid, "1", 1002.0)  # → number=3
+    t3, _ = tmp_dal.start_take(sid, "1", 1002.0)  # → number=3
     tmp_dal.delete_take(t3)  # 软删 3
 
     # live MAX = 2 → next = 3（复用刚删掉的 3）
@@ -45,9 +45,9 @@ def test_next_take_number_scene2_live_max(tmp_dal: DAL) -> None:
     tmp_dal.start_take(sid, "1", 1000.0)  # live number=1
 
     # 插入一堆将被软删的 take（通过连续调用自动拿号 2/3/4）
-    t2 = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
-    t3 = tmp_dal.start_take(sid, "1", 1002.0)  # → number=3
-    t4 = tmp_dal.start_take(sid, "1", 1003.0)  # → number=4
+    t2, _ = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
+    t3, _ = tmp_dal.start_take(sid, "1", 1002.0)  # → number=3
+    t4, _ = tmp_dal.start_take(sid, "1", 1003.0)  # → number=4
 
     raw = tmp_dal._conn
     # 插带 suffix 的行（模拟历史积累，v4 须含 shot 列）
@@ -96,14 +96,14 @@ def test_start_take_vacates_soft_deleted_slot(tmp_dal: DAL) -> None:
     """
     sid = tmp_dal.create_scene("s_vacate_basic")
     tmp_dal.start_take(sid, "1", 1000.0)     # → number=1 (live)
-    t2 = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
+    t2, _ = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
     tmp_dal.delete_take(t2)  # 软删 take 2，占着 (sid, "1", 2, '')
 
     next_num = tmp_dal.next_take_number(sid, "1")
     assert next_num == 2  # live MAX+1 = 2
 
     # start_take 内部 vacate 软删占用者，不撞 UNIQUE
-    new_tid = tmp_dal.start_take(sid, "1", 1002.0)
+    new_tid, _ = tmp_dal.start_take(sid, "1", 1002.0)
     assert new_tid is not None
 
     new_take = tmp_dal.get_take(new_tid)
@@ -127,9 +127,9 @@ def test_start_take_scene2_reproduction(tmp_dal: DAL) -> None:
     tmp_dal.start_take(sid, "1", 1000.0)  # live 1
 
     # 插软删的 take（模拟历史积累）
-    t2 = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
-    t3 = tmp_dal.start_take(sid, "1", 1002.0)  # → number=3
-    t4 = tmp_dal.start_take(sid, "1", 1003.0)  # → number=4
+    t2, _ = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
+    t3, _ = tmp_dal.start_take(sid, "1", 1002.0)  # → number=3
+    t4, _ = tmp_dal.start_take(sid, "1", 1003.0)  # → number=4
     raw = tmp_dal._conn
     raw.execute(
         "INSERT INTO takes (scene_id, shot, take_number, take_suffix, start_ts) VALUES (?, '1', 2, '+', 1004.0);",
@@ -160,7 +160,7 @@ def test_start_take_scene2_reproduction(tmp_dal: DAL) -> None:
     assert next_num == 2
 
     # start_take 不应静默失败（内部原子取号 2 + vacate）
-    new_tid = tmp_dal.start_take(sid, "1", 1100.0)
+    new_tid, _ = tmp_dal.start_take(sid, "1", 1100.0)
     assert new_tid is not None
 
     new_take = tmp_dal.get_take(new_tid)
@@ -177,7 +177,7 @@ def test_start_take_vacate_chain_multiple_plus(tmp_dal: DAL) -> None:
     sid = tmp_dal.create_scene("s_vacate_chain")
     tmp_dal.start_take(sid, "1", 1000.0)    # → number=1 (live)
 
-    t2 = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
+    t2, _ = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
     raw = tmp_dal._conn
     # 直接插 (shot="1", 2, '+')
     raw.execute(
@@ -194,7 +194,7 @@ def test_start_take_vacate_chain_multiple_plus(tmp_dal: DAL) -> None:
     tmp_dal.delete_take(t2_plus)  # 软删 (shot="1", 2, '+')
 
     # 两个 soft-deleted 占住 '' 和 '+'，start_take 应把 (2,'') 的行挪到 '++'
-    new_tid = tmp_dal.start_take(sid, "1", 1100.0)  # 内部取号 2 + vacate ''→''
+    new_tid, _ = tmp_dal.start_take(sid, "1", 1100.0)  # 内部取号 2 + vacate ''→''
     new_take = tmp_dal.get_take(new_tid)
     assert new_take is not None
     assert new_take.take_suffix == ""
@@ -218,7 +218,7 @@ def test_orchestrator_take_start_vacates_soft_deleted(tmp_dal: DAL) -> None:
     """
     sid = tmp_dal.create_scene("s_orch_vacate")
     tmp_dal.start_take(sid, "1", 1000.0)   # → number=1 (live, shot="1")
-    t2 = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2 (shot="1")
+    t2, _ = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2 (shot="1")
     tmp_dal.delete_take(t2)  # 软删 take 2
 
     orch = Orchestrator(tmp_dal, SessionState())
@@ -228,7 +228,7 @@ def test_orchestrator_take_start_vacates_soft_deleted(tmp_dal: DAL) -> None:
     # 注：shot=None → orchestrator 归一为 ''（空组），与 shot="1" 是不同分组
     # 重建：先在 '' 组内建一条 live 和一条软删
     tmp_dal.start_take(sid, "", 2000.0)   # '' 组 number=1 (live)
-    t_del = tmp_dal.start_take(sid, "", 2001.0)  # '' 组 number=2
+    t_del, _ = tmp_dal.start_take(sid, "", 2001.0)  # '' 组 number=2
     tmp_dal.delete_take(t_del)  # 软删
 
     orch.publish(
@@ -263,8 +263,8 @@ def test_update_take_meta_soft_deleted_occupant_vacates(tmp_dal: DAL) -> None:
       - 新语义：软删行占用者挪到 '+'，take 1 落 (2, '') 不加后缀。
     """
     sid = tmp_dal.create_scene("s_meta_soft_vacate")
-    t1 = tmp_dal.start_take(sid, "1", 1000.0)   # → number=1 (live)
-    t2 = tmp_dal.start_take(sid, "1", 1001.0)   # → number=2
+    t1, _ = tmp_dal.start_take(sid, "1", 1000.0)   # → number=1 (live)
+    t2, _ = tmp_dal.start_take(sid, "1", 1001.0)   # → number=2
     tmp_dal.delete_take(t2)  # 软删 take 2
 
     tmp_dal.update_take_meta(t1, take_number=2)
@@ -285,8 +285,8 @@ def test_update_take_meta_soft_deleted_occupant_vacates(tmp_dal: DAL) -> None:
 def test_update_take_meta_live_occupant_gives_suffix_to_edited(tmp_dal: DAL) -> None:
     """手动改号撞到 live 行 → live 行不动，被编辑 take 加后缀（原有行为保持）。"""
     sid = tmp_dal.create_scene("s_meta_live_occupant")
-    tid_a = tmp_dal.start_take(sid, "1", 1000.0)  # live, number=1
-    tid_b = tmp_dal.start_take(sid, "1", 1001.0)  # live, number=2
+    tid_a, _ = tmp_dal.start_take(sid, "1", 1000.0)  # live, number=1
+    tid_b, _ = tmp_dal.start_take(sid, "1", 1001.0)  # live, number=2
 
     tmp_dal.update_take_meta(tid_b, take_number=1)  # 目标 1 已被 live tid_a 占
 
@@ -303,9 +303,9 @@ def test_update_take_meta_case_a_append_live_max(tmp_dal: DAL) -> None:
     """
     sid1 = tmp_dal.create_scene("s_a_live_max_s1")
     sid2 = tmp_dal.create_scene("s_a_live_max_s2")
-    t_from = tmp_dal.start_take(sid1, "1", 1000.0)   # scene1 number=1
+    t_from, _ = tmp_dal.start_take(sid1, "1", 1000.0)   # scene1 number=1
     tmp_dal.start_take(sid2, "1", 1001.0)              # scene2 number=1 (live)
-    t2s2 = tmp_dal.start_take(sid2, "1", 1002.0)      # scene2 number=2
+    t2s2, _ = tmp_dal.start_take(sid2, "1", 1002.0)      # scene2 number=2
     tmp_dal.delete_take(t2s2)  # 软删 scene2 的 take 2
 
     # 移场（情形 A）：live MAX(scene2, shot="1") = 1 → next = 2（复用，不跳到 3）
@@ -332,13 +332,13 @@ def test_restore_take_gets_plus_suffix_after_vacate(tmp_dal: DAL) -> None:
     """
     sid = tmp_dal.create_scene("s_restore_plus")
     tmp_dal.start_take(sid, "1", 1000.0)    # → number=1 (live)
-    t2 = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
+    t2, _ = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
     tmp_dal.delete_take(t2)  # 软删 take 2
 
     # start_take 复用号 2：t2 被挪到 (2, '+')，new 落 (2, '')
     next_num = tmp_dal.next_take_number(sid, "1")
     assert next_num == 2
-    new_tid = tmp_dal.start_take(sid, "1", 1100.0)  # 内部原子取号 2
+    new_tid, _ = tmp_dal.start_take(sid, "1", 1100.0)  # 内部原子取号 2
 
     # restore t2：它现在在 (2, '+')，不会撞 (2, '')
     tmp_dal.restore_take(t2)

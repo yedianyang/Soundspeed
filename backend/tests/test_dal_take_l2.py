@@ -17,7 +17,7 @@ from backend.db.dal import DAL
 def test_update_take_l2_output_persists_script_diff(tmp_dal: DAL) -> None:
     """调 update_take_l2_output 后 get_take 返回的 script_diff 是 dict。"""
     scene_id = tmp_dal.create_scene("s1")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
 
     script_diff = {
         "script_diff_summary": "演员漏说第2行",
@@ -35,7 +35,7 @@ def test_update_take_l2_output_persists_script_diff(tmp_dal: DAL) -> None:
 def test_update_take_l2_output_none_clears_diff(tmp_dal: DAL) -> None:
     """传 None 写入 NULL，get_take 返回 script_diff=None。"""
     scene_id = tmp_dal.create_scene("s2")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
 
     # 先写一个值
     tmp_dal.update_take_l2_output(take_id, {"script_diff_summary": "有内容"})
@@ -59,7 +59,7 @@ def test_insert_take_line_matches_bulk(tmp_dal: DAL) -> None:
     caller 负责在传入前做 line_no → line_id 映射。
     """
     scene_id = tmp_dal.create_scene("s3")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
     script_id = tmp_dal.insert_script(scene_id, "剧本文本")
     line_id_1 = tmp_dal.insert_script_line(script_id, line_no=1, character="A", text="行一")
     line_id_2 = tmp_dal.insert_script_line(script_id, line_no=2, character="B", text="行二")
@@ -77,7 +77,7 @@ def test_insert_take_line_matches_bulk(tmp_dal: DAL) -> None:
 def test_insert_take_line_matches_skips_insertion_line_no_minus1(tmp_dal: DAL) -> None:
     """line_no==-1 的 insertion 行跳过，不写入 take_line_matches。"""
     scene_id = tmp_dal.create_scene("s4")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
     script_id = tmp_dal.insert_script(scene_id, "剧本文本")
     line_id_1 = tmp_dal.insert_script_line(script_id, line_no=1, character="A", text="行一")
     line_id_3 = tmp_dal.insert_script_line(script_id, line_no=3, character="C", text="行三")

@@ -156,15 +156,12 @@ class Orchestrator:
         shot = payload.shot if payload.shot is not None else ""
 
         # take_number 由 dal.start_take 内部原子分配（BEGIN IMMEDIATE 事务内 MAX+1+vacate+INSERT）
-        # orchestrator 不再单独调 next_take_number；read-back 通过 get_take 获取实际号
-        take_id = self.dal.start_take(
+        # start_take 返回 (take_id, take_number)，无需 read-back
+        take_id, take_number = self.dal.start_take(
             scene_id=scene_id,
             shot=shot,
             start_ts=payload.start_ts,
         )
-        # read-back：取实际写入的 take_number（start_take 原子分配）
-        take_row = self.dal.get_take(take_id)
-        take_number = take_row.take_number if take_row is not None else 1
 
         self.session.take_start(
             take_id=take_id,

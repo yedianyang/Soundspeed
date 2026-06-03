@@ -39,8 +39,8 @@ def test_per_shot_counting_each_shot_starts_at_1(tmp_dal: DAL) -> None:
     shot="A" 和 shot="B" 各建一次 start_take，两者都拿到 take_number=1。
     """
     sid = tmp_dal.create_scene("s_pershot_basic")
-    tid_a = tmp_dal.start_take(sid, "A", 1000.0)
-    tid_b = tmp_dal.start_take(sid, "B", 1001.0)
+    tid_a, _ = tmp_dal.start_take(sid, "A", 1000.0)
+    tid_b, _ = tmp_dal.start_take(sid, "B", 1001.0)
 
     take_a = tmp_dal.get_take(tid_a)
     take_b = tmp_dal.get_take(tid_b)
@@ -58,9 +58,9 @@ def test_per_shot_counting_same_shot_increments(tmp_dal: DAL) -> None:
     shot="A" 连续三次，依次得到 take_number=1, 2, 3。
     """
     sid = tmp_dal.create_scene("s_pershot_incr")
-    t1 = tmp_dal.start_take(sid, "A", 1000.0)
-    t2 = tmp_dal.start_take(sid, "A", 1001.0)
-    t3 = tmp_dal.start_take(sid, "A", 1002.0)
+    t1, _ = tmp_dal.start_take(sid, "A", 1000.0)
+    t2, _ = tmp_dal.start_take(sid, "A", 1001.0)
+    t3, _ = tmp_dal.start_take(sid, "A", 1002.0)
 
     takes = [tmp_dal.get_take(tid) for tid in (t1, t2, t3)]
     numbers = [t.take_number for t in takes if t is not None]  # type: ignore[union-attr]
@@ -218,7 +218,7 @@ def test_decision3_change_shot_preserves_take_number(tmp_dal: DAL) -> None:
     """
     sid = tmp_dal.create_scene("s_dec3_basic")
     tmp_dal.start_take(sid, "A", 1000.0)   # shot="A" number=1
-    t2 = tmp_dal.start_take(sid, "A", 1001.0)  # shot="A" number=2
+    t2, _ = tmp_dal.start_take(sid, "A", 1001.0)  # shot="A" number=2
 
     tmp_dal.update_take_meta(t2, shot="B")
 
@@ -236,7 +236,7 @@ def test_decision3_change_shot_live_occupant_adds_suffix(tmp_dal: DAL) -> None:
     → 被编辑 take 落 (B, 1, '+')，live 占用者不动。
     """
     sid = tmp_dal.create_scene("s_dec3_live_conflict")
-    tid_a1 = tmp_dal.start_take(sid, "A", 1000.0)   # shot="A" number=1 (live)
+    tid_a1, _ = tmp_dal.start_take(sid, "A", 1000.0)   # shot="A" number=1 (live)
     tmp_dal.start_take(sid, "B", 1001.0)              # shot="B" number=1 (live, 占据目标)
 
     tmp_dal.update_take_meta(tid_a1, shot="B")
@@ -255,8 +255,8 @@ def test_decision3_change_shot_soft_deleted_occupant_vacates(tmp_dal: DAL) -> No
     → 软删行 vacate（挪到 '+'），被编辑 take 落 (B, 1, '')。
     """
     sid = tmp_dal.create_scene("s_dec3_soft_vacate")
-    tid_a1 = tmp_dal.start_take(sid, "A", 1000.0)    # shot="A" number=1 (live)
-    tid_b1 = tmp_dal.start_take(sid, "B", 1001.0)    # shot="B" number=1
+    tid_a1, _ = tmp_dal.start_take(sid, "A", 1000.0)    # shot="A" number=1 (live)
+    tid_b1, _ = tmp_dal.start_take(sid, "B", 1001.0)    # shot="B" number=1
     tmp_dal.delete_take(tid_b1)                        # 软删 shot="B" number=1
 
     tmp_dal.update_take_meta(tid_a1, shot="B")
@@ -293,7 +293,7 @@ def test_restore_no_live_conflict_succeeds_directly(tmp_dal: DAL) -> None:
     sid = tmp_dal.create_scene("s_restore_no_live_conflict")
     # 建两条 take 在同 shot 组：number=1 live，number=2 软删
     tmp_dal.start_take(sid, "1", 1000.0)   # number=1 (live)
-    t2 = tmp_dal.start_take(sid, "1", 1001.0)  # number=2
+    t2, _ = tmp_dal.start_take(sid, "1", 1001.0)  # number=2
     tmp_dal.delete_take(t2)                 # 软删 t2
 
     # restore t2（仍在原始 suffix=''，无 live 行占它）

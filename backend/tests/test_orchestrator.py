@@ -112,7 +112,7 @@ def _asr_final_payload(
 def test_asr_final_ch1_writes_segment_when_take_active(tmp_dal: DAL) -> None:
     """session.take_active=True 时 publish asr.final.ch1 写入 transcript_segments（ch=1）。"""
     scene_id = tmp_dal.create_scene("scene_test")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
     session = _make_active_session(take_id)
     orch = Orchestrator(tmp_dal, session=session)
 
@@ -129,7 +129,7 @@ def test_asr_final_ch1_writes_segment_when_take_active(tmp_dal: DAL) -> None:
 def test_asr_final_ch1_skipped_when_take_inactive(tmp_dal: DAL) -> None:
     """session.take_active=False 时 publish asr.final.ch1 不写库。"""
     scene_id = tmp_dal.create_scene("scene_test")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
     session = SessionState()  # take_active 默认 False
     session.take_id = take_id
     orch = Orchestrator(tmp_dal, session=session)
@@ -143,7 +143,7 @@ def test_asr_final_ch1_skipped_when_take_inactive(tmp_dal: DAL) -> None:
 def test_asr_final_ch1_falls_back_to_session_take_id_when_payload_null(tmp_dal: DAL) -> None:
     """payload.take_id=None 时 handler 回退用 session.take_id 写库。"""
     scene_id = tmp_dal.create_scene("scene_test")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
     session = _make_active_session(take_id)
     orch = Orchestrator(tmp_dal, session=session)
 
@@ -159,7 +159,7 @@ def test_asr_final_ch1_falls_back_to_session_take_id_when_payload_null(tmp_dal: 
 def test_asr_final_ch1_uses_payload_take_id_when_provided(tmp_dal: DAL) -> None:
     """payload.take_id=session.take_id 时 handler 用 payload 路径写库（验证非纯回退）。"""
     scene_id = tmp_dal.create_scene("scene_test")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
     session = _make_active_session(take_id)
     orch = Orchestrator(tmp_dal, session=session)
 
@@ -177,8 +177,8 @@ def test_asr_final_ch1_writes_to_payload_take_id_on_mismatch(
 ) -> None:
     """payload.take_id 与 session.take_id 不匹配时按 payload 写库，且记 warning 日志。"""
     scene_id = tmp_dal.create_scene("scene_test")
-    take5 = tmp_dal.start_take(scene_id, "1", time.time())
-    take6 = tmp_dal.start_take(scene_id, "1", time.time())
+    take5, _ = tmp_dal.start_take(scene_id, "1", time.time())
+    take6, _ = tmp_dal.start_take(scene_id, "1", time.time())
 
     session = SessionState()
     session.take_id = take6
@@ -211,7 +211,7 @@ def test_asr_final_ch1_writes_to_payload_take_id_on_mismatch(
 def test_asr_final_ch2_writes_segment_when_take_active(tmp_dal: DAL) -> None:
     """session.take_active=True 时 publish asr.final.ch2 写入 transcript_segments（ch=2，speaker=None）。"""
     scene_id = tmp_dal.create_scene("scene_test")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
     session = _make_active_session(take_id)
     orch = Orchestrator(tmp_dal, session=session)
 
@@ -229,7 +229,7 @@ def test_asr_final_ch2_writes_segment_when_take_active(tmp_dal: DAL) -> None:
 def test_asr_final_ch2_skipped_when_take_inactive(tmp_dal: DAL) -> None:
     """session.take_active=False 时 publish asr.final.ch2 不写库。"""
     scene_id = tmp_dal.create_scene("scene_test")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
     session = SessionState()  # take_active 默认 False
     session.take_id = take_id
     orch = Orchestrator(tmp_dal, session=session)
@@ -243,7 +243,7 @@ def test_asr_final_ch2_skipped_when_take_inactive(tmp_dal: DAL) -> None:
 def test_asr_final_ch1_and_ch2_share_timeline(tmp_dal: DAL) -> None:
     """同一 take 内交替 publish ch1/ch2，list_segments(take_id) 按 start_frame ASC 两路交错。"""
     scene_id = tmp_dal.create_scene("scene_test")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
     session = _make_active_session(take_id)
     orch = Orchestrator(tmp_dal, session=session)
 
@@ -308,7 +308,7 @@ def test_asr_final_ch1_skipped_when_both_take_ids_null(tmp_dal: DAL) -> None:
     take_active=True 但两者都 None 是非法状态，handler 应静默跳过。
     """
     scene_id = tmp_dal.create_scene("scene_null")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
 
     session = SessionState()
     session.take_id = None  # 强制 None（非法状态模拟）
@@ -329,7 +329,7 @@ def test_asr_final_ch1_writes_to_payload_when_session_take_id_null(
     不进入 mismatch 分支（只有两者都非 None 且不等才 warn），所以无 WARNING 日志。
     """
     scene_id = tmp_dal.create_scene("scene_payload")
-    take5 = tmp_dal.start_take(scene_id, "1", time.time())
+    take5, _ = tmp_dal.start_take(scene_id, "1", time.time())
 
     session = SessionState()
     session.take_id = None
@@ -361,8 +361,8 @@ def test_asr_final_ch2_writes_to_payload_take_id_on_mismatch(
     且 ch2 speaker 强制为 None（对称 ch1 已有的 mismatch 测试）。
     """
     scene_id = tmp_dal.create_scene("scene_ch2_mismatch")
-    take5 = tmp_dal.start_take(scene_id, "1", time.time())
-    take6 = tmp_dal.start_take(scene_id, "1", time.time())
+    take5, _ = tmp_dal.start_take(scene_id, "1", time.time())
+    take6, _ = tmp_dal.start_take(scene_id, "1", time.time())
 
     session = SessionState()
     session.take_id = take6
@@ -402,7 +402,7 @@ def test_builtin_handler_assertion_error_does_not_block_publish(tmp_dal: DAL) ->
     publish 本身不抛；spy 仍被调；库里无记录（内置 handler 因 assert 失败未写库）。
     """
     scene_id = tmp_dal.create_scene("scene_assert")
-    take_id = tmp_dal.start_take(scene_id, "1", time.time())
+    take_id, _ = tmp_dal.start_take(scene_id, "1", time.time())
     session = _make_active_session(take_id)
     orch = Orchestrator(tmp_dal, session=session)
 
