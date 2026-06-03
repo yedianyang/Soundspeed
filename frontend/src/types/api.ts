@@ -114,3 +114,22 @@ export interface LlmStatusMsg {
   task_type: string | null
   take_id: number | null
 }
+
+// ── Note DTO（4.C POST /notes + GET /takes/{id}/notes）──
+
+export interface NoteDTO {
+  event_id: number
+  take_id: number
+  scene_code: string | null
+  take_number: number | null
+  category: string // "note" | "issue" | "keeper" | "ng" | "hold"
+  content: string
+  raw_text: string
+  ts: number
+}
+
+export interface NoteListResponse {
+  take_id: number
+  notes_aggregated: string | null
+  events: NoteDTO[]
+}

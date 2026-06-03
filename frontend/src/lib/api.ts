@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
 import { API_BASE } from "@/lib/config"
 import { useSessionStore } from "@/store/session"
-import type { SceneDTO, ScriptDTO, TakeDTO, TakeDetailDTO, TranscriptSegmentDTO } from "@/types/api"
+import type { NoteDTO, NoteListResponse, SceneDTO, ScriptDTO, TakeDTO, TakeDetailDTO, TranscriptSegmentDTO } from "@/types/api"
 
 export class ApiError extends Error {
   status: number
@@ -142,6 +142,19 @@ export function injectDebugScript(
     method: "POST",
     body: JSON.stringify(body),
   })
+}
+
+// ── Note API ──
+
+export function postNote(text: string, ts?: number): Promise<NoteDTO> {
+  return request<NoteDTO>(`/api/v1/notes`, {
+    method: "POST",
+    body: JSON.stringify({ text, ts: ts ?? undefined }),
+  })
+}
+
+export function getTakeNotes(takeId: number): Promise<NoteListResponse> {
+  return request<NoteListResponse>(`/api/v1/takes/${takeId}/notes`)
 }
 
 // ── react-query 查询键 + hooks ──

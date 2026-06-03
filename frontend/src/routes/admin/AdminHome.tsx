@@ -10,6 +10,8 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import BottomControlBar from "@/components/admin/BottomControlBar"
+import NoteMemo from "@/components/admin/NoteMemo"
+import NoteList from "@/components/admin/NoteList"
 import { INPUT_DEVICE, INPUT_CHANNELS } from "@/data/mock"
 import { MARK_ORDER } from "@/lib/constants"
 import { cn } from "@/lib/utils"
@@ -39,6 +41,7 @@ export default function AdminHome() {
   const [mobileTab, setMobileTab] = useState("live")
   const [sideTab, setSideTab] = useState("script")
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [noteRefresh, setNoteRefresh] = useState(0)
 
   // ---- WS 连接（admin-scoped，挂一次）----
   useLiveConnection()
@@ -281,6 +284,12 @@ export default function AdminHome() {
 
       {/* ============ Bottom ============ */}
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+
+      {/* Note memo box — above BottomControlBar */}
+      <div className="flex-shrink-0 px-4 pb-2 flex flex-col gap-2">
+        <NoteMemo onNoteAdded={() => setNoteRefresh((k) => k + 1)} />
+        <NoteList takeId={currentTake.take_id} refreshKey={noteRefresh} />
+      </div>
 
       <BottomControlBar
         isRecording={isRecording}
