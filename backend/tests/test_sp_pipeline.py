@@ -253,8 +253,9 @@ async def test_dirty_data_no_exception() -> None:
 async def test_chunked_input_calls_infer_multiple_times() -> None:
     """超长输入被分块：infer 被调用多于 1 次，结果合并。
 
-    构造 10 行、每行约 156 字符、chunk_size=500 时被切成 4 块，
-    期望 infer 被调用 4 次，每块返回 1 个 ParsedScene，最终合并为 4 场。
+    使用 return_value（固定返回同一响应），对分块数变化免疫。
+    构造 10 行、每行约 156 字符，chunk_size=500 会切成多块（>=2）。
+    每块返回 1 个 ParsedScene，最终合并场数 == infer 调用次数。
     """
     chunk_scene = {
         "scene_code": None,
@@ -263,8 +264,8 @@ async def test_chunked_input_calls_infer_multiple_times() -> None:
     }
     chunk_response = _scenes_json([chunk_scene])
 
-    # 10 行 × 156 字/行 ÷ 500 = 约 4 块，提供 4 次返回
-    svc = _mock_llm(chunk_response, chunk_response, chunk_response, chunk_response)
+    # 单个 return_value：每次 infer 都返回同一响应，对实际分块数免疫
+    svc = _mock_llm(chunk_response)
 
     long_raw = "\n".join(
         [f"角色甲：{'这是一段很长的台词，用于测试分块逻辑。' * 8}"] * 10
@@ -272,7 +273,7 @@ async def test_chunked_input_calls_infer_multiple_times() -> None:
 
     scenes = await run_sp_parse(long_raw, svc, chunk_size=500)
 
-    # infer 被调用超过 1 次（验证确实走了 loop）
+    # infer 被调用超过 1 次（验证确实走了 loop，不是一把梭）
     assert svc.infer.call_count >= 2
     # 场列表 = 各块场列表合并（每块各返回 1 场）
     assert len(scenes) == svc.infer.call_count
