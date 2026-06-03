@@ -442,7 +442,6 @@ def apply_import(
             scene_id = conflict_scene_id
         else:
             # multi 路径：调 get_or_create_scene 确认场存在（兜并发）
-            slugline = conflict.get("incoming", {})
             scene_id, _ = dal.get_or_create_scene(
                 conflict["scene_code"],
             )

@@ -553,7 +553,7 @@ def test_real_dal_single_scene_write(tmp_dal: DAL) -> None:
         scenes,
         target="current_scene",
         batch_id="b1",
-        dal=tmp_dal,  # type: ignore[arg-type]
+        dal=tmp_dal,
     )
     assert len(plan.conflicts) == 0
     assert len(plan.new_scenes) == 1
@@ -588,14 +588,14 @@ def test_real_dal_single_scene_version_increments(tmp_dal: DAL) -> None:
 
     scenes1 = [_scene(lines=[("张三", "第一版")])]
     plan1 = plan_import(
-        scenes1, target="current_scene", batch_id="b1", dal=tmp_dal  # type: ignore[arg-type]
+        scenes1, target="current_scene", batch_id="b1", dal=tmp_dal
     )
     apply_import(plan1, decisions=None, dal=tmp_dal)  # type: ignore[arg-type]
 
     scenes2 = [_scene(lines=[("张三", "第二版")])]
     # 第二次：当前场已有脚本 → conflict
     plan2 = plan_import(
-        scenes2, target="current_scene", batch_id="b2", dal=tmp_dal  # type: ignore[arg-type]
+        scenes2, target="current_scene", batch_id="b2", dal=tmp_dal
     )
     assert len(plan2.conflicts) == 1
 
@@ -623,7 +623,7 @@ def test_real_dal_plan_new_scene(tmp_dal: DAL) -> None:
     """真 DAL plan_import：scene_code 不在库 → 新场（无重复）。"""
     scenes = [_scene(scene_code="NEW_3", lines=[("张三", "你好")])]
     plan = plan_import(
-        scenes, target="multi_scene", batch_id="b1", dal=tmp_dal  # type: ignore[arg-type]
+        scenes, target="multi_scene", batch_id="b1", dal=tmp_dal
     )
     assert len(plan.conflicts) == 0
     assert len(plan.new_scenes) == 1
@@ -639,7 +639,7 @@ def test_real_dal_plan_existing_with_script_conflict(tmp_dal: DAL) -> None:
 
     scenes = [_scene(scene_code="EXIST_5", lines=[("张三", "新版本")])]
     plan = plan_import(
-        scenes, target="multi_scene", batch_id="b1", dal=tmp_dal  # type: ignore[arg-type]
+        scenes, target="multi_scene", batch_id="b1", dal=tmp_dal
     )
     assert len(plan.conflicts) == 1
     conflict = plan.conflicts[0]
@@ -656,7 +656,7 @@ def test_real_dal_plan_existing_no_script_no_conflict(tmp_dal: DAL) -> None:
 
     scenes = [_scene(scene_code="EXIST_NO_SCRIPT", lines=[("张三", "首次台词")])]
     plan = plan_import(
-        scenes, target="multi_scene", batch_id="b1", dal=tmp_dal  # type: ignore[arg-type]
+        scenes, target="multi_scene", batch_id="b1", dal=tmp_dal
     )
     assert len(plan.conflicts) == 0
     assert len(plan.new_scenes) == 1
@@ -677,7 +677,7 @@ def test_real_dal_plan_current_scene_conflict(tmp_dal: DAL) -> None:
 
     scenes = [_scene(lines=[("张三", "新内容")])]
     plan = plan_import(
-        scenes, target="current_scene", batch_id="b1", dal=tmp_dal  # type: ignore[arg-type]
+        scenes, target="current_scene", batch_id="b1", dal=tmp_dal
     )
     assert len(plan.conflicts) == 1
     assert plan.conflicts[0]["original"]["raw_text"] == "张三：旧内容"
