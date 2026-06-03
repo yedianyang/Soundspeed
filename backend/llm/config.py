@@ -52,7 +52,12 @@ TASK_CONFIG: dict[str, dict] = {
         ),
     },
     "script_parse": {
-        "max_tokens": 2048,
+        # 8192：解析时需把输入原文回显成 JSON，output 体量可能比 input 还大，4096 不够用。
+        # 设成 8192 = n_ctx，等于「不人为限 output、靠 EOS 收尾」。
+        # 机制：n_ctx=8192 是 input+output 共享总窗口，实际 output 上限 = 8192 - prompt_tokens。
+        # 边界风险：部分 llama-cpp-python 版本在 prompt_tokens+max_tokens > n_ctx 时触发 overflow；
+        # 8192=n_ctx 是边界值，sp_smoke.py 冒烟需验证是否撞顶。
+        "max_tokens": 8192,
         "temperature": 0.1,
         "priority": 3,
         # prompt v1（3.B）：极简版，只输出 schema + 1 个 few-shot。

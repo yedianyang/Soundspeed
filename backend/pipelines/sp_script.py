@@ -12,23 +12,31 @@
 
 分块策略（体量约束，§4 最后一段）
 ---------------------------------------
-script_parse.max_tokens=2048 装不下整本剧本的分场输出，必须分块。
+script_parse.max_tokens=8192（= n_ctx，靠 EOS 收尾），整本剧本仍不能一把梭，必须分块。
 
-采用「按字符数机械切分 → 每块一次 LLM 调用 → 结果顺序 append」策略：
+采用「空行优先切分 → 每块一次 LLM 调用 → 结果顺序 append」策略：
 
-1. 按 chunk_size 字符数滑窗切分 raw_text（在行边界处切，不切断单行）。
-2. 每块独立调用 LLM（task_type="script_parse"），LLM 在该块内做：
+1. 先按空行（连续空行）把 raw_text 切成段落块（paragraph）。
+   空行是剧本中最常见的场间分隔，优先在段落边界切可避免把 slugline
+   和其紧跟的对白行切进两个不同块（孤儿场的主因）。
+2. 按 chunk_size 字符数累积段落块成 chunk；段落内不切（保场内完整）。
+   若单个段落块本身超过 chunk_size，退化到按行机械切兜底（防超 token）。
+3. 每块独立调用 LLM（task_type="script_parse"），LLM 在该块内做：
    - slugline 识别与三要素抽取（int_ext / time_of_day / location）
    - scene_code 识别（有则抽取，无则 null）
    - 行结构化（character / text，舞台指示行 character=null）
    - 脏数据过滤（空行、页码、噪声）
-3. 各块输出的 ParsedScene 列表顺序 append，形成最终结果。
+4. 各块输出的 ParsedScene 列表顺序 append，形成最终结果。
 
 此策略的权衡（已标 flag，留 Lead 拍板）：
-- 同一逻辑场跨块时，会被分成两个独立 ParsedScene，append-only 入库
-  建出两场（仅在单场超长时触发）。v1 不合并，标 #1 疑点。
-- 场次号归一化（strip 前后空白后透传 LLM 输出），跨「手动建场」
-  与「解析器建场」的归一化规则待 Lead + 2.x 商定后对齐（§3.1）。
+- 跨块孤儿场：空行切降低概率但不消除——场间无空行的剧本仍可能在
+  块边界切中场内。多场长剧本是**常态触发**（不只是单场超长的边缘情况）。
+  chunk 边界落在 slugline 与其对白行之间时，对白那块会被 LLM 识别为
+  scene_code=null 的孤儿场，append-only 入库建出额外场。v1 不合并，
+  待冒烟（sp_smoke.py）后评估实际孤儿场率再决定是否加后处理。
+- scene_code 透传：strip 前后空白后原样透传 LLM 输出（可能是「场3」
+  「3」「Scene 3」等），跨「手动建场」与「解析器建场」的归一化规则
+  待 Lead + 2.x 商定后对齐（§3.1）。
 - 空 raw_text 直接返回 []，不调 LLM（422 是 3.D 端点的职责）。
 
 不写正则/规则解析器（用户明确定，§4）。所有语义由 LLM 结构化。
@@ -136,13 +144,31 @@ def _build_user_message(chunk_text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _split_into_chunks(raw_text: str, chunk_size: int) -> list[str]:
-    """按字符数在行边界处切分文本，返回各块列表。
+def _lines_to_paragraphs(lines: list[str]) -> list[str]:
+    """把行列表按空行切成段落块，返回非空段落列表（不含空行本身）。
 
-    不切断单行：每块末尾对齐换行符。若某单行超过 chunk_size，
-    单独作为一块（保证每行完整）。
+    连续多个空行视为单个段落分隔。
     """
-    lines = raw_text.splitlines()
+    paragraphs: list[str] = []
+    current: list[str] = []
+
+    for line in lines:
+        if line.strip() == "":
+            if current:
+                paragraphs.append("\n".join(current))
+                current = []
+        else:
+            current.append(line)
+
+    if current:
+        paragraphs.append("\n".join(current))
+
+    return paragraphs
+
+
+def _split_paragraph_by_lines(paragraph: str, chunk_size: int) -> list[str]:
+    """单个超大段落按行机械切兜底，不切断单行。"""
+    lines = paragraph.splitlines()
     chunks: list[str] = []
     current_lines: list[str] = []
     current_size = 0
@@ -159,6 +185,46 @@ def _split_into_chunks(raw_text: str, chunk_size: int) -> list[str]:
 
     if current_lines:
         chunks.append("\n".join(current_lines))
+
+    return chunks
+
+
+def _split_into_chunks(raw_text: str, chunk_size: int) -> list[str]:
+    """空行优先切分文本，返回各块列表。
+
+    策略：
+    1. 先按空行把文本切成段落块（剧本场间通常有空行，空行切降低跨块孤儿场概率）。
+    2. 按 chunk_size 字符数累积段落块成 chunk；段落内不切（保场内完整）。
+    3. 若单个段落块本身超过 chunk_size，退化到按行机械切兜底（防超 token）。
+    """
+    lines = raw_text.splitlines()
+    paragraphs = _lines_to_paragraphs(lines)
+
+    chunks: list[str] = []
+    current_parts: list[str] = []
+    current_size = 0
+
+    for para in paragraphs:
+        para_size = len(para) + 1  # +1 for separator newline
+
+        if para_size > chunk_size:
+            # 段落本身超限：先 flush 当前积累，再按行切兜底
+            if current_parts:
+                chunks.append("\n\n".join(current_parts))
+                current_parts = []
+                current_size = 0
+            chunks.extend(_split_paragraph_by_lines(para, chunk_size))
+        elif current_parts and current_size + para_size > chunk_size:
+            # 加入后超限：先 flush，新段落开新块
+            chunks.append("\n\n".join(current_parts))
+            current_parts = [para]
+            current_size = para_size
+        else:
+            current_parts.append(para)
+            current_size += para_size
+
+    if current_parts:
+        chunks.append("\n\n".join(current_parts))
 
     return chunks
 
