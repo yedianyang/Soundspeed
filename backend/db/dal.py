@@ -30,6 +30,7 @@ class Take:
     take_id: int
     scene_id: int
     take_number: int
+    take_suffix: str  # 冲突后缀，默认 ''，冲突时 '+' / '++' …（v3）
     shot: str | None
     start_ts: float
     end_ts: float | None
@@ -38,6 +39,7 @@ class Take:
     audio_quality: str | None
     script_diff: dict | None  # L2 输出，DAL 负责 json.loads；写入时也传 dict
     notes: str | None
+    deleted_at: float | None  # 软删时间戳，NULL 表示未删除（v3）
     created_at: float
     updated_at: float
 
@@ -94,6 +96,7 @@ def _row_to_take(row: sqlite3.Row) -> Take:
         take_id=row["take_id"],
         scene_id=row["scene_id"],
         take_number=row["take_number"],
+        take_suffix=row["take_suffix"],
         shot=row["shot"],
         start_ts=row["start_ts"],
         end_ts=row["end_ts"],
@@ -102,6 +105,7 @@ def _row_to_take(row: sqlite3.Row) -> Take:
         audio_quality=row["audio_quality"],
         script_diff=json.loads(script_diff) if script_diff else None,
         notes=row["notes"],
+        deleted_at=row["deleted_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -320,22 +324,29 @@ class DAL:
             )
 
     def get_take(self, take_id: int) -> Take | None:
-        """按 take_id 获取单条 take，不存在返回 None。"""
+        """按 take_id 获取单条 take，不存在或已软删返回 None。"""
+        row = self._conn.execute(
+            "SELECT * FROM takes WHERE take_id = ? AND deleted_at IS NULL;", (take_id,)
+        ).fetchone()
+        return _row_to_take(row) if row else None
+
+    def get_take_any(self, take_id: int) -> Take | None:
+        """按 take_id 获取单条 take（含软删行），不存在返回 None。供 restore 端点使用。"""
         row = self._conn.execute(
             "SELECT * FROM takes WHERE take_id = ?;", (take_id,)
         ).fetchone()
         return _row_to_take(row) if row else None
 
     def list_takes(self, scene_id: int | None = None) -> list[Take]:
-        """返回 take 列表，可按 scene_id 过滤，按 take_number 升序。"""
+        """返回 take 列表（排除软删行），可按 scene_id 过滤，按 take_number 升序。"""
         if scene_id is not None:
             rows = self._conn.execute(
-                "SELECT * FROM takes WHERE scene_id = ? ORDER BY take_number ASC;",
+                "SELECT * FROM takes WHERE scene_id = ? AND deleted_at IS NULL ORDER BY take_number ASC;",
                 (scene_id,),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT * FROM takes ORDER BY take_number ASC;"
+                "SELECT * FROM takes WHERE deleted_at IS NULL ORDER BY take_number ASC;"
             ).fetchall()
         return [_row_to_take(r) for r in rows]
 
@@ -688,7 +699,7 @@ class DAL:
         take_number: int | None = None,
         notes: str | None = None,
     ) -> None:
-        """部分更新 take 元数据，处理 UNIQUE(scene_id, take_number) 冲突。在单个事务内完成。
+        """部分更新 take 元数据，处理 UNIQUE(scene_id, take_number, take_suffix) 冲突。在单个事务内完成。
 
         字段语义：
         - shot：None 表示不改，空串 "" 是合法值（清空 shot 标注）。
@@ -696,24 +707,22 @@ class DAL:
         - scene_id：目标场次 ID，None 表示不改（保持当前场）。目标 scene 不存在时抛 ValueError。
         - take_number：目标编号，None 表示不改或由冲突算法自动计算。
 
-        冲突处理（参见 spec §6）：
-        - 情形 A：仅改 scene_id（无 take_number）→ 追加为目标场 MAX(take_number)+1（空场为 1）。
-        - 情形 B：同场改 take_number 且目标号被占用 → 三步 -1 占位交换两条 take 编号。
-        - 情形 C：跨场 + 指定 take_number 且目标已占用 → 抛 TakeNumberConflictError（不做跨场交换）。
-        - 情形 D：仅改 take_number 且目标号空闲 → 直接 UPDATE。
+        冲突处理（spec §15 反转 2）：
+        - 情形 A：仅改 scene_id（无 take_number）→ 追加为目标场 MAX(take_number)+1（排除软删，空场为 1）。
+        - 情形 B/C/D：改 take_number（含跨场）→ 若目标 (scene_id, take_number, '') 被占用，
+          顺位追加 '+' / '++' …，直到找到空闲组合。不再交换，不再抛 TakeNumberConflictError。
 
         成功后写一条 take_events（event_type='manual.edit'），payload 含 changed_fields 列表
-        和 conflict_resolution（'append' / 'swap' / 'none'）。
+        和 conflict_resolution（'append' / 'suffix' / 'none'）。
 
         status 字段不在本方法，走 set_take_status。
         """
         # 取当前 take 快照（事务外读，仅用于后续判断，不影响事务隔离）
         row = self._conn.execute(
-            "SELECT scene_id, take_number FROM takes WHERE take_id = ?;",
+            "SELECT scene_id, take_number FROM takes WHERE take_id = ? AND deleted_at IS NULL;",
             (take_id,),
         ).fetchone()
         if row is None:
-            # take 不存在，no-op（与 delete_take 一致的静默策略）
             return
 
         cur_scene: int = row["scene_id"]
@@ -724,7 +733,7 @@ class DAL:
         is_cross_scene = (scene_id is not None) and (scene_id != cur_scene)
 
         with self._write_tx() as conn:
-            # 情形 A/C：涉及 scene_id 变更，先校验目标 scene 存在
+            # 涉及 scene_id 变更，先校验目标 scene 存在
             if scene_id is not None:
                 exists = conn.execute(
                     "SELECT 1 FROM scenes WHERE scene_id = ?;", (scene_id,)
@@ -735,13 +744,14 @@ class DAL:
             # 计算目标编号及冲突解决方式
             conflict_resolution = "none"
             target_number: int
+            target_suffix: str = ""
 
             if take_number is None:
                 if is_cross_scene:
-                    # 情形 A：移场，追加到目标场下一号
+                    # 情形 A：移场，追加到目标场下一号（排除软删行）
                     next_row = conn.execute(
                         "SELECT COALESCE(MAX(take_number), 0) + 1 AS next_num "
-                        "FROM takes WHERE scene_id = ?;",
+                        "FROM takes WHERE scene_id = ? AND deleted_at IS NULL;",
                         (target_scene,),
                     ).fetchone()
                     target_number = next_row["next_num"]
@@ -752,37 +762,22 @@ class DAL:
             else:
                 target_number = take_number
                 if target_number != cur_number or is_cross_scene:
-                    # 检查目标 (scene, number) 是否已被占用（排除自己）
-                    occupied_row = conn.execute(
-                        "SELECT take_id FROM takes "
-                        "WHERE scene_id = ? AND take_number = ? AND take_id != ?;",
-                        (target_scene, target_number, take_id),
-                    ).fetchone()
-                    if occupied_row is not None:
-                        if is_cross_scene:
-                            # 情形 C：跨场冲突，不做交换
-                            raise TakeNumberConflictError(
-                                f"目标 (scene_id={target_scene}, take_number={target_number}) "
-                                "已被占用，跨场交换不支持，请先清理目标编号"
-                            )
-                        else:
-                            # 情形 B：同场交换
-                            occupied_take_id: int = occupied_row["take_id"]
-                            conn.execute(
-                                "UPDATE takes SET take_number = -1 WHERE take_id = ?;",
-                                (occupied_take_id,),
-                            )
-                            conn.execute(
-                                f"UPDATE takes SET take_number = ?, updated_at = {_NOW_TS_SQL} "
-                                f"WHERE take_id = ?;",
-                                (target_number, take_id),
-                            )
-                            conn.execute(
-                                f"UPDATE takes SET take_number = ?, updated_at = {_NOW_TS_SQL} "
-                                f"WHERE take_id = ?;",
-                                (cur_number, occupied_take_id),
-                            )
-                            conflict_resolution = "swap"
+                    # 检查目标 (scene, number, suffix) 是否已被占用（排除自己、排除软删）
+                    # 从 suffix='' 开始，循环追加 '+' 直到找到空闲组合
+                    new_suffix = ""
+                    while True:
+                        occupied = conn.execute(
+                            "SELECT 1 FROM takes "
+                            "WHERE scene_id = ? AND take_number = ? AND take_suffix = ? "
+                            "AND take_id != ? AND deleted_at IS NULL;",
+                            (target_scene, target_number, new_suffix, take_id),
+                        ).fetchone()
+                        if occupied is None:
+                            break
+                        new_suffix = new_suffix + "+"
+                    target_suffix = new_suffix
+                    if target_suffix:
+                        conflict_resolution = "suffix"
 
             # 汇总需要更新的字段
             set_clauses: list[str] = []
@@ -791,10 +786,14 @@ class DAL:
             if scene_id is not None:
                 set_clauses.append("scene_id = ?")
                 params.append(target_scene)
-            if target_number != cur_number and conflict_resolution != "swap":
-                # swap 情形已在上面处理，其余情形（append / none+改号）在此处理
+            if target_number != cur_number or conflict_resolution == "suffix":
                 set_clauses.append("take_number = ?")
                 params.append(target_number)
+                set_clauses.append("take_suffix = ?")
+                params.append(target_suffix)
+            elif take_number is not None and target_number == cur_number and not is_cross_scene:
+                # 同场改号但号未变（目标与当前相同），suffix 也不变，无需写 take_number/take_suffix
+                pass
             if shot is not None:
                 set_clauses.append("shot = ?")
                 params.append(shot)
@@ -806,29 +805,31 @@ class DAL:
             changed_fields: list[str] = []
             if scene_id is not None:
                 changed_fields.append("scene_id")
-            if take_number is not None and target_number != cur_number:
+            if target_number != cur_number:
                 changed_fields.append("take_number")
             if is_cross_scene and take_number is None:
                 changed_fields.append("take_number")  # append 也改了编号
+            if target_suffix:
+                changed_fields.append("take_suffix")
             if shot is not None:
                 changed_fields.append("shot")
             if notes is not None:
                 changed_fields.append("notes")
 
-            if set_clauses or conflict_resolution == "swap":
-                if set_clauses:
-                    set_clauses.append(f"updated_at = {_NOW_TS_SQL}")
-                    params.append(take_id)
-                    conn.execute(
-                        f"UPDATE takes SET {', '.join(set_clauses)} WHERE take_id = ?;",
-                        params,
-                    )
+            if set_clauses:
+                set_clauses.append(f"updated_at = {_NOW_TS_SQL}")
+                params.append(take_id)
+                conn.execute(
+                    f"UPDATE takes SET {', '.join(set_clauses)} WHERE take_id = ?;",
+                    params,
+                )
 
             # 写 take_events（manual.edit），inline 不调 insert_take_event
             event_payload_json = json.dumps(
                 {
                     "changed_fields": changed_fields,
                     "conflict_resolution": conflict_resolution,
+                    "final_suffix": target_suffix,
                 }
             )
             conn.execute(
@@ -838,10 +839,10 @@ class DAL:
             )
 
     def next_take_number(self, scene_id: int) -> int:
-        """返回下一个 take_number（COALESCE(MAX,0)+1），永不复用已删号。"""
+        """返回下一个 take_number（排除软删行）。软删的号视为释放，可复用。"""
         row = self._conn.execute(
             "SELECT COALESCE(MAX(take_number), 0) + 1 AS next_num "
-            "FROM takes WHERE scene_id = ?;",
+            "FROM takes WHERE scene_id = ? AND deleted_at IS NULL;",
             (scene_id,),
         ).fetchone()
         return int(row["next_num"])
@@ -887,11 +888,10 @@ class DAL:
             return int(row["scene_id"]), False  # type: ignore[index]
 
     def delete_take(self, take_id: int) -> None:
-        """硬删 take，子表靠 ON DELETE CASCADE 自动清，同时在 audit_log 留审计快照。
+        """软删 take：设置 deleted_at 时间戳，子表数据保留（不触发 CASCADE）。
 
-        执行顺序（单事务）：SELECT 快照 → INSERT audit_log → DELETE takes。
-        take_events 对 take_id 是 CASCADE，随 DELETE 一并清除，审计靠 audit_log 保全。
-        take 不存在时静默 no-op（取快照为空，不执行任何写操作）。
+        执行顺序（单事务）：SELECT 快照 → INSERT audit_log → UPDATE deleted_at。
+        take 不存在时静默 no-op。
         """
         with self._write_tx() as conn:
             snapshot = conn.execute(
@@ -900,7 +900,6 @@ class DAL:
                 (take_id,),
             ).fetchone()
             if snapshot is None:
-                # take 不存在，静默 no-op
                 return
 
             audit_payload = json.dumps(
@@ -921,6 +920,23 @@ class DAL:
                 (audit_payload,),
             )
             conn.execute(
-                "DELETE FROM takes WHERE take_id = ?;",
+                f"UPDATE takes SET deleted_at = {_NOW_TS_SQL} WHERE take_id = ?;",
                 (take_id,),
+            )
+
+    def restore_take(self, take_id: int) -> None:
+        """撤销软删：清除 deleted_at，在 audit_log 写 take.restore。
+
+        take 不存在时静默 no-op。
+        """
+        with self._write_tx() as conn:
+            conn.execute(
+                "UPDATE takes SET deleted_at = NULL WHERE take_id = ?;",
+                (take_id,),
+            )
+            audit_payload = json.dumps({"take_id": take_id})
+            conn.execute(
+                f"INSERT INTO audit_log (actor, action, payload, ts) "
+                f"VALUES ('user', 'take.restore', ?, {_NOW_TS_SQL});",
+                (audit_payload,),
             )

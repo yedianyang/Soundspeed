@@ -29,22 +29,24 @@ CREATE INDEX IF NOT EXISTS ix_scenes_is_active
 -- ── takes 表 ─────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS takes (
-    take_id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    scene_id        INTEGER NOT NULL
+    take_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scene_id         INTEGER NOT NULL
         REFERENCES scenes (scene_id) ON DELETE RESTRICT,
-    take_number     INTEGER NOT NULL,               -- 本场次内的 take 编号，从 1 起
-    shot            TEXT,                           -- 镜次编号，如 "Shot_2B"
-    start_ts        REAL    NOT NULL,               -- take 开始 Unix 时间戳（秒，含小数）
-    end_ts          REAL,                           -- take 结束 Unix 时间戳，进行中时为 NULL
-    status          TEXT    NOT NULL DEFAULT 'tbd'
+    take_number      INTEGER NOT NULL,               -- 本场次内的 take 编号，从 1 起
+    take_suffix      TEXT    NOT NULL DEFAULT '',    -- 后缀，冲突时追加 '+' / '++'（v3）
+    shot             TEXT,                           -- 镜次编号，如 "Shot_2B"
+    start_ts         REAL    NOT NULL,               -- take 开始 Unix 时间戳（秒，含小数）
+    end_ts           REAL,                           -- take 结束 Unix 时间戳，进行中时为 NULL
+    status           TEXT    NOT NULL DEFAULT 'tbd'
         CHECK (status IN ('keeper', 'ng', 'hold', 'tbd')),
-    performer_issues TEXT,                          -- NP 解析输出，JSON 文本，可选
-    audio_quality   TEXT,                           -- NP 解析输出，如 'clean' / 'noisy' / 'clipped'
-    script_diff     TEXT,                           -- L2 输出，JSON 文本，剧本偏差报告
-    notes           TEXT,                           -- Ch2 原文拼接 + 候补 note，可选
-    created_at      REAL    NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS REAL)),
-    updated_at      REAL    NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS REAL)),
-    UNIQUE (scene_id, take_number)
+    performer_issues TEXT,                           -- NP 解析输出，JSON 文本，可选
+    audio_quality    TEXT,                           -- NP 解析输出，如 'clean' / 'noisy' / 'clipped'
+    script_diff      TEXT,                           -- L2 输出，JSON 文本，剧本偏差报告
+    notes            TEXT,                           -- Ch2 原文拼接 + 候补 note，可选
+    deleted_at       REAL,                           -- 软删时间戳，NULL 表示未删除（v3）
+    created_at       REAL    NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS REAL)),
+    updated_at       REAL    NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS REAL)),
+    UNIQUE (scene_id, take_number, take_suffix)
 );
 
 CREATE INDEX IF NOT EXISTS ix_takes_scene_id
@@ -221,4 +223,4 @@ BEGIN
         VALUES (NEW.line_id, NEW.text, NEW.character);
 END;
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;

@@ -42,7 +42,6 @@ from backend.core.events import (
     TakeEndPayload,
     TakeStartPayload,
 )
-from backend.db.dal import TakeNumberConflictError
 
 router = APIRouter(prefix="/api/v1", tags=["takes"])
 
@@ -67,21 +66,25 @@ class SegmentOut(BaseModel):
 
 
 class TakeDTO(BaseModel):
-    """take 行的响应投影（11 字段，有意省略 performer_issues / audio_quality）。
+    """take 行的响应投影（12 字段，有意省略 performer_issues / audio_quality）。
 
     有意省略字段：performer_issues、audio_quality 属 NP Pipeline 输出，1.J-1.L 不暴露。
     前端从 script_diff.line_matches 读行比对（codex P1），不单列 line_matches 字段。
+    take_suffix：冲突后缀，默认 ''；显示时前端拼接为 'Take 3+'，后端只存值。
+    deleted_at：软删时间戳，NULL 表示未删除；restore 后返回 None。
     """
 
     take_id: int
     scene_id: int
     take_number: int
+    take_suffix: str
     shot: str | None
     start_ts: float
     end_ts: float | None
     status: str
     script_diff: dict | None
     notes: str | None
+    deleted_at: float | None
     created_at: float
     updated_at: float
 
@@ -409,6 +412,7 @@ async def patch_take(
         dal.set_take_status(take_id, body.status)
 
     # 再处理其余字段（走 update_take_meta）
+    # 冲突处理改为后缀追加，不再抛 TakeNumberConflictError（不再 409）
     has_meta_update = any(
         v is not None for v in (body.shot, body.scene_id, body.take_number, body.notes)
     )
@@ -420,11 +424,6 @@ async def patch_take(
                 scene_id=body.scene_id,
                 take_number=body.take_number,
                 notes=body.notes,
-            )
-        except TakeNumberConflictError:
-            raise HTTPException(
-                status_code=409,
-                detail={"error": "take_number_conflict"},
             )
         except ValueError:
             raise HTTPException(status_code=404, detail="target scene not found")
@@ -448,7 +447,7 @@ async def patch_take(
     return TakeDTO.model_validate(updated, from_attributes=True)
 
 
-# ── 2.C：DELETE /takes/{take_id} ─────────────────────────────────────────────
+# ── 2.C：DELETE /takes/{take_id}（软删）─────────────────────────────────────
 
 
 @router.delete("/takes/{take_id}", status_code=204)
@@ -457,15 +456,15 @@ async def delete_take(
     request: Request,
     _: None = Depends(require_admin),
 ) -> None:
-    """硬删 take。录制中→409；不存在→404；成功→204。
+    """软删 take。录制中→409；不存在（含已软删）→404；成功→204。
 
-    子表（take_events/take_line_matches/transcript_segments）靠 ON DELETE CASCADE 自动清。
+    子表数据保留（不触发 CASCADE），可通过 restore 端点撤销。
     删除后 publish TAKE_DELETED。
     """
     orchestrator = request.app.state.orchestrator
     dal = orchestrator.dal
 
-    # 存在性检查
+    # 存在性检查（get_take 排除软删行）
     take = dal.get_take(take_id)
     if take is None:
         raise HTTPException(status_code=404, detail="take not found")
@@ -484,3 +483,34 @@ async def delete_take(
         TAKE_DELETED,
         TakeDeletedPayload(take_id=take_id, scene_id=scene_id),
     )
+
+
+# ── 2.C：POST /takes/{take_id}/restore ───────────────────────────────────────
+
+
+@router.post("/takes/{take_id}/restore")
+async def restore_take(
+    take_id: int,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> TakeDTO:
+    """撤销软删。
+
+    仅对已软删（deleted_at IS NOT NULL）的 take 有效；
+    未软删或不存在→404；成功→200 + 恢复后的 TakeDTO。
+    """
+    orchestrator = request.app.state.orchestrator
+    dal = orchestrator.dal
+
+    # 查含软删的 take
+    take = dal.get_take_any(take_id)
+    if take is None:
+        raise HTTPException(status_code=404, detail="take not found")
+    if take.deleted_at is None:
+        raise HTTPException(status_code=404, detail="take not deleted")
+
+    dal.restore_take(take_id)
+
+    restored = dal.get_take(take_id)
+    assert restored is not None  # restore 后应可见
+    return TakeDTO.model_validate(restored, from_attributes=True)

@@ -487,3 +487,192 @@ def delete_take(self, take_id: int) -> None: ...
 | 同场对比字段契约 | §8 |
 | 不动 migration + 软删 v4 排序说明 | §12 |
 | 分叉已定 → §0 | §0 |
+
+---
+
+## 15. 复审决策（2026-06-03 手测后，Lead 拍板）
+
+本节是手动测试后的覆盖性 addendum。正文 §0–§14 不改，以本节为准。覆盖点共三处：反转 1 覆盖 §7 / §11，反转 2 覆盖 §0 分叉 2 / §6 情形 B 和 C，反转 3 覆盖 §11。另有三条消歧义 pin。
+
+### 反转 1 —— 删除改为软删（覆盖 §7、§11）
+
+原 §7「硬删 + CASCADE + audit_log」作废，改为软删。
+
+**新增列（见反转 3 的 v3 migration）：** `takes.deleted_at REAL`（nullable，SQLite timestamp，NULL 表示未删除）。
+
+**`delete_take` 改写：**
+
+```python
+def delete_take(self, take_id: int) -> None:
+    """软删：UPDATE takes SET deleted_at = <unix_ts>，audit_log 仍写。子表不 CASCADE。"""
+```
+
+执行顺序（同一事务内）：
+
+1. 取快照 `SELECT * FROM takes WHERE take_id = ?`（用于 audit payload）。
+2. 写 `audit_log`：action=`take.delete`，payload 含 take 快照。
+3. `UPDATE takes SET deleted_at = unixepoch('now','subsec') WHERE take_id = ?`。
+
+子表（`take_events`、`take_line_matches`、`transcript_segments`）数据**保留**，不触发 CASCADE，供撤销恢复用。
+
+**新增 `restore_take`：**
+
+```python
+def restore_take(self, take_id: int) -> None:
+    """撤销软删：UPDATE takes SET deleted_at = NULL，audit_log 写 take.restore。"""
+```
+
+前端撤销栈建议深度 5–10 条（具体由前端定），撤销按钮触发此端点。
+
+**所有 take 查询默认排除软删行。** 以下 DAL 方法一律加 `WHERE deleted_at IS NULL`（或在 JOIN 条件里加）：
+
+- `list_takes`（:319）
+- `get_take`（:312）
+- `start_take` 内的编号计算（见「next_take_number pin」）
+- `update_take_meta` 的目标 take 校验
+- 同场对比视图查询（§8 的 `GET /scenes/{scene_id}/compare`）
+- 情形 A 移场的 `COALESCE(MAX(take_number),0)+1` 子查询
+
+实现时在 DAL 层统一加过滤，不在路由层各自处理。
+
+### 反转 2 —— 冲突处理改为追加「+」后缀（覆盖 §0 分叉 2、§6 情形 B / C）
+
+原 §0 分叉 2「同场撞号交换编号」和原 §6「情形 B 交换、情形 C 跨场撞号 409」全部作废，改为追加「+」后缀。
+
+**新增列（见反转 3 的 v3 migration）：** `takes.take_suffix TEXT NOT NULL DEFAULT ''`。
+
+**唯一约束改为三元（覆盖原 §0 分叉 2 所述二元约束）：** `UNIQUE(scene_id, take_number, take_suffix)`。
+
+**冲突解决算法（新版，取代原 §6 情形 B / C）：**
+
+`update_take_meta` 在改 `take_number` 或 `scene_id` 时，若目标 `(scene_id, take_number, '')` 已被占用，则给被移动/改号的那条顺位追加一个 `+`：`'' → '+' → '++'`，循环直到 `(scene_id, take_number, take_suffix)` 不冲突。
+
+```
+new_suffix = ''
+WHILE EXISTS (
+    SELECT 1 FROM takes
+    WHERE scene_id = target_scene_id
+      AND take_number = target_take_number
+      AND take_suffix = new_suffix
+      AND take_id != current_take_id
+      AND deleted_at IS NULL
+):
+    new_suffix = new_suffix + '+'
+
+UPDATE takes SET scene_id = target_scene_id,
+                 take_number = target_take_number,
+                 take_suffix = new_suffix
+WHERE take_id = current_take_id
+```
+
+显示约定：`take_suffix = ''` 显示为 `Take 3`；`take_suffix = '+'` 显示为 `Take 3+`；`take_suffix = '++'` 显示为 `Take 3++`。显示逻辑在前端处理，后端只存 suffix 值。
+
+`TakeNumberConflictError`：不再用于同/跨场冲突（已改为追加后缀）。可废弃；若保留，仅作理论兜底（循环 suffix 累积到不合理长度时的安全阀，实际上不会触发）。
+
+原 §6 情形 A（移场追加 `COALESCE(MAX,0)+1`）不变，仍为「不指定 take_number 时追加到目标场最大号+1」。情形 B（同场换号）和情形 C（同时改 scene_id + take_number）的冲突处理统一按本节算法执行。
+
+### 反转 3 —— migration 改为本期开 v3（覆盖 §11）
+
+原 §11「本期零改 migration、软删 v4 排在 diarization v3 之后」作废。
+
+**本期开 v3 migration。** runner 现已到 v2（`v2_scene_heading.sql`），下一个空号是 v3，不能留空号。
+
+**⚠ 跨线协调（高优先级）：** diarization spec（`docs/specs/2026-06-02-realtime-diarization-voicenote-design.md`）§9 声明 speakers 表用 v3（`v3_speakers.sql`）。本 spec 抢占了 v3，diarization 必须顺延 v4（`v4_speakers.sql`），并在 runner.py 的 `MIGRATION_FILES` 里注册 `4: "v4_speakers.sql"`。**diarization spec 需同步修改** §9 / §6 中的版本号声明，属跨线协调项，由 Lead 通知经纬。
+
+**v3 migration 内容（`v3_scene_take_soft_delete.sql`）：**
+
+① 加 `takes.deleted_at REAL`（NULL = 未删除）。
+② 加 `takes.take_suffix TEXT NOT NULL DEFAULT ''`。
+③ 把原 `UNIQUE(scene_id, take_number)`（内联约束，schema.sql:47）改为 `UNIQUE(scene_id, take_number, take_suffix)`。
+
+**⚠ 最易出错处——SQLite 无法 ALTER 内联 UNIQUE，必须整表重建：**
+
+SQLite 不支持 `ALTER TABLE ... DROP CONSTRAINT`，内联约束只能靠重建。标准 12 步如下（在 v3 migration SQL 文件里顺序执行）：
+
+```sql
+PRAGMA foreign_keys = OFF;
+
+CREATE TABLE takes_new (
+    take_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scene_id         INTEGER NOT NULL
+        REFERENCES scenes (scene_id) ON DELETE RESTRICT,
+    take_number      INTEGER NOT NULL,
+    take_suffix      TEXT    NOT NULL DEFAULT '',          -- 新增（反转 2）
+    shot             TEXT,
+    start_ts         REAL    NOT NULL,
+    end_ts           REAL,
+    status           TEXT    NOT NULL DEFAULT 'tbd'
+        CHECK (status IN ('keeper','ng','hold','tbd')),
+    performer_issues TEXT,
+    audio_quality    TEXT,
+    script_diff      TEXT,
+    notes            TEXT,
+    deleted_at       REAL,                                 -- 新增（反转 1）
+    created_at       REAL    NOT NULL DEFAULT (CAST(strftime('%s','now') AS REAL)),
+    updated_at       REAL    NOT NULL DEFAULT (CAST(strftime('%s','now') AS REAL)),
+    UNIQUE (scene_id, take_number, take_suffix)
+);
+
+-- 拷数据：take_suffix 默认 ''、deleted_at 默认 NULL，其余逐列照搬
+INSERT INTO takes_new (
+    take_id, scene_id, take_number, take_suffix, shot, start_ts, end_ts,
+    status, performer_issues, audio_quality, script_diff, notes,
+    deleted_at, created_at, updated_at
+)
+SELECT
+    take_id, scene_id, take_number, '', shot, start_ts, end_ts,
+    status, performer_issues, audio_quality, script_diff, notes,
+    NULL, created_at, updated_at
+FROM takes;
+
+DROP TABLE takes;
+ALTER TABLE takes_new RENAME TO takes;
+
+-- 子表 take_events / take_line_matches / transcript_segments 的 ON DELETE CASCADE
+-- 声明在它们自己的 CREATE TABLE 里，重建 takes 不动它们；但要 foreign_key_check 验证关系完好。
+
+PRAGMA foreign_key_check;
+PRAGMA foreign_keys = ON;
+```
+
+重建期间关闭 `PRAGMA foreign_keys` 是 SQLite 整表重建的标准做法，完成后必须重开并做 `foreign_key_check`。子表（`take_events`、`take_line_matches`、`transcript_segments`）的 `ON DELETE CASCADE` 声明在它们自己的 `CREATE TABLE` 里，重建 `takes` 不影响子表声明，但数据关系需要 `foreign_key_check` 验证。
+
+实现 v3 时若 `schema.sql`（全新库初始化路径）也定义 takes，需同步把 `take_suffix`、`deleted_at` 两列和三元 `UNIQUE (scene_id, take_number, take_suffix)` 加进 `schema.sql`，保证全新库与迁移库的 takes 结构一致。
+
+### Pin：next_take_number 排除软删行
+
+`orchestrator.py:156` 的编号逻辑（以及情形 A 移场的 `COALESCE(MAX,0)+1` 子查询）统一写法：
+
+```sql
+SELECT COALESCE(MAX(take_number), 0) + 1
+FROM takes
+WHERE scene_id = ? AND deleted_at IS NULL
+```
+
+语义：操作员误触建了 Take 4 再软删，该号释放，下次录制复用 4（对应「误触等于没发生」）。软删行不占号，新建 take 可以复用已软删的号。
+
+### Pin：REC / 建 take 解耦（本期做浅层）
+
+已确认实时 ASR 尚未接入生产（segment 仅靠 `/debug/asr` 注入），「录音中」今天是 UX + 注入门概念。
+
+本期浅层解耦方案：`session` 拆成两个独立标志：
+
+- `take_active`：有当前 take 块（建 take 后为 True，take 结束/软删后为 False）。
+- `recording`：录音开关（REC on → True，REC off → False，独立于 take 块是否存在）。
+
+操作语义：
+- **Next Take**：建 take 块（`take_active = True`），不进录音态（`recording` 不变）。
+- **REC on**：独立开关，`recording = True`，往当前 take 块里写 segment。
+- **REC off**：`recording = False`，结束当前 take 的录音。
+
+深层改写（take.end 回填后 gate L2 + 接真实 ASR）归 diarization 线，不在 2.x 本期范围。2.x 本期只做浅层解耦（两个标志），不改 orchestrator 的 take.end 触发链。
+
+### Pin：影响面说明
+
+本 addendum 三条反转使 2.B（DAL 实现）、2.C（API 实现）的既有实现与测试需要**返工**（不是新增）：
+
+- 硬删 → 软删：`delete_take` 实现、所有 `list_takes`/`get_take` 的查询过滤、子表 CASCADE 行为。
+- 交换/409 → 后缀：`update_take_meta` 冲突处理逻辑，相关单元测试需重写（测交换的用例全部改测后缀）。
+- migration：v3 SQL 文件和 runner 注册。
+
+后续票按本 addendum 写测试，不要按原 §6 / §7 写。

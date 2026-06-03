@@ -492,7 +492,7 @@ def test_list_takes_field_contract(tmp_dal: DAL, monkeypatch) -> None:
     take = resp.json()["takes"][0]
 
     required_fields = {
-        "take_id", "scene_id", "take_number", "shot",
+        "take_id", "scene_id", "take_number", "take_suffix", "shot",
         "start_ts", "end_ts", "status",
         "script_diff", "notes", "created_at", "updated_at",
     }
@@ -1339,9 +1339,9 @@ def test_patch_take_shot(tmp_dal: DAL, monkeypatch) -> None:
     assert resp.json()["shot"] == "B"
 
 
-def test_patch_take_number_swap(tmp_dal: DAL, monkeypatch) -> None:
-    """同场内改 take_number 撞已占用号 → 交换，两条 take 编号互换。"""
-    sid = tmp_dal.create_scene("ScenePatchSwap")
+def test_patch_take_number_suffix_when_conflict(tmp_dal: DAL, monkeypatch) -> None:
+    """同场内改 take_number 撞已占用号 → 追加 '+' 后缀（不再交换），两条 take 各自保持编号。"""
+    sid = tmp_dal.create_scene("ScenePatchSuffix")
     tmp_dal.set_active_scene(sid)
     t1 = tmp_dal.start_take(sid, 1, 1000.0)
     tmp_dal.end_take(t1, 1010.0, "keeper")
@@ -1349,21 +1349,22 @@ def test_patch_take_number_swap(tmp_dal: DAL, monkeypatch) -> None:
     tmp_dal.end_take(t2, 1030.0, "ng")
 
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
-    # 把 t1 的编号改为 2，应触发交换
+    # 把 t1 的编号改为 2，已被 t2 占用 → t1 得到 suffix='+'，take_number=2
     resp = client.patch(f"/api/v1/takes/{t1}", json={"take_number": 2}, headers=_AUTH)
     assert resp.status_code == 200
+    body = resp.json()
+    assert body["take_number"] == 2
+    assert body["take_suffix"] == "+"
 
-    # t1 编号变成 2，t2 编号变成 1
-    t1_updated = tmp_dal.get_take(t1)
+    # t2 编号保持 2，suffix 仍 ''
     t2_updated = tmp_dal.get_take(t2)
-    assert t1_updated is not None
     assert t2_updated is not None
-    assert t1_updated.take_number == 2
-    assert t2_updated.take_number == 1
+    assert t2_updated.take_number == 2
+    assert t2_updated.take_suffix == ""
 
 
-def test_patch_take_scene_id_cross_scene_conflict_409(tmp_dal: DAL, monkeypatch) -> None:
-    """跨场移动，目标 (scene_id, take_number) 已占用 → 409。"""
+def test_patch_take_scene_id_cross_scene_conflict_uses_suffix(tmp_dal: DAL, monkeypatch) -> None:
+    """跨场移动，目标 (scene_id, take_number, '') 已占用 → 追加后缀（不再 409）。"""
     sid1 = tmp_dal.create_scene("ScenePatchCross1")
     sid2 = tmp_dal.create_scene("ScenePatchCross2")
     tmp_dal.set_active_scene(sid1)
@@ -1374,9 +1375,13 @@ def test_patch_take_scene_id_cross_scene_conflict_409(tmp_dal: DAL, monkeypatch)
     tmp_dal.end_take(t2, 1030.0, "keeper")
 
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
-    # 把 t1 移到 sid2 且指定 take_number=1（已被 t2 占用），应 409
+    # 把 t1 移到 sid2 且指定 take_number=1（已被 t2 占用），应追加后缀而非 409
     resp = client.patch(f"/api/v1/takes/{t1}", json={"scene_id": sid2, "take_number": 1}, headers=_AUTH)
-    assert resp.status_code == 409
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scene_id"] == sid2
+    assert body["take_number"] == 1
+    assert body["take_suffix"] == "+"
 
 
 def test_patch_take_scene_id_invalid_404(tmp_dal: DAL, monkeypatch) -> None:
@@ -1450,23 +1455,41 @@ def test_patch_take_publishes_take_changed(tmp_dal: DAL, monkeypatch) -> None:
     assert p.status == "ng"
 
 
-# ── 2.C：DELETE /takes/{take_id} ───────────────────────────────────────────
+# ── 2.C：DELETE /takes/{take_id}（软删）──────────────────────────────────────
 
 
-def test_delete_take_success_204(tmp_dal: DAL, monkeypatch) -> None:
-    """DELETE /takes/{id} → 204，take 已从 DB 删除。"""
+def test_delete_take_success_204_soft_delete(tmp_dal: DAL, monkeypatch) -> None:
+    """DELETE /takes/{id} → 204；软删后 get_take 返 None（API 排除软删），但物理行保留。"""
     _, tid = _make_take(tmp_dal, "SceneDelete")
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
     resp = client.delete(f"/api/v1/takes/{tid}", headers=_AUTH)
     assert resp.status_code == 204
+    # API get_take 排除软删行 → None
     assert tmp_dal.get_take(tid) is None
+    # 物理行仍存在，deleted_at 已设置
+    row = tmp_dal._conn.execute(
+        "SELECT deleted_at FROM takes WHERE take_id = ?;", (tid,)
+    ).fetchone()
+    assert row is not None and row["deleted_at"] is not None
 
 
 def test_delete_take_not_found_404(tmp_dal: DAL, monkeypatch) -> None:
-    """DELETE /takes/99999 → 404。"""
+    """DELETE /takes/99999 → 404（连软删行都没有）。"""
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
     resp = client.delete("/api/v1/takes/99999", headers=_AUTH)
     assert resp.status_code == 404
+
+
+def test_delete_take_already_soft_deleted_404(tmp_dal: DAL, monkeypatch) -> None:
+    """已软删的 take 再次 DELETE → 404（get_take 排除软删行，视为不存在）。"""
+    _, tid = _make_take(tmp_dal, "SceneDeleteAgain")
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    # 第一次软删
+    resp1 = client.delete(f"/api/v1/takes/{tid}", headers=_AUTH)
+    assert resp1.status_code == 204
+    # 第二次应该 404（已软删，get_take 返 None）
+    resp2 = client.delete(f"/api/v1/takes/{tid}", headers=_AUTH)
+    assert resp2.status_code == 404
 
 
 def test_delete_take_recording_409(tmp_dal: DAL, monkeypatch) -> None:
@@ -1504,3 +1527,62 @@ def test_delete_take_publishes_take_deleted(tmp_dal: DAL, monkeypatch) -> None:
     assert isinstance(p, TakeDeletedPayload)
     assert p.take_id == tid
     assert p.scene_id == sid
+
+
+# ── 2.C：POST /takes/{take_id}/restore ─────────────────────────────────────
+
+
+def test_restore_take_success(tmp_dal: DAL, monkeypatch) -> None:
+    """POST /takes/{id}/restore → 200，恢复软删 take，返回更新后的 TakeDTO。"""
+    _, tid = _make_take(tmp_dal, "SceneRestore")
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    # 先软删
+    client.delete(f"/api/v1/takes/{tid}", headers=_AUTH)
+    assert tmp_dal.get_take(tid) is None
+    # 再 restore
+    resp = client.post(f"/api/v1/takes/{tid}/restore", headers=_AUTH)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["take_id"] == tid
+    assert body["deleted_at"] is None
+    # DAL 也能读到了
+    restored = tmp_dal.get_take(tid)
+    assert restored is not None
+
+
+def test_restore_take_not_found_404(tmp_dal: DAL, monkeypatch) -> None:
+    """POST /takes/99999/restore → 404（连软删都没有）。"""
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.post("/api/v1/takes/99999/restore", headers=_AUTH)
+    assert resp.status_code == 404
+
+
+def test_restore_take_not_deleted_404(tmp_dal: DAL, monkeypatch) -> None:
+    """对未软删的 take POST restore → 404（不能 restore 未删除的 take；
+    或者返回当前 take 即可，这里按「not deleted」语义返 404）。"""
+    _, tid = _make_take(tmp_dal, "SceneRestoreNotDeleted")
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    # take 未软删，restore 应 404（没有被删的 take 可恢复）
+    resp = client.post(f"/api/v1/takes/{tid}/restore", headers=_AUTH)
+    assert resp.status_code == 404
+
+
+# ── TakeDTO 含 take_suffix ──────────────────────────────────────────────────
+
+
+def test_takedto_has_take_suffix_field(tmp_dal: DAL, monkeypatch) -> None:
+    """TakeDTO 含 take_suffix 字段。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    headers = _AUTH
+
+    scene_id = tmp_dal.create_scene("scene_dto_suffix")
+    tmp_dal.set_active_scene(scene_id)
+    client.post("/api/v1/take/start", json={"scene_id": scene_id, "shot": None}, headers=headers)
+    client.post("/api/v1/take/end", headers=headers)
+
+    resp = client.get("/api/v1/takes", headers=headers)
+    assert resp.status_code == 200
+    take = resp.json()["takes"][0]
+    assert "take_suffix" in take
+    assert take["take_suffix"] == ""
