@@ -503,10 +503,11 @@ export default function AdminHome() {
               <span className="text-foreground">
                 {activeScene ? activeScene.scene_code : "—"}
               </span>
+              {/* 顺序：Scene → Shot → Take（与 History badge / 底部工作槽一致；显示逻辑统一见 Notion ticket）。 */}
+              {currentTakeRecord?.shot && <span>· {currentTakeRecord.shot}</span>}
               {currentTakeRecord?.take_number != null && (
                 <span>· T{formatTakeLabel(currentTakeRecord)}</span>
               )}
-              {currentTakeRecord?.shot && <span>· {currentTakeRecord.shot}</span>}
             </div>
           </div>
 
