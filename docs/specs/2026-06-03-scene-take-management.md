@@ -676,3 +676,145 @@ WHERE scene_id = ? AND deleted_at IS NULL
 - migration：v3 SQL 文件和 runner 注册。
 
 后续票按本 addendum 写测试，不要按原 §6 / §7 写。
+
+---
+
+## 16. per-shot take 计次 + 底部「工作槽」（2026-06-03 Lead 拍板）
+
+本节是第二次 addendum，§0–§15 不改，以本节为准。覆盖点：数据模型扩列（v4 migration）、唯一约束 re-key、DAL 方法签名扩参。另附前端工作槽状态机定义（属 2.x 接线票实现范围）和四条已锁定决策。
+
+### 背景与动机
+
+场记惯例：take 计次是按机位（shot/镜）重数，不是按场重数。同一场内换镜即重新从 1 起。现行数据模型的 `take_number` 在 `(scene_id)` 内单调递增，整场共享一个号序，与现场习惯不符。
+
+本节将 take_number 的分组 key 从 `scene_id` 扩成 `(scene_id, shot)`：同 shot 内单调递增，不同 shot 各自从 1 起。唯一约束由三元扩为四元，加入 shot。同时将前端底部状态条从「当前 take 的派生视图」重构为有状态的「工作槽」，持有待录描述符，独立于 History 列表。
+
+正常流程中 shot 始终有值：改场（或新建空场）时工作槽默认填 shot="1"、take_number=1。空 shot（''）是罕见边角场景，仅在用户主动清空 shot 输入或从旧数据导入时出现，不在主流程考虑范围内。
+
+### 数据模型变更（v4 migration）
+
+**唯一约束 re-key。** 现行约束（§15 反转 2 落地后）为 `UNIQUE(scene_id, take_number, take_suffix)`。本节将其改为 `UNIQUE(scene_id, shot, take_number, take_suffix)`（四元内联约束）。
+
+**shot 列归一为 `TEXT NOT NULL DEFAULT ''`。** 正常录制流程中 shot 始终有值（默认 "1"），故直接把列定义从 nullable `TEXT` 改为 `TEXT NOT NULL DEFAULT ''`，根除 NULL，约束写内联 `UNIQUE(scene_id, shot, take_number, take_suffix)` 即可，无需表达式索引。空字符串 '' 代表「无 shot」边角场景，与 NULL 等价归一，拷数据时 `COALESCE(shot,'')` 把老 NULL 转成 ''。
+
+**编号语义变更。** `next_take_number` 的计算 key 从 `(scene_id)` 扩成 `(scene_id, shot)`：
+
+```sql
+SELECT COALESCE(MAX(take_number), 0) + 1
+FROM takes
+WHERE scene_id = ? AND shot = ? AND deleted_at IS NULL
+```
+
+各 shot 组各自从 1 起；默认 shot="1" 时即为「第 1 镜」组。
+
+**v4 migration（`v4_takes_shot_unique.sql`）。** 沿用 §15 反转 3 的 12 步整表重建套路（PRAGMA foreign_keys=OFF → 建新表 → INSERT copy → DROP → RENAME → foreign_key_check）。shot 列从 nullable 改为 `NOT NULL DEFAULT ''`，拷数据时 `COALESCE(shot,'')` 转换老 NULL；新约束元组更长，原有行全部仍合法，不需要重新编号。`takes_new` 定义中 shot 列写 `TEXT NOT NULL DEFAULT ''`，内联 `UNIQUE(scene_id, shot, take_number, take_suffix)`。
+
+migration 完成后同步更新 `schema.sql`（全新库初始化路径），保证全新库与迁移库结构一致（对齐 §15 反转 3 第 640 行约定）。
+
+**⚠ 版本链协调（非阻塞，需跟经纬对齐）。** §15 反转 3 占用 v3（`v3_scene_take_soft_delete.sql`），diarization spec 被顶到 v4（`v4_speakers.sql`）。本节再占 v4，diarization 须顺延到 v5（`v5_speakers.sql`），runner.py 的 `MIGRATION_FILES` 注册改为 `5: "v5_speakers.sql"`。diarization spec（`docs/specs/2026-06-02-realtime-diarization-voicenote-design.md`）§9 / §6 的版本号声明须同步修改，由 Lead 通知经纬，属跨线协调，非阻塞。
+
+**⚠ note-input 定位语法受影响（协调 4.x note-input 线，非阻塞）。** `feat/4.x-note-input` 现用 `scene_code + take_number` 两段前缀定位一条 take，正则形如 `^([A-Za-z0-9_-]+) (\d+)`。本节把 take 计次改为按 `(scene_id, shot)` 分组后，`(scene_code, take_number)` 不再唯一——同场不同 shot 会出现相同 take_number（如 Shot1 Take1 与 Shot2 Take1 的 take_number 均为 1），note 两段前缀产生歧义，无法唯一定位 take。note 定位语法须扩成三段 `scene_code + shot + take_number`（或等效的唯一编址），`parse_note` 正则与 note-input spec 须同步修改。系统层定位仍可用 `take_id`（PK，全局唯一）不受影响，本协调点只针对「人读前缀 → 唯一 take」的映射。由 Lead 通知 4.x 线负责人，非本 branch 阻塞。
+
+### DAL 方法扩参
+
+以下方法的 `(scene_id, take_number)` key 全部扩成 `(scene_id, shot, take_number)`，语义不变：
+
+```python
+# next_take_number：新增，封装编号查询，供 start_take / orchestrator 调用
+def next_take_number(self, scene_id: int, shot: str) -> int:
+    """返回 (scene_id, shot) 组内下一个可用 take_number（最大已用号 + 1，排除软删行）。"""
+
+# start_take：shot 已有；take_number 改为按 (scene_id, shot) 计次，
+# 内部调 next_take_number(scene_id, shot) 取号；vacate 逻辑 re-key 见下
+
+# update_take_meta：签名不变；内部冲突检测 key 从三元 (scene_id, take_number, take_suffix)
+#                  扩成四元 (scene_id, shot, take_number, take_suffix)
+def update_take_meta(
+    self,
+    take_id: int,
+    *,
+    status: str | None = None,
+    shot: str | None = None,
+    scene_id: int | None = None,
+    take_number: int | None = None,
+    notes: str | None = None,
+) -> None:
+    """签名不变；内部冲突检测 key 扩成四元 (scene_id, shot, take_number, take_suffix)。"""
+
+# restore_take：签名不变；兜底检查 key 同步扩成四元
+def restore_take(self, take_id: int) -> None: ...
+```
+
+**vacate 算法 re-key。** `_vacate_base_slot`（或等效逻辑）的占号检查从 `(scene_id, take_number, '')` 扩成 `(scene_id, shot, take_number, '')`。语义不变：新/改的 take 拿干净号位；占着该号位的软删行顺位加 `+` 后缀让位；live take 永不被挪。
+
+### 四条已锁定决策（本次 Lead 确认）
+
+**决策 1：默认 shot 为 "1"，空 shot 是罕见边角。** 改场（或新建空场）时工作槽默认 shot="1"、take_number=1，正常流程不会出现空 shot。空字符串 '' 仅在用户主动清空 shot 输入或旧数据导入时出现，系统当作独立组处理，不做特殊 UI 提示。【已确认】
+
+**决策 2：切换目标范围时，工作槽恢复为该范围最新 live take，而非直接跳到「下一条待录」。** 统一规则：切换到一个已有 live take 的目标（场或镜）→ 工作槽 = 该范围最新 live take 的 `{shot, take_number}`（呈现已录的那条，如 Shot 2 Take 3）；REC 才创建下一条（内部调 next_take_number 取 MAX+1）。目标范围没有 live take → 工作槽 = 待录首条（`{shot: 目标 shot, take_number: 1}`）。此规则与「启动跳全局最新 live take」保持一致。
+
+**决策 3：History 手动改 shot 保留原 take_number，撞号顺位加后缀。⚠ 最易踩的交互。** 把一条已录 take 改到另一个 shot 组，保留其 `take_number`，落到目标 `(scene, 目标shot, number, '')` 时若被 live take 占用，则顺位加后缀（复用 vacate / suffix 逻辑）；若只被软删行占用，则软删行让位（加 `+`），被移动的 take 拿干净号位。这是唯一一处「用户手动触发跨 shot 组号位碰撞」的入口，实现时必须覆盖测试。
+
+**决策 4：底部 shot 输入保持 free-text，工作槽 take_number 由系统按该 shot 有无 live take 自动定。** 用户只填 shot 名，不手动管计次。「工作槽显示的 take_number」与「REC 创建的 take_number」是两个不同概念，须区分：
+- **工作槽显示**：切到已有 live take 的 shot → 呈现该组最新 live take 的 take_number（与决策 2 一致，显示已录那条，如 Shot 2 Take 3）；切到尚无 live take 的 shot → take_number = 1。
+- **REC 创建**：无论工作槽显示何值，按下 REC 时后端调 `next_take_number(scene_id, shot)` 取 MAX+1 建新 take（空组时 MAX+1=1）。
+
+前端不暴露「续号」还是「从 1 起」的选项。决策 2 / 决策 4 / 工作槽状态机三处语义一致：显示已录最新，REC 才推进到下一条。
+
+### 底部「工作槽」状态机（前端）
+
+工作槽是一个待录描述符 `{scene_id, shot, take_number}`，独立于 History 里已存的 take 行，不绑定任何具体 take_id。
+
+**启动（页面加载 / session 初始化）：** 工作槽 = History 里全局最新的 live take 的 `{scene_id, shot, take_number}`。无 live take 时：`{scene_id: 活跃场, shot: "1", take_number: 1}`。
+
+**REC 按下：** 在 `(工作槽.scene_id, 工作槽.shot)` 下调 `start_take`，后端内部调 `next_take_number(scene_id, shot)` 取号并写库，返回实际 take_number；工作槽更新为新建 take 的 `{scene_id, shot, take_number}`。前端只传 scene_id 和 shot，不传 number。
+
+**Stop REC：** 调 `end_take`，工作槽不变。
+
+**Next Take（底部按钮）：** 在同 `(scene_id, shot)` 下调 `start_take` 建空 take 块；工作槽更新为新建 take 的描述符。
+
+**改 Scene 到目标场 S：** 不 PATCH 任何 take，不动 History。
+- S 有 live take → 工作槽 = S 内全局最新 live take 的 `{scene_id: S, shot, take_number}`（按决策 2，呈现已录的那条）。
+- S 无 live take → 工作槽 = `{scene_id: S, shot: "1", take_number: 1}`。
+
+**改 Shot 到目标镜 H（同场底部输入框）：** 不 PATCH 任何已存 take，不动 History。
+- `(scene, H)` 组有 live take → 工作槽 shot 换为 H，take_number = 该组最新 live take 的 take_number（按决策 2）。
+- `(scene, H)` 组无 live take → 工作槽 shot 换为 H，take_number = 1。
+
+换镜前若还没录，只是改待录槽，不产生孤儿 take。
+
+**删最新一条（History 操作）：** 调 `delete_take`（软删），History 移除该行；工作槽**维持**被删的 `{scene_id, shot, take_number}`，不回退到上一条。
+
+**删后 REC：** 工作槽持有被删 take 的 `{scene_id, shot, take_number}`，调 `start_take` 时 vacate 逻辑让软删行加 `+` 腾位，新 live take 拿干净 `(scene_id, shot, take_number, '')` 号位。语义上等同于「误删重录同号」。
+
+前端状态 `workSlot` 与 `currentTakeRecord`（当前正在录制的 take 行）解耦。底部状态条读 `workSlot`，录制指示器读 `currentTakeRecord`，两者独立更新。
+
+### 受影响的代码（实现 checklist）
+
+**后端：**
+
+- `backend/db/dal.py`：新增 `next_take_number(scene_id: int, shot: str) -> int`；修改 `start_take`（take_number 改按 (scene,shot) 计次，内部调 `next_take_number`）；修改 `_vacate_base_slot` / `update_take_meta` / `restore_take`（冲突 key 扩成四元）。
+- `backend/core/orchestrator.py`：编号逻辑改调 `dal.next_take_number(scene_id, shot)`（加 shot 参数）。
+- `backend/db/migrations/v4_takes_shot_unique.sql`：新建，整表重建，shot 列改 `NOT NULL DEFAULT ''`，内联 `UNIQUE(scene_id, shot, take_number, take_suffix)`，copy 时 `COALESCE(shot,'')`。
+- `backend/db/runner.py`：`MIGRATION_FILES` 注册 `4: "v4_takes_shot_unique.sql"`。
+- `backend/db/schema.sql`：同步 shot 列定义和新约束（全新库初始化路径对齐）。
+
+**前端：**
+
+- `AdminHome`（或对应场记工作台组件）：引入 `workSlot` state `{scene_id, shot, take_number}`，启动时从全局最新 live take 初始化；无 live take 时默认 `{shot: "1", take_number: 1}`。
+- 新增 `handleSelectScene`：改场时按决策 2 规则初始化 `workSlot`（目标场有 live take → 最新 live take；无 → `{shot: "1", take_number: 1}`）。
+- 重写 `handleToggleRecording`：REC on 时调 `start_take(scene_id, shot)`，用后端返回的 take_number 更新 `workSlot`；REC off 调 `end_take`，`workSlot` 不变。
+- 重写 `handleNextTake`：调 `start_take` 建空块，更新 `workSlot`。
+- 重写 `handleChangeShot`：按决策 2 规则更新 `workSlot.shot` 和 `workSlot.take_number`，不触发任何 API 写入。
+- 重写 `handleDeleteTake`：调软删端点，`workSlot` 维持不变（不回退）。
+- 底部状态条渲染：改读 `workSlot` 而非 `currentTakeRecord`；录制指示器仍读 `currentTakeRecord`。
+
+### 规范键与 agent 寻址约定
+
+**规范键（canonical take identity）。** 一条 take 的人读业务键是 `(scene_code, shot, take_number, take_suffix)`，按场 → 镜 → 次 → 后缀的顺序在 DB 列、DTO 字段、UI 显示、查询、注释中统一呈现。`shot` 为自由文本（如 "1" / "A" / "Shot_2B"），`take_number` 为整数（按 shot 组内计次），`take_suffix` 为冲突后缀（空串表示无后缀，"+" / "++" 表示有冲突的副本）。v4 的 `UNIQUE(scene_id, shot, take_number, take_suffix)` 保证该键唯一，故人读键能解析到恰好一条 take。
+
+**take_id 是系统内部身份，不外露。** `take_id` 是 `INTEGER PRIMARY KEY AUTOINCREMENT`，全局单调、永不复用（删后也不回收，水位记在 sqlite_sequence），由 SQLite 在 INSERT 时分配（DAL 读 lastrowid）。它只用于：take_events 等子表外键挂靠、REST `/takes/{take_id}`、前端 store 定位。不暴露给 agent / 语音 / UI。
+
+**agent / 语音按人读键寻址。** Gemma 工具与语音 / note 定位一律按人读键 `(scene_code, shot, take_number[, take_suffix])` 寻址，后端在单次调用内自行解析 `scene_code → scene_id`、`(scene_id, shot, take_number[, take_suffix]) → take_id` 再执行，不需要先返回 take_id 的额外往返。示例：`update_take(scene="01", shot="A", take_number=1, {…})` 内部解析定位。这要求 agent-facing 工具 schema 以人读键为参数，而非裸 take_id。
+
+**note-input 的 `parse_note` 同此约定。** 扩成三段前缀 `scene_code + shot + take_number`，与本节前面 §16「note-input 定位语法受影响」协调点一致：`(scene_code, take_number)` 两段在 shot 分组后不再唯一，必须补入 shot 才能唯一定位一条 take。正则形如 `^([A-Za-z0-9_-]+)\s+([A-Za-z0-9_-]+)\s+(\d+)`，分别捕获 scene_code、shot、take_number。
