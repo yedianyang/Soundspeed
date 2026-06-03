@@ -74,6 +74,16 @@ class TakeEvent:
     created_at: float
 
 
+# ── 自定义异常 ────────────────────────────────────────────────────────────────
+
+
+class TakeNumberConflictError(Exception):
+    """跨场移动时目标 (scene_id, take_number) 已被占用，无法自动解决冲突。
+
+    上层路由应将此异常映射为 HTTP 409。
+    """
+
+
 # ── 内部辅助 ──────────────────────────────────────────────────────────────────
 
 
@@ -643,3 +653,225 @@ class DAL:
             (script_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── 2.B 新增方法 ─────────────────────────────────────────────────────────
+
+    def set_take_status(self, take_id: int, status: str) -> None:
+        """更新 take 的 status，并在 take_events 写一条 manual.mark 事件。
+
+        status 必须是 'keeper' / 'ng' / 'hold' / 'tbd' 之一，否则抛 ValueError。
+        单事务内完成：UPDATE takes + INSERT take_events（inline，不调 insert_take_event 避免嵌套事务）。
+        """
+        _VALID_STATUSES = {"keeper", "ng", "hold", "tbd"}
+        if status not in _VALID_STATUSES:
+            raise ValueError(
+                f"非法 status 值 {status!r}，必须是 {sorted(_VALID_STATUSES)} 之一"
+            )
+        payload_json = json.dumps({"status": status})
+        with self._write_tx() as conn:
+            conn.execute(
+                f"UPDATE takes SET status = ?, updated_at = {_NOW_TS_SQL} WHERE take_id = ?;",
+                (status, take_id),
+            )
+            conn.execute(
+                f"INSERT INTO take_events (take_id, event_type, ts, payload) "
+                f"VALUES (?, 'manual.mark', {_NOW_TS_SQL}, ?);",
+                (take_id, payload_json),
+            )
+
+    def update_take_meta(
+        self,
+        take_id: int,
+        *,
+        shot: str | None = None,
+        scene_id: int | None = None,
+        take_number: int | None = None,
+        notes: str | None = None,
+    ) -> None:
+        """部分更新 take 元数据，处理 UNIQUE(scene_id, take_number) 冲突。在单个事务内完成。
+
+        字段语义：
+        - shot：None 表示不改，空串 "" 是合法值（清空 shot 标注）。
+        - notes：None 表示不改，空串 "" 是合法值（清空备注）。
+        - scene_id：目标场次 ID，None 表示不改（保持当前场）。目标 scene 不存在时抛 ValueError。
+        - take_number：目标编号，None 表示不改或由冲突算法自动计算。
+
+        冲突处理（参见 spec §6）：
+        - 情形 A：仅改 scene_id（无 take_number）→ 追加为目标场 MAX(take_number)+1（空场为 1）。
+        - 情形 B：同场改 take_number 且目标号被占用 → 三步 -1 占位交换两条 take 编号。
+        - 情形 C：跨场 + 指定 take_number 且目标已占用 → 抛 TakeNumberConflictError（不做跨场交换）。
+        - 情形 D：仅改 take_number 且目标号空闲 → 直接 UPDATE。
+
+        成功后写一条 take_events（event_type='manual.edit'），payload 含 changed_fields 列表
+        和 conflict_resolution（'append' / 'swap' / 'none'）。
+
+        status 字段不在本方法，走 set_take_status。
+        """
+        # 取当前 take 快照（事务外读，仅用于后续判断，不影响事务隔离）
+        row = self._conn.execute(
+            "SELECT scene_id, take_number FROM takes WHERE take_id = ?;",
+            (take_id,),
+        ).fetchone()
+        if row is None:
+            # take 不存在，no-op（与 delete_take 一致的静默策略）
+            return
+
+        cur_scene: int = row["scene_id"]
+        cur_number: int = row["take_number"]
+
+        # 确定目标 scene
+        target_scene = scene_id if scene_id is not None else cur_scene
+        is_cross_scene = (scene_id is not None) and (scene_id != cur_scene)
+
+        with self._write_tx() as conn:
+            # 情形 A/C：涉及 scene_id 变更，先校验目标 scene 存在
+            if scene_id is not None:
+                exists = conn.execute(
+                    "SELECT 1 FROM scenes WHERE scene_id = ?;", (scene_id,)
+                ).fetchone()
+                if not exists:
+                    raise ValueError(f"目标 scene_id={scene_id} 不存在")
+
+            # 计算目标编号及冲突解决方式
+            conflict_resolution = "none"
+            target_number: int
+
+            if take_number is None:
+                if is_cross_scene:
+                    # 情形 A：移场，追加到目标场下一号
+                    next_row = conn.execute(
+                        "SELECT COALESCE(MAX(take_number), 0) + 1 AS next_num "
+                        "FROM takes WHERE scene_id = ?;",
+                        (target_scene,),
+                    ).fetchone()
+                    target_number = next_row["next_num"]
+                    conflict_resolution = "append"
+                else:
+                    # 无 take_number，无跨场 → 不改编号
+                    target_number = cur_number
+            else:
+                target_number = take_number
+                if target_number != cur_number or is_cross_scene:
+                    # 检查目标 (scene, number) 是否已被占用（排除自己）
+                    occupied_row = conn.execute(
+                        "SELECT take_id FROM takes "
+                        "WHERE scene_id = ? AND take_number = ? AND take_id != ?;",
+                        (target_scene, target_number, take_id),
+                    ).fetchone()
+                    if occupied_row is not None:
+                        if is_cross_scene:
+                            # 情形 C：跨场冲突，不做交换
+                            raise TakeNumberConflictError(
+                                f"目标 (scene_id={target_scene}, take_number={target_number}) "
+                                "已被占用，跨场交换不支持，请先清理目标编号"
+                            )
+                        else:
+                            # 情形 B：同场交换
+                            occupied_take_id: int = occupied_row["take_id"]
+                            conn.execute(
+                                "UPDATE takes SET take_number = -1 WHERE take_id = ?;",
+                                (occupied_take_id,),
+                            )
+                            conn.execute(
+                                f"UPDATE takes SET take_number = ?, updated_at = {_NOW_TS_SQL} "
+                                f"WHERE take_id = ?;",
+                                (target_number, take_id),
+                            )
+                            conn.execute(
+                                f"UPDATE takes SET take_number = ?, updated_at = {_NOW_TS_SQL} "
+                                f"WHERE take_id = ?;",
+                                (cur_number, occupied_take_id),
+                            )
+                            conflict_resolution = "swap"
+
+            # 汇总需要更新的字段
+            set_clauses: list[str] = []
+            params: list[Any] = []
+
+            if scene_id is not None:
+                set_clauses.append("scene_id = ?")
+                params.append(target_scene)
+            if target_number != cur_number and conflict_resolution != "swap":
+                # swap 情形已在上面处理，其余情形（append / none+改号）在此处理
+                set_clauses.append("take_number = ?")
+                params.append(target_number)
+            if shot is not None:
+                set_clauses.append("shot = ?")
+                params.append(shot)
+            if notes is not None:
+                set_clauses.append("notes = ?")
+                params.append(notes)
+
+            # 记录本次改动的业务字段（供 take_events payload）
+            changed_fields: list[str] = []
+            if scene_id is not None:
+                changed_fields.append("scene_id")
+            if take_number is not None and target_number != cur_number:
+                changed_fields.append("take_number")
+            if is_cross_scene and take_number is None:
+                changed_fields.append("take_number")  # append 也改了编号
+            if shot is not None:
+                changed_fields.append("shot")
+            if notes is not None:
+                changed_fields.append("notes")
+
+            if set_clauses or conflict_resolution == "swap":
+                if set_clauses:
+                    set_clauses.append(f"updated_at = {_NOW_TS_SQL}")
+                    params.append(take_id)
+                    conn.execute(
+                        f"UPDATE takes SET {', '.join(set_clauses)} WHERE take_id = ?;",
+                        params,
+                    )
+
+            # 写 take_events（manual.edit），inline 不调 insert_take_event
+            event_payload_json = json.dumps(
+                {
+                    "changed_fields": changed_fields,
+                    "conflict_resolution": conflict_resolution,
+                }
+            )
+            conn.execute(
+                f"INSERT INTO take_events (take_id, event_type, ts, payload) "
+                f"VALUES (?, 'manual.edit', {_NOW_TS_SQL}, ?);",
+                (take_id, event_payload_json),
+            )
+
+    def delete_take(self, take_id: int) -> None:
+        """硬删 take，子表靠 ON DELETE CASCADE 自动清，同时在 audit_log 留审计快照。
+
+        执行顺序（单事务）：SELECT 快照 → INSERT audit_log → DELETE takes。
+        take_events 对 take_id 是 CASCADE，随 DELETE 一并清除，审计靠 audit_log 保全。
+        take 不存在时静默 no-op（取快照为空，不执行任何写操作）。
+        """
+        with self._write_tx() as conn:
+            snapshot = conn.execute(
+                "SELECT take_id, scene_id, take_number, status, shot, notes, "
+                "start_ts, end_ts FROM takes WHERE take_id = ?;",
+                (take_id,),
+            ).fetchone()
+            if snapshot is None:
+                # take 不存在，静默 no-op
+                return
+
+            audit_payload = json.dumps(
+                {
+                    "take_id": snapshot["take_id"],
+                    "scene_id": snapshot["scene_id"],
+                    "take_number": snapshot["take_number"],
+                    "status": snapshot["status"],
+                    "shot": snapshot["shot"],
+                    "notes": snapshot["notes"],
+                    "start_ts": snapshot["start_ts"],
+                    "end_ts": snapshot["end_ts"],
+                }
+            )
+            conn.execute(
+                f"INSERT INTO audit_log (actor, action, payload, ts) "
+                f"VALUES ('user', 'take.delete', ?, {_NOW_TS_SQL});",
+                (audit_payload,),
+            )
+            conn.execute(
+                "DELETE FROM takes WHERE take_id = ?;",
+                (take_id,),
+            )

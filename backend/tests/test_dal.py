@@ -647,3 +647,175 @@ def test_update_segment_speaker_to_none(tmp_dal: DAL) -> None:
 
 def test_update_segment_speaker_missing_returns_zero(tmp_dal: DAL) -> None:
     assert tmp_dal.update_segment_speaker(99999, "X") == 0
+
+
+# ── 2.B：set_take_status ──────────────────────────────────────────────────────
+
+
+def test_set_take_status_valid_updates_status(tmp_dal: DAL) -> None:
+    """set_take_status 成功更新 take.status，并写一条 manual.mark take_event。"""
+    sid = tmp_dal.create_scene("S1")
+    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tmp_dal.end_take(tid, 1060.0, "tbd")
+    tmp_dal.set_take_status(tid, "keeper")
+    take = tmp_dal.get_take(tid)
+    assert take is not None
+    assert take.status == "keeper"
+
+
+def test_set_take_status_writes_take_event(tmp_dal: DAL) -> None:
+    """set_take_status 写一条 event_type='manual.mark' 的 take_event，payload 含新 status。"""
+    sid = tmp_dal.create_scene("S1")
+    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tmp_dal.set_take_status(tid, "ng")
+    events = tmp_dal.list_take_events(tid, event_type="manual.mark")
+    assert len(events) == 1
+    assert events[0].payload == {"status": "ng"}
+
+
+def test_set_take_status_invalid_raises_value_error(tmp_dal: DAL) -> None:
+    """非法 status 值抛 ValueError（应用层校验，不依赖 DB CHECK）。"""
+    sid = tmp_dal.create_scene("S1")
+    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    with pytest.raises(ValueError, match="status"):
+        tmp_dal.set_take_status(tid, "invalid_status")
+
+
+# ── 2.B：update_take_meta ─────────────────────────────────────────────────────
+
+
+def test_update_take_meta_case_a_append_to_existing_scene(tmp_dal: DAL) -> None:
+    """情形 A：仅移场（不指定 take_number），追加到目标场 MAX+1。"""
+    sid1 = tmp_dal.create_scene("S1")
+    sid2 = tmp_dal.create_scene("S2")
+    # sid2 已有 take_number=1，移入后应追加为 2
+    tmp_dal.start_take(sid2, 1, 2000.0)
+    tid = tmp_dal.start_take(sid1, 1, 1000.0)
+    tmp_dal.update_take_meta(tid, scene_id=sid2)
+    take = tmp_dal.get_take(tid)
+    assert take is not None
+    assert take.scene_id == sid2
+    assert take.take_number == 2
+
+
+def test_update_take_meta_case_a_append_to_empty_scene(tmp_dal: DAL) -> None:
+    """情形 A：移到空场（无 take），take_number=1。"""
+    sid1 = tmp_dal.create_scene("S1")
+    sid2 = tmp_dal.create_scene("S2")
+    tid = tmp_dal.start_take(sid1, 1, 1000.0)
+    tmp_dal.update_take_meta(tid, scene_id=sid2)
+    take = tmp_dal.get_take(tid)
+    assert take is not None
+    assert take.scene_id == sid2
+    assert take.take_number == 1
+
+
+def test_update_take_meta_case_a_nonexistent_scene_raises(tmp_dal: DAL) -> None:
+    """情形 A：目标 scene 不存在，抛 ValueError。"""
+    sid = tmp_dal.create_scene("S1")
+    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    with pytest.raises(ValueError, match="scene"):
+        tmp_dal.update_take_meta(tid, scene_id=99999)
+
+
+def test_update_take_meta_case_b_swap_take_numbers(tmp_dal: DAL) -> None:
+    """情形 B：同场换号（目标号已占用），两条 take 交换编号，无 UNIQUE 报错。"""
+    sid = tmp_dal.create_scene("S1")
+    tid2 = tmp_dal.start_take(sid, 2, 1000.0)  # take_number=2
+    tid3 = tmp_dal.start_take(sid, 3, 1010.0)  # take_number=3
+    # 把 tid3（原号 3）改成 2（已被 tid2 占用）→ 两者交换
+    tmp_dal.update_take_meta(tid3, take_number=2)
+    take2 = tmp_dal.get_take(tid2)
+    take3 = tmp_dal.get_take(tid3)
+    assert take3 is not None and take3.take_number == 2
+    assert take2 is not None and take2.take_number == 3
+
+
+def test_update_take_meta_case_c_cross_scene_conflict_raises(tmp_dal: DAL) -> None:
+    """情形 C：跨场移动且目标 (scene,number) 已占用 → 抛 TakeNumberConflictError。"""
+    from backend.db.dal import TakeNumberConflictError
+
+    sid1 = tmp_dal.create_scene("S1")
+    sid2 = tmp_dal.create_scene("S2")
+    tid1 = tmp_dal.start_take(sid1, 1, 1000.0)
+    tmp_dal.start_take(sid2, 5, 2000.0)   # sid2 的 take_number=5 已占用
+    with pytest.raises(TakeNumberConflictError):
+        tmp_dal.update_take_meta(tid1, scene_id=sid2, take_number=5)
+
+
+def test_update_take_meta_shot_notes_partial_update(tmp_dal: DAL) -> None:
+    """改 shot 和 notes（含空串清空 notes），只改传入字段，其余保持原值。"""
+    sid = tmp_dal.create_scene("S1")
+    tid = tmp_dal.start_take(sid, 1, 1000.0, shot="Shot_A")
+    # 改 shot，清空 notes（传 ""）
+    tmp_dal.update_take_meta(tid, shot="Shot_B", notes="")
+    take = tmp_dal.get_take(tid)
+    assert take is not None
+    assert take.shot == "Shot_B"
+    assert take.notes == ""
+    # 只传 None 不改字段
+    tmp_dal.update_take_meta(tid, shot=None, notes=None)
+    take2 = tmp_dal.get_take(tid)
+    assert take2 is not None
+    assert take2.shot == "Shot_B"   # 保持上次的值
+
+
+def test_update_take_meta_writes_manual_edit_event(tmp_dal: DAL) -> None:
+    """update_take_meta 成功后写一条 event_type='manual.edit' 的 take_event。"""
+    sid = tmp_dal.create_scene("S1")
+    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tmp_dal.update_take_meta(tid, shot="Shot_X")
+    events = tmp_dal.list_take_events(tid, event_type="manual.edit")
+    assert len(events) == 1
+    payload = events[0].payload
+    assert "changed_fields" in payload
+    assert "shot" in payload["changed_fields"]
+    assert "conflict_resolution" in payload
+
+
+# ── 2.B：delete_take ─────────────────────────────────────────────────────────
+
+
+def test_delete_take_cascades_child_tables(tmp_dal: DAL) -> None:
+    """delete_take 后子表（transcript_segments/take_events/take_line_matches）全级联清除。"""
+    sid = tmp_dal.create_scene("S1")
+    scr_id = tmp_dal.insert_script(sid, "剧本")
+    lid = tmp_dal.insert_script_line(scr_id, 1, "HERO", "台词文本")
+    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    # 插入子表数据
+    tmp_dal.insert_segment(tid, 1, "SPEAKER_00", "hello", 0, 16000)
+    tmp_dal.insert_take_event(tid, "manual.mark", {"status": "ng"}, 1010.0)
+    tmp_dal.insert_take_line_match(tid, lid, "match", {})
+    # 删除 take
+    tmp_dal.delete_take(tid)
+    # take 本身不存在
+    assert tmp_dal.get_take(tid) is None
+    # 子表已清空
+    assert tmp_dal.list_segments(tid) == []
+    assert tmp_dal.list_take_events(tid) == []
+    assert tmp_dal.list_take_line_matches(tid) == []
+
+
+def test_delete_take_writes_audit_log(tmp_dal: DAL) -> None:
+    """delete_take 在 audit_log 留下一条 take.delete 记录，含被删 take 快照。"""
+    import json
+
+    sid = tmp_dal.create_scene("S1")
+    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tmp_dal.end_take(tid, 1060.0, "keeper")
+    tmp_dal.delete_take(tid)
+    # 通过 DAL 内部连接直接查（避免二次打开 WAL 文件产生竞争）
+    rows = tmp_dal._conn.execute(
+        "SELECT payload FROM audit_log WHERE action='take.delete' ORDER BY ts DESC;"
+    ).fetchall()
+    assert len(rows) >= 1
+    payload = json.loads(rows[0]["payload"])
+    assert payload["take_id"] == tid
+    assert payload["scene_id"] == sid
+    assert payload["take_number"] == 1
+    assert payload["status"] == "keeper"
+
+
+def test_delete_take_nonexistent_is_noop(tmp_dal: DAL) -> None:
+    """delete_take 传不存在的 take_id 静默 no-op，不抛异常。"""
+    tmp_dal.delete_take(99999)  # 不应抛异常
