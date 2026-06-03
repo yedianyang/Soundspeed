@@ -1,8 +1,10 @@
 import { useMemo, useState } from "react"
+import type { UseMutationResult } from "@tanstack/react-query"
 import { useQueryClient } from "@tanstack/react-query"
-import { ChevronRight, ChevronUp } from "lucide-react"
+import { Check, ChevronRight, ChevronUp } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
 import { Card, CardContent } from "@/components/ui/card"
 import {
   DropdownMenu,
@@ -12,31 +14,262 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { STATUS_DOT, STATUS_LABEL, MARK_ORDER } from "@/lib/constants"
-import { cn } from "@/lib/utils"
+import { cn, formatTakeLabel } from "@/lib/utils"
 import { mutedCard } from "@/lib/styles"
-import type { TakeDTO, TakeStatus, TranscriptSegmentDTO } from "@/types/api"
-import { useTake, correctSegmentSpeaker, takeQueryKey } from "@/lib/api"
+import type {
+  PatchTakeBody,
+  SceneDTO,
+  TakeDTO,
+  TakeStatus,
+  TranscriptSegmentDTO,
+} from "@/types/api"
+import {
+  useTake,
+  correctSegmentSpeaker,
+  takeQueryKey,
+  usePatchTake,
+  useScenes,
+} from "@/lib/api"
 import { useSessionStore } from "@/store/session"
 import { ScriptDiffView } from "./ScriptDiffView"
 import { SpeakerLabel } from "./SpeakerLabel"
 
+type PatchTakeMutation = UseMutationResult<
+  TakeDTO,
+  Error,
+  { takeId: number; body: PatchTakeBody },
+  unknown
+>
+
+// 三个可编辑 badge 共用的提交器：mutateAsync + 局部错误态，失败给轻提示不白屏。
+// 成功后 usePatchTake 已 invalidate takes → refetch → seed 桥接刷新卡片。
+function usePatchEditor(takeId: number, patchTake: PatchTakeMutation) {
+  const [open, setOpen] = useState(false)
+  const [error, setError] = useState(false)
+  const submit = async (body: PatchTakeBody) => {
+    setError(false)
+    try {
+      await patchTake.mutateAsync({ takeId, body })
+      setOpen(false)
+    } catch (err) {
+      // 失败（如目标 scene 不存在 → 404）：保持编辑器开启并标红提示，UI 以 refetch 为准。
+      console.error("修改 take 失败", err)
+      setError(true)
+    }
+  }
+  return { open, setOpen, error, setError, submit }
+}
+
+// Scene badge：下拉选另一个已有场 → PATCH {scene_id}（把这条 take 移到别的场）。
+function SceneBadge({
+  take,
+  scenes,
+  patchTake,
+}: {
+  take: TakeDTO
+  scenes: SceneDTO[]
+  patchTake: PatchTakeMutation
+}) {
+  const { open, setOpen, error, submit } = usePatchEditor(take.take_id, patchTake)
+  const current = scenes.find((s) => s.scene_id === take.scene_id)
+  const label = current ? current.scene_code : `#${take.scene_id}`
+  return (
+    <div className="inline-flex flex-col">
+      <DropdownMenu open={open} onOpenChange={setOpen}>
+        <DropdownMenuTrigger asChild>
+          <Badge variant="secondary" className="gap-1 cursor-pointer font-mono">
+            Scene {label}
+          </Badge>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-56">
+          <DropdownMenuLabel>移动到场次</DropdownMenuLabel>
+          {scenes.length === 0 && (
+            <DropdownMenuItem disabled>
+              <span className="text-muted-foreground text-xs">暂无场次</span>
+            </DropdownMenuItem>
+          )}
+          {scenes.map((s) => {
+            const isCurrent = s.scene_id === take.scene_id
+            return (
+              <DropdownMenuItem
+                key={s.scene_id}
+                className={cn(isCurrent && "bg-accent")}
+                onClick={() => {
+                  if (isCurrent) {
+                    setOpen(false)
+                    return
+                  }
+                  void submit({ scene_id: s.scene_id })
+                }}
+              >
+                <span className="font-mono text-xs flex-1 truncate">
+                  {s.scene_code}
+                </span>
+                {isCurrent && <Check className="size-3.5" />}
+              </DropdownMenuItem>
+            )
+          })}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {error && (
+        <span className="text-[10px] text-destructive">移动失败，请重试</span>
+      )}
+    </div>
+  )
+}
+
+// Take 编号 badge：点开输入框改数字 → PATCH {take_number}。撞号后端自动加后缀（200），refetch 后显示如 3+。
+function TakeNumberBadge({
+  take,
+  patchTake,
+}: {
+  take: TakeDTO
+  patchTake: PatchTakeMutation
+}) {
+  const { open, setOpen, error, submit } = usePatchEditor(take.take_id, patchTake)
+  const [draft, setDraft] = useState("")
+  const commit = () => {
+    const n = Number.parseInt(draft, 10)
+    if (Number.isFinite(n) && n > 0 && n !== take.take_number) {
+      void submit({ take_number: n })
+    } else {
+      setOpen(false)
+    }
+  }
+  return (
+    <div className="inline-flex flex-col">
+      <DropdownMenu
+        open={open}
+        onOpenChange={(o) => {
+          if (o) setDraft(String(take.take_number))
+          setOpen(o)
+        }}
+      >
+        <DropdownMenuTrigger asChild>
+          <Badge variant="secondary" className="gap-1 cursor-pointer font-mono">
+            Take {formatTakeLabel(take)}
+          </Badge>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-48 p-2">
+          <DropdownMenuLabel className="px-1">Take 编号</DropdownMenuLabel>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              commit()
+            }}
+            className="flex items-center gap-1.5 px-1"
+          >
+            <Input
+              autoFocus
+              type="number"
+              min={1}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              className="h-8 text-sm"
+            />
+            <Button type="submit" size="icon-sm" className="rounded-full">
+              <Check className="size-3.5" />
+            </Button>
+          </form>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {error && (
+        <span className="text-[10px] text-destructive">改编号失败，请重试</span>
+      )}
+    </div>
+  )
+}
+
+// Shot badge：点开输入框改 → PATCH {shot}（空串 = 清空 → null）。无 shot 时显示「+ Shot」占位。
+function ShotBadge({
+  take,
+  patchTake,
+}: {
+  take: TakeDTO
+  patchTake: PatchTakeMutation
+}) {
+  const { open, setOpen, error, submit } = usePatchEditor(take.take_id, patchTake)
+  const [draft, setDraft] = useState("")
+  const commit = () => {
+    const v = draft.trim()
+    const next = v ? v : null
+    if (next !== (take.shot ?? null)) {
+      void submit({ shot: next })
+    } else {
+      setOpen(false)
+    }
+  }
+  return (
+    <div className="inline-flex flex-col">
+      <DropdownMenu
+        open={open}
+        onOpenChange={(o) => {
+          if (o) setDraft(take.shot ?? "")
+          setOpen(o)
+        }}
+      >
+        <DropdownMenuTrigger asChild>
+          <Badge
+            variant="secondary"
+            className={cn(
+              "gap-1 cursor-pointer font-mono",
+              !take.shot && "text-muted-foreground/70",
+            )}
+          >
+            {take.shot ? `Shot ${take.shot}` : "+ Shot"}
+          </Badge>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-48 p-2">
+          <DropdownMenuLabel className="px-1">Shot</DropdownMenuLabel>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              commit()
+            }}
+            className="flex items-center gap-1.5 px-1"
+          >
+            <Input
+              autoFocus
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="例：2A（留空清除）"
+              className="h-8 text-sm"
+            />
+            <Button type="submit" size="icon-sm" className="rounded-full">
+              <Check className="size-3.5" />
+            </Button>
+          </form>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {error && (
+        <span className="text-[10px] text-destructive">改 Shot 失败，请重试</span>
+      )}
+    </div>
+  )
+}
+
 function StatusBadge({
   status,
+  pending,
   onChange,
 }: {
   status: TakeStatus
+  pending?: boolean
   onChange: (status: TakeStatus) => void
 }) {
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Badge variant="secondary" className="gap-1 cursor-pointer">
+      <DropdownMenuTrigger asChild disabled={pending}>
+        <Badge
+          variant="secondary"
+          className={cn("gap-1 cursor-pointer", pending && "opacity-50")}
+        >
           <span className={cn("size-1.5 rounded-full", STATUS_DOT[status])} />
           {STATUS_LABEL[status]}
         </Badge>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">
-        <DropdownMenuLabel>修改状态（本地）</DropdownMenuLabel>
+        <DropdownMenuLabel>修改状态</DropdownMenuLabel>
         {(MARK_ORDER as TakeStatus[]).map((s) => (
           <DropdownMenuItem
             key={s}
@@ -165,8 +398,10 @@ export function HistoryTakes() {
   // takes 由 AdminHome 的 useTakes + seedTakes 桥接填充（始终挂载），此处只读 store。
   const takesMap = useSessionStore((s) => s.takes)
 
-  // 本地展示态（scope guard：状态 override 不持久化，无端点）。
-  const [statusOverrides, setStatusOverrides] = useState<Record<number, TakeStatus>>({})
+  // 状态改动走 PATCH /takes/{id}（2.C），成功后 invalidate→refetch→seed 桥接刷新，不再本地 override。
+  const patchTake = usePatchTake()
+  // Scene badge 的下拉场列表 + scene_id→scene_code 显示映射。
+  const { data: scenes = [] } = useScenes()
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   // 本会话纠正过的 take（放父组件，避免 TakeDetail 折叠 unmount 丢失提示态）。
   const [correctedTakes, setCorrectedTakes] = useState<Set<number>>(new Set())
@@ -175,7 +410,10 @@ export function HistoryTakes() {
     (a, b) => a.scene_id - b.scene_id || a.take_number - b.take_number
   )
 
-  const getStatus = (t: TakeDTO) => statusOverrides[t.take_id] ?? t.status
+  const handleChangeStatus = (take: TakeDTO, status: TakeStatus) => {
+    if (status === take.status) return
+    patchTake.mutate({ takeId: take.take_id, body: { status } })
+  }
 
   const toggleExpand = (id: number) => {
     setExpanded((prev) => {
@@ -207,19 +445,16 @@ export function HistoryTakes() {
             <CardContent className="p-4 space-y-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="font-mono text-xs text-muted-foreground">
-                    Scene {take.scene_id} · Take {take.take_number}
-                  </span>
-                  {take.shot && (
-                    <span className="font-mono text-[10px] text-muted-foreground/70">
-                      {take.shot}
-                    </span>
-                  )}
+                  <SceneBadge take={take} scenes={scenes} patchTake={patchTake} />
+                  <ShotBadge take={take} patchTake={patchTake} />
+                  <TakeNumberBadge take={take} patchTake={patchTake} />
                   <StatusBadge
-                    status={getStatus(take)}
-                    onChange={(s) =>
-                      setStatusOverrides((prev) => ({ ...prev, [take.take_id]: s }))
+                    status={take.status}
+                    pending={
+                      patchTake.isPending &&
+                      patchTake.variables?.takeId === take.take_id
                     }
+                    onChange={(s) => handleChangeStatus(take, s)}
                   />
                 </div>
                 <Button

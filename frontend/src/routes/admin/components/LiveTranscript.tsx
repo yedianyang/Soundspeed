@@ -1,5 +1,5 @@
 import { speakerColor } from "@/lib/constants"
-import { cn } from "@/lib/utils"
+import { cn, formatTakeLabel } from "@/lib/utils"
 import { useSessionStore, type LiveSeg } from "@/store/session"
 import { TakeDivider } from "./TakeDivider"
 
@@ -14,7 +14,12 @@ interface RenderSeg extends LiveSeg {
 
 export function LiveTranscript() {
   const segments = useSessionStore((s) => s.segments)
-  const currentTake = useSessionStore((s) => s.currentTake)
+  // 当前 take 从 currentTakeId + takes Map 派生（编号 + 后缀），录制态读 isRecording。
+  const currentTakeId = useSessionStore((s) => s.currentTakeId)
+  const isRecording = useSessionStore((s) => s.isRecording)
+  const currentTake = useSessionStore((s) =>
+    currentTakeId != null ? s.takes.get(currentTakeId) : undefined,
+  )
 
   const merged: RenderSeg[] = [
     ...segments.ch1.map((s, i) => ({ ...s, ch: 1 as const, idx: i })),
@@ -25,8 +30,8 @@ export function LiveTranscript() {
 
   return (
     <div className="px-4 py-4 space-y-4">
-      {currentTake.take_number != null && (
-        <TakeDivider no={currentTake.take_number} />
+      {currentTake?.take_number != null && (
+        <TakeDivider label={formatTakeLabel(currentTake)} />
       )}
 
       {hasContent ? (
@@ -53,7 +58,7 @@ export function LiveTranscript() {
         </div>
       ) : (
         <p className="text-sm text-muted-foreground/60 text-center py-8">
-          {currentTake.recording ? "等待转录…" : "未在录制"}
+          {isRecording ? "等待转录…" : "未在录制"}
         </p>
       )}
     </div>

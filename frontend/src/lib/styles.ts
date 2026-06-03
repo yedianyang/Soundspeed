@@ -22,3 +22,18 @@ export function miniPill(tone: keyof typeof pillTone = "neutral", className?: st
  * 纯样式去重，视觉与原 inline 串保持一致。
  */
 export const mutedCard = "rounded-4xl bg-muted/50 shadow-none ring-0 py-0"
+
+/**
+ * 底栏 Scene / Shot / Take 三个下拉按钮的统一样式（A2）。
+ * 收敛到更克制的那套（muted/60 底 + border/60），消除原先 Take 单独用 bg-background shadow-sm
+ * 造成的视觉不一致。尺寸/间距/圆角一致，调用处只追加 disabled 态类。
+ */
+export const stageButton =
+  "flex-1 sm:flex-none sm:w-24 min-w-0 gap-1 h-9 px-2.5 rounded-full text-xs border border-border/60 bg-muted/60 active:scale-95 transition-transform"
+
+/**
+ * 「录音中锁住」遮罩（E）：区别于普通灰色 disabled。
+ * 淡红色调 + 微红边框，让人一眼看出是录制锁定而非功能损坏。与普通 opacity-50 互斥使用。
+ */
+export const recordingDisabled =
+  "opacity-100 bg-destructive/10 border-destructive/30 text-destructive/70 cursor-not-allowed"

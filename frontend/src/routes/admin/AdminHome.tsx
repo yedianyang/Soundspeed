@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type TouchEvent } from "react"
+import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import {
   Eye,
   Folder,
@@ -12,10 +13,23 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import BottomControlBar from "@/components/admin/BottomControlBar"
 import { INPUT_DEVICE, INPUT_CHANNELS } from "@/data/mock"
 import { MARK_ORDER } from "@/lib/constants"
-import { cn } from "@/lib/utils"
+import { cn, formatTakeLabel } from "@/lib/utils"
 import type { Status } from "@/types/take"
-import type { LlmState } from "@/types/api"
-import { endTake, pickActiveScene, startTake, useScenes, useTakes } from "@/lib/api"
+import type { LlmState, TakeStatus, TakeDTO } from "@/types/api"
+import {
+  pickActiveScene,
+  takesQueryKey,
+  useActivateScene,
+  useCreateScene,
+  useDeleteTake,
+  useEndTake,
+  usePatchTake,
+  useRestoreTake,
+  useScenes,
+  useStartTake,
+  useTakes,
+} from "@/lib/api"
+import { ApiError } from "@/lib/api"
 import { useLiveConnection } from "@/hooks/useLiveConnection"
 import { useSessionStore } from "@/store/session"
 import { StatusChip, LevelMeter } from "./components/StatusChip"
@@ -24,8 +38,62 @@ import { ScriptPanel } from "./components/ScriptPanel"
 import { LLMFeedback } from "./components/LLMFeedback"
 import { HistoryTakes } from "./components/HistoryTakes"
 import SettingsDialog from "@/components/admin/SettingsDialog"
+import CreateSceneDialog from "@/components/admin/CreateSceneDialog"
 
 const MOBILE_TABS = ["live", "script", "history", "llm"] as const
+
+// 底部「工作槽」（spec §16）：一个待录描述符 {scene_id, shot, take_number}，独立于 History 已存的
+// take 行，不绑定任何 take_id。底部 Scene/Shot/Take 三个 badge 读它；REC/Next 在它的 (scene_id, shot)
+// 下调 start_take。录制指示器仍读 currentTakeRecord（实际在录的那条），两者解耦。
+interface WorkSlot {
+  scene_id: number
+  shot: string
+  take_number: number
+}
+
+// shot 归一：null/undefined/'' 都当 ''（空 shot 边角场景与 NULL 等价，spec §16 决策 1）。
+const normShot = (shot: string | null | undefined): string => shot ?? ""
+
+// 从一组 take 里找 (scene_id, shot) 组的最新 live take：scene 匹配、shot 归一后匹配、
+// deleted_at==null、take_number 最大那条（spec §16「最新 live take」定义）。
+function latestLiveTakeInGroup(
+  takes: Iterable<TakeDTO>,
+  sceneId: number,
+  shot: string,
+): TakeDTO | undefined {
+  let best: TakeDTO | undefined
+  for (const t of takes) {
+    if (t.scene_id !== sceneId) continue
+    if (normShot(t.shot) !== shot) continue
+    if (t.deleted_at != null) continue
+    if (!best || t.take_number > best.take_number) best = t
+  }
+  return best
+}
+
+// 某场内全局最新 live take：scene 匹配、未软删、take_id 最大那条（跨 shot，呈现该场最近录的）。
+function latestLiveTakeInScene(
+  takes: Iterable<TakeDTO>,
+  sceneId: number,
+): TakeDTO | undefined {
+  let best: TakeDTO | undefined
+  for (const t of takes) {
+    if (t.scene_id !== sceneId) continue
+    if (t.deleted_at != null) continue
+    if (!best || t.take_id > best.take_id) best = t
+  }
+  return best
+}
+
+// 全局最新 live take：所有 live take 里 take_id 最大那条（启动初始化用）。
+function latestLiveTakeGlobal(takes: Iterable<TakeDTO>): TakeDTO | undefined {
+  let best: TakeDTO | undefined
+  for (const t of takes) {
+    if (t.deleted_at != null) continue
+    if (!best || t.take_id > best.take_id) best = t
+  }
+  return best
+}
 
 // llm.status → header LLM chip 展示（spec §3.5）。
 const LLM_CHIP: Record<LlmState, { tone: "ok" | "warn"; detail: string }> = {
@@ -56,17 +124,98 @@ export default function AdminHome() {
     if (takesData) seedTakes(takesData)
   }, [takesData, seedTakes])
 
-  const currentTake = useSessionStore((s) => s.currentTake)
-  const startRecordingLocal = useSessionStore((s) => s.startRecordingLocal)
-  const stopRecordingLocal = useSessionStore((s) => s.stopRecordingLocal)
+  const takesMap = useSessionStore((s) => s.takes)
+  const setCurrentTakeId = useSessionStore((s) => s.setCurrentTakeId)
+  const resetSegments = useSessionStore((s) => s.resetSegments)
   const llmState = useSessionStore((s) => s.llm.state)
 
-  // ---- recording state (lifted from BottomControlBar) ----
-  const [isRecording, setIsRecording] = useState(false)
-  const [mark, setMark] = useState<Status>("ng")
+  // REC 开关：纯前端，与「建 take」解耦。store 单一来源，LiveTranscript 等共享读。
+  const isRecording = useSessionStore((s) => s.isRecording)
+  const setRecording = useSessionStore((s) => s.setRecording)
+
+  const queryClient = useQueryClient()
+
+  // ---- scene / take mutations（2.C / 2.D）----
+  const activateScene = useActivateScene()
+  const createScene = useCreateScene()
+  const patchTake = usePatchTake()
+  const deleteTake = useDeleteTake()
+  const restoreTake = useRestoreTake()
+  const startTakeMut = useStartTake()
+  const endTakeMut = useEndTake()
+  const [createSceneOpen, setCreateSceneOpen] = useState(false)
+
+  // 当前 take 派生：活跃场内、未软删、take_id 最大（autoincrement 单调，take_number 会被复用故不可作排序键）
+  // 的那条。REC/建 take 解耦后这是「控件作用的当前 take」唯一来源——跟着 Next Take 建的空块、REC 建的块、
+  // 切场后的最新块走，与 isRecording 无关。
+  const currentTakeRecord: TakeDTO | undefined = (() => {
+    if (!activeScene) return undefined
+    let latest: TakeDTO | undefined
+    for (const t of takesMap.values()) {
+      if (t.scene_id !== activeScene.scene_id) continue
+      if (t.deleted_at != null) continue
+      if (!latest || t.take_id > latest.take_id) latest = t
+    }
+    return latest
+  })()
+  const currentTakeId = currentTakeRecord?.take_id ?? null
+
+  // 派生的 currentTakeId 同步进 store，供 applyAsr 的跨-take 守卫读（单一来源，不与 store 内部兜底分叉）。
+  useEffect(() => {
+    setCurrentTakeId(currentTakeId)
+  }, [currentTakeId, setCurrentTakeId])
+
+  // 「当前 take 是否已结束」：以 refetch 后的 end_ts 为准（take.changed 不带 end_ts，见 useStartTake 注释）。
+  const currentTakeEnded = currentTakeRecord
+    ? currentTakeRecord.end_ts !== null
+    : true
+
+  // ---- 工作槽 workSlot（spec §16）----
+  // 待录描述符，与 currentTakeRecord 解耦。底部 Scene/Shot/Take badge 读它；录制指示器读 currentTakeRecord。
+  //
+  // 两段结构（不用 effect 播种，避免 setState-in-effect + 被 refetch 误触发重播）：
+  //   - derivedInitialSlot：pristine-load 派生值。仅在用户尚未交互时生效。启动规则——全局最新 live take
+  //     的 {scene_id, shot, take_number}；其不在活跃场或无 live take → 活跃场最新 live take，再退默认
+  //     {shot:"1", take_number:1}。scene_id 始终 pin 到 activeScene（后端 start_take 校验 scene==active，
+  //     播种到非活跃场会 REC 409）。
+  //   - workSlotOverride：用户一旦交互（任一 handler）即写它，此后永久压住 derived——refetch 抹不掉
+  //     用户的切场/换镜/REC 结果（advisor 陷阱 1）。
+  // workSlot = override ?? derived。8 个事件全部 commit override（REC-reuse 分支靠下方 freeze 补上）。
+  const [workSlotOverride, setWorkSlotOverride] = useState<WorkSlot | null>(null)
+  const derivedInitialSlot = useMemo<WorkSlot | null>(() => {
+    if (!activeScene) return null
+    const g = latestLiveTakeGlobal(takesMap.values())
+    if (g && g.scene_id === activeScene.scene_id) {
+      return { scene_id: g.scene_id, shot: normShot(g.shot), take_number: g.take_number }
+    }
+    const s = latestLiveTakeInScene(takesMap.values(), activeScene.scene_id)
+    return s
+      ? { scene_id: activeScene.scene_id, shot: normShot(s.shot), take_number: s.take_number }
+      : { scene_id: activeScene.scene_id, shot: "1", take_number: 1 }
+  }, [activeScene, takesMap])
+  const workSlot = workSlotOverride ?? derivedInitialSlot
+  const setWorkSlot = setWorkSlotOverride
+
+  // workSlot 组（scene_id, shot）的最新 live take：删（事件 7）的作用对象。底部展示的是 workSlot，
+  // 删必须删 workSlot 组里那条，而非 currentTakeRecord（活跃场跨 shot 的 max-take_id）——换镜后两者
+  // 指向不同 take，删 currentTakeRecord 会删掉用户看不到、没指向的那条（advisor 指出的 §16 事件 7 偏差）。
+  const slotLatestTake: TakeDTO | undefined = workSlot
+    ? latestLiveTakeInGroup(takesMap.values(), workSlot.scene_id, workSlot.shot)
+    : undefined
+
+  // ---- recording 计时 / 错误态 ----
   const [elapsed, setElapsed] = useState(0)
   const [recError, setRecError] = useState<string | null>(null)
   const elapsedRef = useRef(elapsed)
+
+  // start/end take inflight。useStartTake/useEndTake 的 onSuccess 返回 invalidateQueries 的 promise，
+  // react-query v5 会等它 resolve 才退出 pending（useTakes 始终挂载，invalidate 必触发真实 refetch），
+  // 故 isPending 覆盖到 ["takes"] refetch 落定。覆盖此窗口禁 REC/Next Take，避免 end_ts 尚未刷新时
+  // 误判「未结束块可复用」（快速点击竞态）。
+  const takeBlockBusy = startTakeMut.isPending || endTakeMut.isPending
+
+  // Mark 显示当前 take 的 status（权威来自后端，经 take.changed / refetch 回灌）。无 take → 占位 ng。
+  const mark: Status = currentTakeRecord?.status ?? "ng"
 
   useEffect(() => {
     elapsedRef.current = elapsed
@@ -81,43 +230,213 @@ export default function AdminHome() {
     return () => clearInterval(id)
   }, [isRecording])
 
+  // refetch 后从 query cache（非 store——seedTakes 由 effect 在后续 render 异步播种，await 后读不到）
+  // 取某 (scene, shot) 组的最新 live take，更新 workSlot。useTakes() 无参，cache key = ["takes", null]。
+  const syncWorkSlotFromCacheToGroup = (sceneId: number, shot: string) => {
+    const fresh = queryClient.getQueryData<TakeDTO[]>(takesQueryKey())
+    const latest = fresh ? latestLiveTakeInGroup(fresh, sceneId, shot) : undefined
+    if (latest) {
+      setWorkSlot({ scene_id: sceneId, shot, take_number: latest.take_number })
+    } else {
+      // 兜底：refetch 还没落定就用待录首条，REC 实际建的号以后端为准。
+      setWorkSlot({ scene_id: sceneId, shot, take_number: 1 })
+    }
+  }
+
+  // ---- REC 按钮（事件 2 / 事件 3，独立开关，与建 take 解耦）----
+  // OFF→ON：在 (workSlot.scene_id, workSlot.shot) 调 start_take（前端传 scene+shot，不传 number，
+  //         后端按 (scene,shot) 算 MAX+1）。沿用 REC/take 解耦：若 currentTakeRecord 未结束且其
+  //         (scene, shot) 与 workSlot 一致 → 复用该空块，不新建；否则建新块。新块经 refetch 回来后
+  //         workSlot 更新为该组最新 live take 的 {scene_id, shot, take_number}。
+  // ON→OFF：endTake，workSlot 不变。
   const handleToggleRecording = async () => {
     if (isRecording) {
-      // 先停本地（UX 立即响应），再通知后端；失败仅记日志，不回滚（take 已开始）。
-      setIsRecording(false)
-      stopRecordingLocal()
+      setRecording(false)
       try {
-        await endTake()
+        await endTakeMut.mutateAsync()
       } catch (err) {
         console.error("endTake failed", err)
+        // 后端 take 已起，前端不回滚 recording=false（已停录）；仅记日志。
       }
       return
     }
 
-    // 开始：必须有活跃场次。
-    if (!activeScene) {
+    if (!activeScene || !workSlot) {
       setRecError("无活跃场次")
       return
     }
     setRecError(null)
-    // 先翻转本地态（recording=true, take_id=null），再 POST：后端在返回 HTTP 响应前就 publish
-    // take.changed，WS 帧往往早于 await 解析到达。若等 await 后再置 recording，绑定门会错过这帧、
-    // take_id 永不绑定。失败时回滚。
-    startRecordingLocal(activeScene.scene_id, null)
+
+    // Freeze：录制一旦开始即把当前 workSlot 提交进 override，压住 derivedInitialSlot。否则在「pristine
+    // load → REC(复用未结束块) → Stop → Delete」序列里 override 仍为 null，derived 会随 takesMap 退回上
+    // 一条，违反 §16 事件 7「删后维持被删的号，不回退」。create 分支下方还会再按 cache 刷一次（无害）。
+    setWorkSlot(workSlot)
+
+    // workSlot.scene_id 始终 pin 到 activeScene（handleSelectScene 同步两者），故用 activeScene.scene_id
+    // 调 start_take 满足后端 scene_not_active 校验。
+    const sceneId = activeScene.scene_id
+    const shot = workSlot.shot
+
+    // 复用条件收紧（advisor 陷阱 3）：未结束块的 (scene, shot) 必须与 workSlot 一致才复用，
+    // 否则换镜后（事件 6 只改 workSlot 不发 API）会把音频录进旧 shot 的空块。
+    const reuseUnended =
+      currentTakeRecord != null &&
+      !currentTakeEnded &&
+      currentTakeRecord.scene_id === sceneId &&
+      normShot(currentTakeRecord.shot) === shot
+
     setElapsed(0)
-    setIsRecording(true)
+    resetSegments()
+    setRecording(true)
+
+    if (reuseUnended) {
+      // 复用未结束的空块（同 scene+shot 的 Next Take 块）：不新建，直接录。workSlot 已指向它。
+      return
+    }
+    // 否则建新块。start_take 只传 scene+shot，后端取号。失败回滚 recording。
     try {
-      await startTake(activeScene.scene_id, null)
+      await startTakeMut.mutateAsync({ sceneId, shot: shot === "" ? null : shot })
+      // refetch 已落定（mutateAsync await 含 onSuccess 的 invalidate→refetch）：把 workSlot 推到新块。
+      syncWorkSlotFromCacheToGroup(sceneId, shot)
     } catch (err) {
       console.error("startTake failed", err)
-      stopRecordingLocal()
-      setIsRecording(false)
+      setRecording(false)
       setRecError("开始录制失败")
     }
   }
 
+  // Mark：循环 MARK_ORDER → PATCH 当前 take 的 status。无 take 则 no-op（按钮也已禁用）。
   const handleCycleMark = () => {
-    setMark((prev) => MARK_ORDER[(MARK_ORDER.indexOf(prev) + 1) % MARK_ORDER.length])
+    if (currentTakeId == null) return
+    const current = (currentTakeRecord?.status ?? "ng") as Status
+    const next = MARK_ORDER[
+      (MARK_ORDER.indexOf(current) + 1) % MARK_ORDER.length
+    ] as TakeStatus
+    patchTake.mutate({ takeId: currentTakeId, body: { status: next } })
+  }
+
+  // ---- scene 切换 / 新建（2.C，bootstrap：选场即 activate，使其成为活跃场再起拍）----
+  // 事件 5（改 Scene 到 S）：不 PATCH 任何 take，不动 History。activate 成功后按决策 2 重置 workSlot：
+  //   S 有 live take → workSlot = S 内全局最新 live take 的 {shot, take_number}（呈现已录的那条）；
+  //   S 空 → {scene_id: S, shot: "1", take_number: 1}。
+  // workSlot 在 onSuccess 里改（避免切场 409 时误改），从 store takesMap 本地算（takes 全场已加载）。
+  const handleSelectScene = (sceneId: number) => {
+    setRecError(null)
+    activateScene.mutate(sceneId, {
+      onSuccess: () => {
+        const latest = latestLiveTakeInScene(takesMap.values(), sceneId)
+        setWorkSlot(
+          latest
+            ? { scene_id: sceneId, shot: normShot(latest.shot), take_number: latest.take_number }
+            : { scene_id: sceneId, shot: "1", take_number: 1 },
+        )
+      },
+      onError: (err) => {
+        // 录制中切场后端必 409；前端已 disable，这里兜底提示。
+        if (err instanceof ApiError && err.status === 409) {
+          setRecError("录制中不可切场")
+        } else {
+          setRecError("切场失败")
+        }
+      },
+    })
+  }
+
+  // 新建场：创建后随即 activate（与「选场即活跃」一致），关闭弹窗。
+  // 复用已存在场也返回 scene_id；走 handleSelectScene 统一 activate + 按决策 2 重置 workSlot
+  //（新建空场 → {shot:"1", take_number:1}；复用已有场 → 该场最新 live take）。
+  const handleCreateScene = (sceneCode: string) => {
+    createScene.mutate(
+      { scene_code: sceneCode },
+      {
+        onSuccess: (res) => {
+          setCreateSceneOpen(false)
+          handleSelectScene(res.scene_id)
+        },
+      },
+    )
+  }
+
+  // ---- 改 Shot（事件 6，同场 free-text 输入）----
+  // 语义修正：改 shot = 换镜，不是改历史。只更新 workSlot，不 PATCH 任何已存 take、不动 History。
+  //   (scene, H) 有 live take → workSlot.shot=H、take_number=该组最新 live take 的号（恢复，决策 2）；
+  //   (scene, H) 无 live take → workSlot.shot=H、take_number=1（待录首条）。
+  // 换镜前若还没录，只改待录槽，不产生孤儿 take。
+  const handleChangeShot = (shotInput: string | null) => {
+    if (!workSlot) return
+    const shot = normShot(shotInput)
+    const latest = latestLiveTakeInGroup(takesMap.values(), workSlot.scene_id, shot)
+    setWorkSlot({
+      scene_id: workSlot.scene_id,
+      shot,
+      take_number: latest ? latest.take_number : 1,
+    })
+  }
+
+  // ---- Next take（事件 4）：在同 (scene, shot) 建一个新的空 take 块，不自动开录。----
+  // shot 取自 workSlot（换镜后是新 shot，不是 currentTakeRecord 的旧 shot）。若有未结束的当前 take
+  //（Next-Take-after-Next-Take）先 endTake 再 startTake。录制中本按钮已禁用。新块经 refetch 回来后
+  // workSlot 更新到该组最新 live take。
+  const handleNextTake = async () => {
+    if (!activeScene || !workSlot) {
+      setRecError("无活跃场次")
+      return
+    }
+    setRecError(null)
+    const sceneId = activeScene.scene_id
+    const shot = workSlot.shot
+    try {
+      if (currentTakeRecord != null && !currentTakeEnded) {
+        await endTakeMut.mutateAsync()
+      }
+      await startTakeMut.mutateAsync({ sceneId, shot: shot === "" ? null : shot })
+      syncWorkSlotFromCacheToGroup(sceneId, shot)
+    } catch (err) {
+      console.error("nextTake failed", err)
+      setRecError("起下一条 take 失败")
+    }
+  }
+
+  // ---- Delete（事件 7）：删 workSlot 组最新一条 take（软删，二次确认在 BottomControlBar 内）。----
+  // 作用对象 = slotLatestTake（workSlot 组的最新 live take），不是 currentTakeId——换镜后两者可能指向
+  // 不同 take，必须删用户底部看到的那条。workSlot 维持不变（不回退到上一条）：删后 REC（事件 8）后端
+  // vacate 让软删行加 + 让位，新 live take 拿干净同号位（前端正常走事件 2）。故这里刻意不动 workSlot。
+  const handleDeleteTake = () => {
+    if (!slotLatestTake) return
+    const takeId = slotLatestTake.take_id
+    deleteTake.mutate(takeId, {
+      onSuccess: () => pushUndo(takeId),
+      onError: (err) => {
+        if (err instanceof ApiError && err.status === 409) {
+          setRecError("录制中不可删除")
+        } else {
+          setRecError("删除失败")
+        }
+      },
+    })
+  }
+
+  // ---- 删除撤销栈（深度 8）：记最近删除的 take_id，撤销按钮弹栈顶 → restoreTake。----
+  const UNDO_DEPTH = 8
+  const [undoStack, setUndoStack] = useState<number[]>([])
+  const pushUndo = (takeId: number) =>
+    setUndoStack((prev) => [...prev, takeId].slice(-UNDO_DEPTH))
+
+  const handleUndoDelete = () => {
+    if (undoStack.length === 0 || restoreTake.isPending) return
+    const takeId = undoStack[undoStack.length - 1]
+    restoreTake.mutate(takeId, {
+      onSuccess: () => {
+        setRecError(null)
+        setUndoStack((prev) => prev.slice(0, -1))
+      },
+      onError: (err) => {
+        // 编号已被复用 → 后端三元 UNIQUE 报 500（或其他错误）。优雅处理：提示 + 移出栈，不白屏。
+        console.error("restoreTake failed", err)
+        setRecError("该 take 的编号已被占用，无法撤销")
+        setUndoStack((prev) => prev.slice(0, -1))
+      },
+    })
   }
 
   // ---- mobile swipe ----
@@ -183,10 +502,10 @@ export default function AdminHome() {
               <span className="text-foreground">
                 {activeScene ? activeScene.scene_code : "—"}
               </span>
-              {currentTake.take_number != null && (
-                <span>· T{currentTake.take_number}</span>
+              {currentTakeRecord?.take_number != null && (
+                <span>· T{formatTakeLabel(currentTakeRecord)}</span>
               )}
-              {currentTake.shot && <span>· {currentTake.shot}</span>}
+              {currentTakeRecord?.shot && <span>· {currentTakeRecord.shot}</span>}
             </div>
           </div>
 
@@ -282,14 +601,58 @@ export default function AdminHome() {
       {/* ============ Bottom ============ */}
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
 
+      <CreateSceneDialog
+        open={createSceneOpen}
+        onOpenChange={setCreateSceneOpen}
+        onCreate={handleCreateScene}
+        pending={createScene.isPending || activateScene.isPending}
+      />
+
       <BottomControlBar
         isRecording={isRecording}
         onToggleRecording={handleToggleRecording}
         mark={mark}
         onCycleMark={handleCycleMark}
         elapsed={elapsed}
-        recDisabled={!activeScene && !isRecording}
-        recHint={recError ?? (!activeScene ? "无活跃场次" : null)}
+        // bootstrap：切场期间 activeScene 还没刷成新场，此时禁 REC 避免 start 用旧活跃场 → 409
+        // scene_not_active。建 take inflight（含 refetch）期间也禁，避免 end_ts 未刷新时误判复用（竞态）。
+        // 录制中不受 takeBlockBusy 限（要能停录）。
+        recDisabled={
+          (!activeScene || activateScene.isPending || takeBlockBusy) && !isRecording
+        }
+        recHint={
+          recError ??
+          (activateScene.isPending && !isRecording
+            ? "切场中…"
+            : !activeScene
+              ? "无活跃场次"
+              : null)
+        }
+        scenes={scenes ?? []}
+        activeScene={activeScene}
+        // ── 底部 Scene/Shot/Take badge 读 workSlot（待录描述符）──
+        // workSlot 的 shot 内部用 '' 表示空，显示成 "—"；take_number 直接拼成 label（无 suffix，
+        // workSlot 不带 suffix，formatTakeLabel 默认 suffix=''）。
+        slotShot={workSlot ? (workSlot.shot === "" ? null : workSlot.shot) : null}
+        slotTakeLabel={
+          workSlot ? formatTakeLabel({ take_number: workSlot.take_number }) : "—"
+        }
+        slotTakeNumber={workSlot?.take_number ?? null}
+        // ── Mark 的作用对象：currentTakeRecord（活跃场 max-take_id），与 workSlot 解耦 ──
+        currentTakeId={currentTakeId}
+        // ── Delete 的作用对象：workSlot 组最新 live take。空组 → 无可删 → 禁用删除（事件 7）──
+        canDeleteSlot={slotLatestTake != null}
+        onSelectScene={handleSelectScene}
+        onCreateScene={() => setCreateSceneOpen(true)}
+        onChangeShot={handleChangeShot}
+        onNextTake={handleNextTake}
+        nextTakeBusy={takeBlockBusy}
+        onDeleteTake={handleDeleteTake}
+        canUndo={undoStack.length > 0}
+        onUndoDelete={handleUndoDelete}
+        undoBusy={restoreTake.isPending}
+        sceneBusy={activateScene.isPending}
+        takeBusy={patchTake.isPending || deleteTake.isPending}
       />
     </div>
   )
