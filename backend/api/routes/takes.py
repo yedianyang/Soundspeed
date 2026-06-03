@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backend.api.auth import require_admin
 from backend.core.events import TAKE_END, TAKE_START, TakeEndPayload, TakeStartPayload
+from backend.pipelines.note_parse import NoteParseError, parse_note
 
 router = APIRouter(prefix="/api/v1", tags=["takes"])
 
@@ -247,3 +248,164 @@ async def get_scene_script(
     raw_lines = dal.list_script_lines(script_id)
     lines = [ScriptLineOut(line_no=r["line_no"], character=r["character"], text=r["text"]) for r in raw_lines]
     return {"script": ScriptOut(script_id=script_id, version=version, lines=lines)}
+
+
+# ── Note 端点（4.C）────────────────────────────────────────────────────────────
+
+
+class NoteCreateBody(BaseModel):
+    """POST /notes 请求体。"""
+
+    text: str
+    ts: float | None = None
+
+
+class NoteOut(BaseModel):
+    """单条 note 事件响应投影。"""
+
+    event_id: int
+    take_id: int
+    scene_code: str | None
+    take_number: int | None
+    category: str
+    content: str
+    raw_text: str
+    ts: float
+
+
+class NoteListOut(BaseModel):
+    """GET /takes/{take_id}/notes 响应。"""
+
+    take_id: int
+    notes_aggregated: str | None
+    events: list[NoteOut]
+
+
+@router.post("/notes", status_code=201)
+async def create_note(
+    body: NoteCreateBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> NoteOut:
+    """创建 note：解析文本 → 定位 take → 写库，返回 NoteOut。"""
+    dal = request.app.state.orchestrator.dal
+    session = request.app.state.orchestrator.session
+    ts = body.ts or time.time()
+
+    # 1. 解析
+    try:
+        note = parse_note(body.text, ts)
+    except NoteParseError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 2. 定位 take_id
+    if note.scene_code is not None and note.take_number is not None:
+        scenes = dal.list_scenes()
+        scene_id = None
+        for s in scenes:
+            if s["scene_code"] == note.scene_code:
+                scene_id = s["scene_id"]
+                break
+        if scene_id is None:
+            raise HTTPException(status_code=404, detail=f"scene not found: {note.scene_code}")
+        takes = dal.list_takes(scene_id)
+        take_id = None
+        for t in takes:
+            if t.take_number == note.take_number:
+                take_id = t.take_id
+                break
+        if take_id is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"take not found: {note.scene_code} #{note.take_number}",
+            )
+    else:
+        if not session.take_active or session.take_id is None:
+            raise HTTPException(status_code=409, detail="no active take")
+        take_id = session.take_id
+
+    # 3. 写库
+    event_id = dal.insert_note(
+        take_id=take_id,
+        category=note.category,
+        content=note.content,
+        raw_text=note.raw_text,
+        ts=note.ts,
+    )
+
+    # 4. 查询 scene_code / take_number 用于响应
+    take = dal.get_take(take_id)
+    scene_code_out: str | None = None
+    take_number_out: int | None = take.take_number if take else None
+    if take:
+        scenes = dal.list_scenes()
+        for s in scenes:
+            if s["scene_id"] == take.scene_id:
+                scene_code_out = s.get("scene_code")
+                break
+
+    return NoteOut(
+        event_id=event_id,
+        take_id=take_id,
+        scene_code=scene_code_out,
+        take_number=take_number_out,
+        category=note.category,
+        content=note.content,
+        raw_text=note.raw_text,
+        ts=note.ts,
+    )
+
+
+@router.get("/takes/{take_id}/notes")
+async def get_take_notes(
+    take_id: int,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> NoteListOut:
+    """返回指定 take 的 note 汇总 + 事件列表。"""
+    dal = request.app.state.orchestrator.dal
+
+    take = dal.get_take(take_id)
+    if take is None:
+        raise HTTPException(status_code=404, detail="take not found")
+
+    events = dal.list_notes(take_id)
+
+    # 查 scene_code + take_number
+    scene_code: str | None = None
+    if take:
+        scenes = dal.list_scenes()
+        for s in scenes:
+            if s["scene_id"] == take.scene_id:
+                scene_code = s.get("scene_code")
+                break
+    take_number: int | None = take.take_number if take else None
+
+    events_out: list[NoteOut] = []
+    for evt in events:
+        payload: dict = evt.payload if isinstance(evt.payload, dict) else {}
+        cat = payload.get("category", "note")
+        ct = payload.get("content", "")
+        raw = payload.get("raw_text", "")
+        if not (isinstance(cat, str) and isinstance(ct, str) and isinstance(raw, str)):
+            cat = str(cat) if cat else "note"
+            ct = str(ct) if ct else ""
+            raw = str(raw) if raw else ""
+        events_out.append(
+            NoteOut(
+                event_id=evt.event_id,
+                take_id=evt.take_id,
+                scene_code=scene_code,
+                take_number=take_number,
+                category=cat,
+                content=ct,
+                raw_text=raw,
+                ts=evt.ts,
+            )
+        )
+
+    return NoteListOut(
+        take_id=take_id,
+        notes_aggregated=take.notes if take else None,
+        events=events_out,
+    )
