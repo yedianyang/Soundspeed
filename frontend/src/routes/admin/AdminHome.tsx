@@ -148,16 +148,13 @@ export default function AdminHome() {
   // 当前 take 派生：活跃场内、未软删、take_id 最大（autoincrement 单调，take_number 会被复用故不可作排序键）
   // 的那条。REC/建 take 解耦后这是「控件作用的当前 take」唯一来源——跟着 Next Take 建的空块、REC 建的块、
   // 切场后的最新块走，与 isRecording 无关。
-  const currentTakeRecord: TakeDTO | undefined = (() => {
-    if (!activeScene) return undefined
-    let latest: TakeDTO | undefined
-    for (const t of takesMap.values()) {
-      if (t.scene_id !== activeScene.scene_id) continue
-      if (t.deleted_at != null) continue
-      if (!latest || t.take_id > latest.take_id) latest = t
-    }
-    return latest
-  })()
+  const currentTakeRecord = useMemo<TakeDTO | undefined>(
+    () =>
+      activeScene
+        ? latestLiveTakeInScene(takesMap.values(), activeScene.scene_id)
+        : undefined,
+    [takesMap, activeScene],
+  )
   const currentTakeId = currentTakeRecord?.take_id ?? null
 
   // 派生的 currentTakeId 同步进 store，供 applyAsr 的跨-take 守卫读（单一来源，不与 store 内部兜底分叉）。
@@ -199,9 +196,13 @@ export default function AdminHome() {
   // workSlot 组（scene_id, shot）的最新 live take：删（事件 7）的作用对象。底部展示的是 workSlot，
   // 删必须删 workSlot 组里那条，而非 currentTakeRecord（活跃场跨 shot 的 max-take_id）——换镜后两者
   // 指向不同 take，删 currentTakeRecord 会删掉用户看不到、没指向的那条（advisor 指出的 §16 事件 7 偏差）。
-  const slotLatestTake: TakeDTO | undefined = workSlot
-    ? latestLiveTakeInGroup(takesMap.values(), workSlot.scene_id, workSlot.shot)
-    : undefined
+  const slotLatestTake = useMemo<TakeDTO | undefined>(
+    () =>
+      workSlot
+        ? latestLiveTakeInGroup(takesMap.values(), workSlot.scene_id, workSlot.shot)
+        : undefined,
+    [takesMap, workSlot],
+  )
 
   // ---- recording 计时 / 错误态 ----
   const [elapsed, setElapsed] = useState(0)

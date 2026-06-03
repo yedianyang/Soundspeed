@@ -407,7 +407,10 @@ export function HistoryTakes() {
   const [correctedTakes, setCorrectedTakes] = useState<Set<number>>(new Set())
 
   const takes: TakeDTO[] = Array.from(takesMap.values()).sort(
-    (a, b) => a.scene_id - b.scene_id || a.take_number - b.take_number
+    (a, b) =>
+      a.scene_id - b.scene_id ||
+      (a.shot ?? "").localeCompare(b.shot ?? "") ||
+      a.take_number - b.take_number
   )
 
   const handleChangeStatus = (take: TakeDTO, status: TakeStatus) => {
