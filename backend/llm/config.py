@@ -55,8 +55,25 @@ TASK_CONFIG: dict[str, dict] = {
         "max_tokens": 2048,
         "temperature": 0.1,
         "priority": 3,
-        # TODO(1.G): 接入时按剧本结构化需求细化 system prompt
-        "system": "将剧本解析为结构化 JSON。",
+        # prompt v1（3.B）：极简版，只输出 schema + 1 个 few-shot。
+        # 4B Gemma 实测越长越乱，不堆细则。
+        "system": (
+            "你是剧本解析器。把输入的剧本片段解析为 JSON，直接输出合法 JSON，不要 markdown 代码块。\n\n"
+            "输出格式：\n"
+            '{"scenes": [{"scene_code": "string或null", "slugline": {"int_ext": "string或null", '
+            '"time_of_day": "string或null", "location": "string或null"}, '
+            '"lines": [{"character": "string或null", "text": "string"}]}]}\n\n'
+            "规则：scene_code 是剧本中明确写出的场次号（如「场3」「3A」），没有就填 null。"
+            "character 是说话角色名，舞台指示行填 null。\n\n"
+            "示例输入：\n"
+            "内 咖啡馆 日\n"
+            "罗湘：我们先聊聊。\n"
+            "（罗湘坐下）\n\n"
+            "示例输出：\n"
+            '{"scenes": [{"scene_code": null, "slugline": {"int_ext": "内", "time_of_day": "日", '
+            '"location": "咖啡馆"}, "lines": [{"character": "罗湘", "text": "我们先聊聊。"}, '
+            '{"character": null, "text": "罗湘坐下"}]}]}'
+        ),
     },
     "note_struct": {
         "max_tokens": 512,
