@@ -1,4 +1,4 @@
-"""4.C Note API 端点测试。"""
+"""4.C Note API 端点测试（v2：NP Pipeline 非阻塞归置）。"""
 from __future__ import annotations
 
 import pytest
@@ -41,28 +41,29 @@ def _setup_scene_and_take(dal: DAL, scene_code: str = "3A") -> int:
     return dal._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
-# ── POST /notes ──────────────────────────────────────────────────────────────
+# ── POST /notes（v2：202 + fire-and-forget NP Pipeline）──────────────────────
 
 
-def test_post_note_success_current_take(dal: DAL, monkeypatch) -> None:
-    """POST /api/v1/notes 当前 take → 201。"""
-    take_id = _setup_scene_and_take(dal)
+def test_post_note_returns_202_processing(dal: DAL, monkeypatch) -> None:
+    """POST /api/v1/notes → 202，status="processing"。
+
+    不再需要活跃 take —— LLM 在后台判断归属。
+    """
+    _setup_scene_and_take(dal)
     orch = create_orchestrator(dal)
-    orch.session.take_active = True
-    orch.session.take_id = take_id
     client = _make_client(orch, monkeypatch)
 
     resp = client.post("/api/v1/notes", json={"text": "飞机声"}, headers=AUTH)
-    assert resp.status_code == 201, resp.text
+    assert resp.status_code == 202, resp.text
     data = resp.json()
-    assert "event_id" in data
+    assert data["status"] == "processing"
     assert data["category"] == "note"
     assert data["content"] == "飞机声"
 
 
-def test_post_note_success_explicit_take(dal: DAL, monkeypatch) -> None:
-    """POST /api/v1/notes 显式指定 take → 201。"""
-    take_id = _setup_scene_and_take(dal, scene_code="3A")
+def test_post_note_with_category(dal: DAL, monkeypatch) -> None:
+    """@issue 类别被 parser 提取，返回 202。"""
+    _setup_scene_and_take(dal, scene_code="3A")
     orch = create_orchestrator(dal)
     client = _make_client(orch, monkeypatch)
 
@@ -71,57 +72,26 @@ def test_post_note_success_explicit_take(dal: DAL, monkeypatch) -> None:
         json={"text": "3A 1 @issue 开头有飞机声"},
         headers=AUTH,
     )
-    assert resp.status_code == 201, resp.text
+    assert resp.status_code == 202, resp.text
     data = resp.json()
-    assert data["take_id"] == take_id
     assert data["category"] == "issue"
     assert data["content"] == "开头有飞机声"
 
 
-def test_post_note_no_active_take_409(dal: DAL, monkeypatch) -> None:
-    """无活跃 take → 409。"""
+def test_post_note_no_active_take_still_accepted(dal: DAL, monkeypatch) -> None:
+    """无活跃 take 仍接受 —— LLM 自行归置。"""
     orch = create_orchestrator(dal)
     orch.session.take_active = False
     orch.session.take_id = None
     client = _make_client(orch, monkeypatch)
 
     resp = client.post("/api/v1/notes", json={"text": "飞机声"}, headers=AUTH)
-    assert resp.status_code == 409, resp.text
-
-
-def test_post_note_scene_not_found_404(dal: DAL, monkeypatch) -> None:
-    """scene_code 不存在 → 404。"""
-    orch = create_orchestrator(dal)
-    client = _make_client(orch, monkeypatch)
-
-    resp = client.post(
-        "/api/v1/notes",
-        json={"text": "XX 1 飞机声"},
-        headers=AUTH,
-    )
-    assert resp.status_code == 404, resp.text
-
-
-def test_post_note_take_not_found_404(dal: DAL, monkeypatch) -> None:
-    """take 不存在 → 404。"""
-    # 创建 scene（scene_code="3A"），但不创建 take #99
-    dal._conn.execute(
-        "INSERT INTO scenes (scene_code, is_active) VALUES (?, 1)",
-        ("3A",),
-    )
-    orch = create_orchestrator(dal)
-    client = _make_client(orch, monkeypatch)
-
-    resp = client.post(
-        "/api/v1/notes",
-        json={"text": "3A 99 飞机声"},
-        headers=AUTH,
-    )
-    assert resp.status_code == 404, resp.text
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["status"] == "processing"
 
 
 def test_post_note_unknown_category_400(dal: DAL, monkeypatch) -> None:
-    """未知类别 → 400。"""
+    """未知类别 → 400（parser 校验发生在 fire-and-forget 之前）。"""
     _setup_scene_and_take(dal, scene_code="3A")
     orch = create_orchestrator(dal)
     client = _make_client(orch, monkeypatch)
@@ -160,20 +130,23 @@ def test_post_note_unauthorized_401(dal: DAL, monkeypatch) -> None:
 
 
 def test_get_notes_returns_aggregated_and_events(dal: DAL, monkeypatch) -> None:
-    """POST 后 GET → 200，含 aggregated + events。"""
+    """手动写库后 GET → 200，含 aggregated + events。
+
+    NP Pipeline 在测试环境无 LLM，故手动调 DAL 模拟已完成归置。
+    """
     take_id = _setup_scene_and_take(dal, scene_code="3A")
     orch = create_orchestrator(dal)
     client = _make_client(orch, monkeypatch)
 
-    # 先创建一条 note
-    post_resp = client.post(
-        "/api/v1/notes",
-        json={"text": "3A 1 @issue 开头有飞机声"},
-        headers=AUTH,
+    # 手动写一条 note 模拟 LLM 归置完成
+    orch.dal.insert_note(
+        take_id=take_id,
+        category="issue",
+        content="开头有飞机声",
+        raw_text="3A 1 @issue 开头有飞机声",
+        ts=1000.0,
     )
-    assert post_resp.status_code == 201, post_resp.text
 
-    # 再 GET
     resp = client.get(f"/api/v1/takes/{take_id}/notes", headers=AUTH)
     assert resp.status_code == 200, resp.text
     data = resp.json()
@@ -194,7 +167,6 @@ def test_get_notes_empty_take(dal: DAL, monkeypatch) -> None:
     data = resp.json()
     assert data["take_id"] == take_id
     assert data["events"] == []
-    # notes_aggregated 为 None 或空
     assert data["notes_aggregated"] is None or data["notes_aggregated"] == ""
 
 
