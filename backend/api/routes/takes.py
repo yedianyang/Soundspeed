@@ -76,9 +76,9 @@ class TakeDTO(BaseModel):
 
     take_id: int
     scene_id: int
+    shot: str | None
     take_number: int
     take_suffix: str
-    shot: str | None
     start_ts: float
     end_ts: float | None
     status: str

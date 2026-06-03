@@ -64,12 +64,12 @@ def test_apply_migrations_idempotent(tmp_path: Path) -> None:
 
 
 def test_apply_migrations_user_version(tmp_path: Path) -> None:
-    """迁移后 PRAGMA user_version 等于当前最高版本（v3 后为 3）。"""
+    """迁移后 PRAGMA user_version 等于当前最高版本（v4 后为 4）。"""
     db_path = tmp_path / "test.db"
     apply_migrations(db_path)
     conn = _raw_conn(db_path)
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert version == 3
+    assert version == 4
     conn.close()
 
 
@@ -287,7 +287,7 @@ def test_start_take_returns_id(tmp_path: Path) -> None:
     """插入 take 返回正确 take_id，大于 0。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     assert isinstance(tid, int)
     assert tid > 0
 
@@ -296,7 +296,7 @@ def test_end_take_sets_end_ts(tmp_path: Path) -> None:
     """end_take 后 get_take 返回的 end_ts 不为 None。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     dal.end_take(tid, 1060.0, "keeper")
     take = dal.get_take(tid)
     assert take is not None
@@ -308,22 +308,38 @@ def test_take_status_check_constraint(tmp_path: Path) -> None:
     """插入非法 status 值触发 CHECK 约束异常。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     with pytest.raises(sqlite3.IntegrityError):
         dal.end_take(tid, 1060.0, "invalid_status")
 
 
 def test_takes_unique_scene_take_number_same_suffix(tmp_path: Path) -> None:
-    """同场次同 take_number 同 take_suffix（均为默认 ''）重复插入触发 UNIQUE 约束异常。"""
-    dal = DAL(tmp_path / "test.db")
-    sid = dal.create_scene("Scene_1")
-    dal.start_take(sid, 1, 1000.0)
+    """同场次同 shot 同 take_number 同 take_suffix（均为默认 ''）重复插入触发 UNIQUE 约束异常。
+
+    v4 后四元约束 UNIQUE(scene_id, shot, take_number, take_suffix)。
+    使用 raw SQL 直接触发约束（start_take 内部原子分配号，不会产生相同号）。
+    """
+    db_path = tmp_path / "test.db"
+    apply_migrations(db_path)
+    conn = _raw_conn(db_path)
+    conn.execute("PRAGMA foreign_keys = ON;")
+    sid = conn.execute("INSERT INTO scenes (scene_code) VALUES ('Scene_1');").lastrowid
+    conn.execute(
+        "INSERT INTO takes (scene_id, shot, take_number, take_suffix, start_ts) VALUES (?, '1', 1, '', 1000.0);",
+        (sid,),
+    )
+    conn.commit()
     with pytest.raises(sqlite3.IntegrityError):
-        dal.start_take(sid, 1, 1001.0)
+        conn.execute(
+            "INSERT INTO takes (scene_id, shot, take_number, take_suffix, start_ts) VALUES (?, '1', 1, '', 1001.0);",
+            (sid,),
+        )
+        conn.commit()
+    conn.close()
 
 
 def test_takes_unique_allows_different_suffix(tmp_path: Path) -> None:
-    """同场次同 take_number 但不同 take_suffix 可共存（三元 UNIQUE）。"""
+    """同场次同 shot 同 take_number 但不同 take_suffix 可共存（v4 四元 UNIQUE）。"""
     db_path = tmp_path / "test.db"
     apply_migrations(db_path)
     conn = _raw_conn(db_path)
@@ -332,12 +348,12 @@ def test_takes_unique_allows_different_suffix(tmp_path: Path) -> None:
         "INSERT INTO scenes (scene_code) VALUES ('S1');"
     ).lastrowid
     conn.execute(
-        "INSERT INTO takes (scene_id, take_number, take_suffix, start_ts) VALUES (?, 1, '', 1000.0);",
+        "INSERT INTO takes (scene_id, shot, take_number, take_suffix, start_ts) VALUES (?, '1', 1, '', 1000.0);",
         (sid,),
     )
-    # 同 scene 同 number 但 suffix 不同，应该可以插入
+    # 同 scene 同 shot 同 number 但 suffix 不同，应该可以插入
     conn.execute(
-        "INSERT INTO takes (scene_id, take_number, take_suffix, start_ts) VALUES (?, 1, '+', 1001.0);",
+        "INSERT INTO takes (scene_id, shot, take_number, take_suffix, start_ts) VALUES (?, '1', 1, '+', 1001.0);",
         (sid,),
     )
     conn.commit()
@@ -351,8 +367,8 @@ def test_list_takes_filter_by_scene_id(tmp_path: Path) -> None:
     dal = DAL(tmp_path / "test.db")
     sid1 = dal.create_scene("Scene_1")
     sid2 = dal.create_scene("Scene_2")
-    dal.start_take(sid1, 1, 1000.0)
-    dal.start_take(sid2, 1, 2000.0)
+    dal.start_take(sid1, "1", 1000.0)
+    dal.start_take(sid2, "1", 2000.0)
     takes1 = dal.list_takes(scene_id=sid1)
     assert len(takes1) == 1
     assert takes1[0].scene_id == sid1
@@ -368,7 +384,7 @@ def test_update_take_np_output(tmp_path: Path) -> None:
     """update_take_np_output 更新 performer_issues 与 audio_quality，不覆盖 end_ts。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     dal.end_take(tid, 1060.0, "tbd")
     dal.update_take_np_output(
         tid,
@@ -387,7 +403,7 @@ def test_update_take_np_output_serializes_json_list(tmp_path: Path) -> None:
     """update_take_np_output 接受 list，存库后 get_take 读回仍是 list。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     dal.end_take(tid, 1060.0, "tbd")
     issues: list = ["line_miss", "overlap"]
     dal.update_take_np_output(tid, performer_issues=issues, audio_quality=None, status=None)
@@ -400,7 +416,7 @@ def test_update_take_np_output_serializes_json_dict(tmp_path: Path) -> None:
     """update_take_np_output 接受 dict，存库后 get_take 读回仍是 dict。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     dal.end_take(tid, 1060.0, "tbd")
     issues: dict = {"missed": ["line3"], "late_cue": ["line5"]}
     dal.update_take_np_output(tid, performer_issues=issues, audio_quality=None, status=None)
@@ -413,7 +429,7 @@ def test_update_take_np_output_none_passes_through(tmp_path: Path) -> None:
     """update_take_np_output 传 performer_issues=None，get_take 读回也是 None。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     dal.end_take(tid, 1060.0, "tbd")
     dal.update_take_np_output(tid, performer_issues=None, audio_quality=None, status=None)
     take = dal.get_take(tid)
@@ -428,7 +444,7 @@ def test_insert_take_event_with_valid_json(tmp_path: Path) -> None:
     """合法 JSON payload 正常写入，list_take_events 可查到。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     eid = dal.insert_take_event(tid, "manual.mark", {"mark": "keeper"}, 1010.0)
     assert eid > 0
     events = dal.list_take_events(tid)
@@ -441,7 +457,7 @@ def test_take_events_payload_json_validation(tmp_path: Path) -> None:
     """非法 JSON payload 触发 CHECK 约束异常（json_valid 约束）。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     # 直接用裸连接插入非法 JSON，绕过 DAL 的 json.dumps 转换
     conn = sqlite3.connect(str(tmp_path / "test.db"))
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -458,7 +474,7 @@ def test_list_take_events_filter_by_type(tmp_path: Path) -> None:
     """list_take_events 按 event_type 过滤，只返回匹配事件。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     dal.insert_take_event(tid, "manual.mark", {"mark": "keeper"}, 1010.0)
     dal.insert_take_event(tid, "np.write", {"audio_quality": "clean"}, 1020.0)
     marks = dal.list_take_events(tid, event_type="manual.mark")
@@ -473,7 +489,7 @@ def test_insert_segment_with_speaker(tmp_path: Path) -> None:
     """含 speaker 字段的片段正常写入，list_segments 可查到正确 speaker。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     seg_id = dal.insert_segment(tid, 1, "SPEAKER_00", "Hello world", 0, 16000)
     assert seg_id > 0
     segs = dal.list_segments(tid)
@@ -499,7 +515,7 @@ def test_insert_segment_ch_check_constraint(tmp_path: Path) -> None:
     """ch 值非 1/2 触发 CHECK 约束异常。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     conn = sqlite3.connect(str(tmp_path / "test.db"))
     conn.execute("PRAGMA foreign_keys = ON;")
     with pytest.raises(sqlite3.IntegrityError):
@@ -515,7 +531,7 @@ def test_insert_segment_frame_order_check(tmp_path: Path) -> None:
     """end_frame <= start_frame 触发 CHECK 约束异常（end_frame > start_frame）。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     conn = sqlite3.connect(str(tmp_path / "test.db"))
     conn.execute("PRAGMA foreign_keys = ON;")
     with pytest.raises(sqlite3.IntegrityError):
@@ -531,7 +547,7 @@ def test_list_segments_filter_by_speaker(tmp_path: Path) -> None:
     """按 speaker 过滤返回正确子集。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     dal.insert_segment(tid, 1, "SPEAKER_00", "Hello", 0, 16000)
     dal.insert_segment(tid, 1, "SPEAKER_01", "World", 16000, 32000)
     segs = dal.list_segments(tid, speaker="SPEAKER_00")
@@ -543,7 +559,7 @@ def test_list_segments_filter_by_ch(tmp_path: Path) -> None:
     """按 ch 过滤返回正确子集。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     dal.insert_segment(tid, 1, None, "ch1 text", 0, 16000)
     dal.insert_segment(tid, 2, None, "ch2 text", 0, 16000)
     segs_ch1 = dal.list_segments(tid, ch=1)
@@ -632,7 +648,7 @@ def test_insert_take_line_match_valid_diff_type(tmp_path: Path) -> None:
     """合法 diff_type 写入正常，list_take_line_matches 可查到。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     scr_id = dal.insert_script(sid, "测试剧本")
     lid = dal.insert_script_line(scr_id, 1, "HERO", "original line")
     mid = dal.insert_take_line_match(tid, lid, "match", {})
@@ -646,7 +662,7 @@ def test_insert_take_line_match_invalid_diff_type(tmp_path: Path) -> None:
     """非法 diff_type 触发 CHECK 约束异常。"""
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
-    tid = dal.start_take(sid, 1, 1000.0)
+    tid = dal.start_take(sid, "1", 1000.0)
     scr_id = dal.insert_script(sid, "测试剧本")
     lid = dal.insert_script_line(scr_id, 1, "HERO", "original line")
     conn = sqlite3.connect(str(tmp_path / "test.db"))
@@ -752,7 +768,7 @@ def test_dal_as_context_manager(tmp_path: Path) -> None:
 
 def test_get_segment_returns_row(tmp_dal: DAL) -> None:
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     seg_id = tmp_dal.insert_segment(tid, 1, "SPEAKER_00", "你好", 0, 16000)
     seg = tmp_dal.get_segment(seg_id)
     assert seg is not None
@@ -767,7 +783,7 @@ def test_get_segment_missing_returns_none(tmp_dal: DAL) -> None:
 
 def test_update_segment_speaker_changes_value(tmp_dal: DAL) -> None:
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     seg_id = tmp_dal.insert_segment(tid, 1, "SPEAKER_00", "你好", 0, 16000)
     affected = tmp_dal.update_segment_speaker(seg_id, "SPEAKER_01")
     assert affected == 1
@@ -777,7 +793,7 @@ def test_update_segment_speaker_changes_value(tmp_dal: DAL) -> None:
 
 def test_update_segment_speaker_to_none(tmp_dal: DAL) -> None:
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     seg_id = tmp_dal.insert_segment(tid, 1, "SPEAKER_00", "你好", 0, 16000)
     affected = tmp_dal.update_segment_speaker(seg_id, None)
     assert affected == 1
@@ -795,7 +811,7 @@ def test_update_segment_speaker_missing_returns_zero(tmp_dal: DAL) -> None:
 def test_set_take_status_valid_updates_status(tmp_dal: DAL) -> None:
     """set_take_status 成功更新 take.status，并写一条 manual.mark take_event。"""
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     tmp_dal.end_take(tid, 1060.0, "tbd")
     tmp_dal.set_take_status(tid, "keeper")
     take = tmp_dal.get_take(tid)
@@ -806,7 +822,7 @@ def test_set_take_status_valid_updates_status(tmp_dal: DAL) -> None:
 def test_set_take_status_writes_take_event(tmp_dal: DAL) -> None:
     """set_take_status 写一条 event_type='manual.mark' 的 take_event，payload 含新 status。"""
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     tmp_dal.set_take_status(tid, "ng")
     events = tmp_dal.list_take_events(tid, event_type="manual.mark")
     assert len(events) == 1
@@ -816,7 +832,7 @@ def test_set_take_status_writes_take_event(tmp_dal: DAL) -> None:
 def test_set_take_status_invalid_raises_value_error(tmp_dal: DAL) -> None:
     """非法 status 值抛 ValueError（应用层校验，不依赖 DB CHECK）。"""
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     with pytest.raises(ValueError, match="status"):
         tmp_dal.set_take_status(tid, "invalid_status")
 
@@ -829,8 +845,8 @@ def test_update_take_meta_case_a_append_to_existing_scene(tmp_dal: DAL) -> None:
     sid1 = tmp_dal.create_scene("S1")
     sid2 = tmp_dal.create_scene("S2")
     # sid2 已有 take_number=1，移入后应追加为 2
-    tmp_dal.start_take(sid2, 1, 2000.0)
-    tid = tmp_dal.start_take(sid1, 1, 1000.0)
+    tmp_dal.start_take(sid2, "1", 2000.0)
+    tid = tmp_dal.start_take(sid1, "1", 1000.0)
     tmp_dal.update_take_meta(tid, scene_id=sid2)
     take = tmp_dal.get_take(tid)
     assert take is not None
@@ -842,7 +858,7 @@ def test_update_take_meta_case_a_append_to_empty_scene(tmp_dal: DAL) -> None:
     """情形 A：移到空场（无 take），take_number=1。"""
     sid1 = tmp_dal.create_scene("S1")
     sid2 = tmp_dal.create_scene("S2")
-    tid = tmp_dal.start_take(sid1, 1, 1000.0)
+    tid = tmp_dal.start_take(sid1, "1", 1000.0)
     tmp_dal.update_take_meta(tid, scene_id=sid2)
     take = tmp_dal.get_take(tid)
     assert take is not None
@@ -853,7 +869,7 @@ def test_update_take_meta_case_a_append_to_empty_scene(tmp_dal: DAL) -> None:
 def test_update_take_meta_case_a_nonexistent_scene_raises(tmp_dal: DAL) -> None:
     """情形 A：目标 scene 不存在，抛 ValueError。"""
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     with pytest.raises(ValueError, match="scene"):
         tmp_dal.update_take_meta(tid, scene_id=99999)
 
@@ -861,55 +877,57 @@ def test_update_take_meta_case_a_nonexistent_scene_raises(tmp_dal: DAL) -> None:
 def test_update_take_meta_case_b_suffix_when_number_conflict(tmp_dal: DAL) -> None:
     """情形 B：同场换号（目标号已被占用），给被移动的 take 追加 '+' 后缀，不交换。"""
     sid = tmp_dal.create_scene("S1")
-    tid2 = tmp_dal.start_take(sid, 2, 1000.0)  # take_number=2，占用 (sid,2,'')
-    tid3 = tmp_dal.start_take(sid, 3, 1010.0)  # take_number=3
-    # 把 tid3（原号 3）改成 2（已被 tid2 占用）→ tid3 获得 suffix '+'，编号 2
-    tmp_dal.update_take_meta(tid3, take_number=2)
+    tid1 = tmp_dal.start_take(sid, "1", 1000.0)  # take_number=1，占用 (sid,shot="1",1,'')
+    tid2 = tmp_dal.start_take(sid, "1", 1010.0)  # take_number=2
+    # 把 tid2（原号 2）改成 1（已被 tid1 占用）→ tid2 获得 suffix '+'，编号 1
+    tmp_dal.update_take_meta(tid2, take_number=1)
+    take1 = tmp_dal.get_take(tid1)
     take2 = tmp_dal.get_take(tid2)
-    take3 = tmp_dal.get_take(tid3)
+    assert take1 is not None
+    assert take1.take_number == 1  # take1 编号不变
+    assert take1.take_suffix == ""  # take1 suffix 不变
     assert take2 is not None
-    assert take2.take_number == 2  # take2 编号不变
-    assert take2.take_suffix == ""  # take2 suffix 不变
-    assert take3 is not None
-    assert take3.take_number == 2  # tid3 也改成 2
-    assert take3.take_suffix == "+"  # tid3 得到 '+' 后缀
+    assert take2.take_number == 1  # tid2 也改成 1
+    assert take2.take_suffix == "+"  # tid2 得到 '+' 后缀
 
 
 def test_update_take_meta_case_b_double_suffix(tmp_dal: DAL) -> None:
-    """情形 B 续：已有 (sid,2,'') 和 (sid,2,'+')，再移一条到 take_number=2 → suffix='++'。"""
+    """情形 B 续：已有 (sid,shot,'1','') 和 (sid,shot,'1','+')，再移一条到 take_number=1 → suffix='++'。"""
     sid = tmp_dal.create_scene("S1")
-    _t_a = tmp_dal.start_take(sid, 2, 1000.0)   # (sid,2,'')
-    t_b = tmp_dal.start_take(sid, 3, 1010.0)   # (sid,3,'')
-    t_c = tmp_dal.start_take(sid, 4, 1020.0)   # (sid,4,'')
-    # t_b 移到 2 → (sid,2,'') 被占 → t_b 得 '+'
-    tmp_dal.update_take_meta(t_b, take_number=2)
-    # t_c 再移到 2 → (sid,2,'') 和 (sid,2,'+') 都被占 → t_c 得 '++'
-    tmp_dal.update_take_meta(t_c, take_number=2)
+    _t_a = tmp_dal.start_take(sid, "1", 1000.0)   # (sid,shot="1", number=1,'')
+    t_b = tmp_dal.start_take(sid, "1", 1010.0)    # (sid,shot="1", number=2,'')
+    t_c = tmp_dal.start_take(sid, "1", 1020.0)    # (sid,shot="1", number=3,'')
+    # t_b 移到 1 → (sid,"1",1,'') 被占 → t_b 得 '+'
+    tmp_dal.update_take_meta(t_b, take_number=1)
+    # t_c 再移到 1 → (sid,"1",1,'') 和 (sid,"1",1,'+') 都被占 → t_c 得 '++'
+    tmp_dal.update_take_meta(t_c, take_number=1)
     take_c = tmp_dal.get_take(t_c)
     assert take_c is not None
-    assert take_c.take_number == 2
+    assert take_c.take_number == 1
     assert take_c.take_suffix == "++"
 
 
 def test_update_take_meta_case_c_cross_scene_suffix(tmp_dal: DAL) -> None:
-    """情形 C：跨场移动且目标 (scene_id, take_number, '') 已占用 → 追加后缀而非抛异常。"""
+    """情形 C：跨场移动且目标 (scene_id, shot, take_number, '') 已占用 → 追加后缀而非抛异常。"""
     sid1 = tmp_dal.create_scene("S1")
     sid2 = tmp_dal.create_scene("S2")
-    tid1 = tmp_dal.start_take(sid1, 1, 1000.0)
-    tmp_dal.start_take(sid2, 5, 2000.0)   # sid2 的 take_number=5，suffix='' 已占用
-    # 把 tid1 跨场移到 sid2 并指定 take_number=5，应追加 '+' 后缀
-    tmp_dal.update_take_meta(tid1, scene_id=sid2, take_number=5)
+    tid1 = tmp_dal.start_take(sid1, "1", 1000.0)
+    # sid2 建一个 take（shot="1", take_number=1）
+    tmp_dal.start_take(sid2, "1", 2000.0)
+    # 把 tid1 跨场移到 sid2 并指定 take_number=1（已被占用），应追加 '+' 后缀
+    tmp_dal.update_take_meta(tid1, scene_id=sid2, take_number=1)
     take1 = tmp_dal.get_take(tid1)
     assert take1 is not None
     assert take1.scene_id == sid2
-    assert take1.take_number == 5
+    assert take1.take_number == 1
     assert take1.take_suffix == "+"
 
 
 def test_update_take_meta_shot_notes_partial_update(tmp_dal: DAL) -> None:
     """改 shot 和 notes（含空串清空 notes），只改传入字段，其余保持原值。"""
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0, shot="Shot_A")
+    # v4 新签名：shot 作为第二参数（字符串）
+    tid = tmp_dal.start_take(sid, "Shot_A", 1000.0)
     # 改 shot，清空 notes（传 ""）
     tmp_dal.update_take_meta(tid, shot="Shot_B", notes="")
     take = tmp_dal.get_take(tid)
@@ -926,7 +944,7 @@ def test_update_take_meta_shot_notes_partial_update(tmp_dal: DAL) -> None:
 def test_update_take_meta_writes_manual_edit_event(tmp_dal: DAL) -> None:
     """update_take_meta 成功后写一条 event_type='manual.edit' 的 take_event。"""
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     tmp_dal.update_take_meta(tid, shot="Shot_X")
     events = tmp_dal.list_take_events(tid, event_type="manual.edit")
     assert len(events) == 1
@@ -942,7 +960,7 @@ def test_update_take_meta_writes_manual_edit_event(tmp_dal: DAL) -> None:
 def test_delete_take_soft_deletes_row(tmp_dal: DAL) -> None:
     """delete_take 后 take 行仍存在（软删），deleted_at 被设置，get_take 返回 None（排除软删）。"""
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     tmp_dal.end_take(tid, 1060.0, "keeper")
     tmp_dal.delete_take(tid)
     # get_take 排除软删行，返回 None
@@ -960,7 +978,7 @@ def test_delete_take_preserves_child_tables(tmp_dal: DAL) -> None:
     sid = tmp_dal.create_scene("S1")
     scr_id = tmp_dal.insert_script(sid, "剧本")
     lid = tmp_dal.insert_script_line(scr_id, 1, "HERO", "台词文本")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     tmp_dal.insert_segment(tid, 1, "SPEAKER_00", "hello", 0, 16000)
     tmp_dal.insert_take_event(tid, "manual.mark", {"status": "ng"}, 1010.0)
     tmp_dal.insert_take_line_match(tid, lid, "match", {})
@@ -985,7 +1003,7 @@ def test_delete_take_writes_audit_log(tmp_dal: DAL) -> None:
     import json
 
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     tmp_dal.end_take(tid, 1060.0, "keeper")
     tmp_dal.delete_take(tid)
     rows = tmp_dal._conn.execute(
@@ -1007,7 +1025,7 @@ def test_delete_take_nonexistent_is_noop(tmp_dal: DAL) -> None:
 def test_restore_take_clears_deleted_at(tmp_dal: DAL) -> None:
     """restore_take 后 deleted_at 清为 NULL，get_take 重新可见。"""
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     tmp_dal.end_take(tid, 1060.0, "keeper")
     tmp_dal.delete_take(tid)
     assert tmp_dal.get_take(tid) is None  # 软删后不可见
@@ -1022,7 +1040,7 @@ def test_restore_take_writes_audit_log(tmp_dal: DAL) -> None:
     import json
 
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     tmp_dal.delete_take(tid)
     tmp_dal.restore_take(tid)
     rows = tmp_dal._conn.execute(
@@ -1036,8 +1054,8 @@ def test_restore_take_writes_audit_log(tmp_dal: DAL) -> None:
 def test_list_takes_excludes_soft_deleted(tmp_dal: DAL) -> None:
     """list_takes 默认排除软删行。"""
     sid = tmp_dal.create_scene("S1")
-    t1 = tmp_dal.start_take(sid, 1, 1000.0)
-    t2 = tmp_dal.start_take(sid, 2, 1001.0)
+    t1 = tmp_dal.start_take(sid, "1", 1000.0)
+    t2 = tmp_dal.start_take(sid, "1", 1001.0)
     tmp_dal.delete_take(t1)
     takes = tmp_dal.list_takes(sid)
     ids = [t.take_id for t in takes]
@@ -1048,7 +1066,7 @@ def test_list_takes_excludes_soft_deleted(tmp_dal: DAL) -> None:
 def test_get_take_excludes_soft_deleted(tmp_dal: DAL) -> None:
     """get_take 软删后返回 None。"""
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     tmp_dal.delete_take(tid)
     assert tmp_dal.get_take(tid) is None
 
@@ -1056,7 +1074,7 @@ def test_get_take_excludes_soft_deleted(tmp_dal: DAL) -> None:
 def test_take_has_take_suffix_field(tmp_dal: DAL) -> None:
     """Take dataclass 含 take_suffix 字段，默认为空串。"""
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     take = tmp_dal.get_take(tid)
     assert take is not None
     assert hasattr(take, "take_suffix")
@@ -1066,7 +1084,7 @@ def test_take_has_take_suffix_field(tmp_dal: DAL) -> None:
 def test_take_has_deleted_at_field(tmp_dal: DAL) -> None:
     """Take dataclass 含 deleted_at 字段，未软删时为 None。"""
     sid = tmp_dal.create_scene("S1")
-    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tid = tmp_dal.start_take(sid, "1", 1000.0)
     take = tmp_dal.get_take(tid)
     assert take is not None
     assert hasattr(take, "deleted_at")
@@ -1077,35 +1095,35 @@ def test_take_has_deleted_at_field(tmp_dal: DAL) -> None:
 
 
 def test_next_take_number_empty_scene_returns_1(tmp_dal: DAL) -> None:
-    """空场（没有任何 take）时 next_take_number 返回 1。"""
+    """空场（没有任何 take）时 next_take_number 返回 1（shot="1" 组）。"""
     sid = tmp_dal.create_scene("scene_ntn_empty")
-    assert tmp_dal.next_take_number(sid) == 1
+    assert tmp_dal.next_take_number(sid, "1") == 1
 
 
 def test_next_take_number_increments(tmp_dal: DAL) -> None:
-    """已有 take 1、2 时返回 3。"""
+    """已有 take 1、2 时返回 3（shot="1" 组内）。"""
     sid = tmp_dal.create_scene("scene_ntn_incr")
-    tmp_dal.start_take(sid, 1, 1000.0)
-    tmp_dal.start_take(sid, 2, 1001.0)
-    assert tmp_dal.next_take_number(sid) == 3
+    tmp_dal.start_take(sid, "1", 1000.0)
+    tmp_dal.start_take(sid, "1", 1001.0)
+    assert tmp_dal.next_take_number(sid, "1") == 3
 
 
 def test_next_take_number_soft_delete_highest_reuses(tmp_dal: DAL) -> None:
-    """软删最高号后 next_take_number 复用该号（MAX 排除软删行）。
+    """软删最高号后 next_take_number 复用该号（live MAX+1，软删号可复用）。
 
-    take 1/2/3，软删 3 后 next_take_number = MAX({1,2})+1 = 3（复用 3）。
-    此行为区分软删（排除软删行）和不排除软删行的逻辑——删中间号两种实现都返回 4，不足以区分。
+    复用语义：以 live 行中最大 take_number 为基准，返回 live MAX+1。
+    shot="1" 组内 take 1/2/3，软删 3 后 live MAX=2 → next_take_number = 3（复用刚删的 3）。
     """
     sid = tmp_dal.create_scene("scene_ntn_del")
-    t1 = tmp_dal.start_take(sid, 1, 1000.0)
-    t2 = tmp_dal.start_take(sid, 2, 1001.0)
-    t3 = tmp_dal.start_take(sid, 3, 1002.0)
+    t1 = tmp_dal.start_take(sid, "1", 1000.0)
+    t2 = tmp_dal.start_take(sid, "1", 1001.0)
+    t3 = tmp_dal.start_take(sid, "1", 1002.0)
     tmp_dal.end_take(t1, 1010.0, "keeper")
     tmp_dal.end_take(t2, 1020.0, "ng")
     tmp_dal.end_take(t3, 1030.0, "keeper")
     tmp_dal.delete_take(t3)
-    # 剩余活跃 take 1、2（take 3 软删），下一个应是 3（复用被软删的号）
-    assert tmp_dal.next_take_number(sid) == 3
+    # live MAX = 2（take 3 已软删），下一个复用 3
+    assert tmp_dal.next_take_number(sid, "1") == 3
 
 
 # ── 2.C 新增：get_or_create_scene ────────────────────────────────────────────
@@ -1136,3 +1154,148 @@ def test_get_or_create_scene_does_not_update_existing(tmp_dal: DAL) -> None:
     target = next(s for s in scenes if s["scene_id"] == sid1)
     assert target["description"] == "original"
     assert sid2 == sid1
+
+
+# ── 复用语义：live MAX+1 + vacate（bug fix 2.x-scene-org）──────────────────────
+
+
+def test_next_take_number_scene2_reproduction(tmp_dal: DAL) -> None:
+    """真实复现场景：shot="1" 组内 live=1，软删 2/2+/2++/3/3+/4 → next_take_number 应返回 2。
+
+    复用语义：live MAX+1，软删号可复用。live 只有 number=1 → next = 2。
+    """
+    sid = tmp_dal.create_scene("scene2_repro")
+    # live take：number=1
+    tmp_dal.start_take(sid, "1", 1000.0)
+    # 软删的 take：通过连续 start_take（shot="1"）自动拿号 2/3/4
+    t2 = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
+    t3 = tmp_dal.start_take(sid, "1", 1002.0)  # → number=3
+    t4 = tmp_dal.start_take(sid, "1", 1003.0)  # → number=4
+    # 用 DAL 直接插带 suffix 的行（模拟冲突追加的历史行，v4 需指定 shot）
+    raw_conn = tmp_dal._conn
+    raw_conn.execute(
+        "INSERT INTO takes (scene_id, shot, take_number, take_suffix, start_ts) VALUES (?, '1', 2, '+', 1004.0);",
+        (sid,),
+    )
+    raw_conn.execute(
+        "INSERT INTO takes (scene_id, shot, take_number, take_suffix, start_ts) VALUES (?, '1', 2, '++', 1005.0);",
+        (sid,),
+    )
+    raw_conn.execute(
+        "INSERT INTO takes (scene_id, shot, take_number, take_suffix, start_ts) VALUES (?, '1', 3, '+', 1006.0);",
+        (sid,),
+    )
+    raw_conn.commit()
+    # 软删上述 take（t1 保持 live）
+    tmp_dal.delete_take(t2)
+    tmp_dal.delete_take(t3)
+    tmp_dal.delete_take(t4)
+    # 也软删带 suffix 的行（直接 UPDATE）
+    raw_conn.execute(
+        "UPDATE takes SET deleted_at = 9999.0 "
+        "WHERE scene_id = ? AND shot = '1' AND take_number IN (2, 3) AND take_suffix != '';",
+        (sid,),
+    )
+    raw_conn.commit()
+    # 此时：live=1；软删 2/''/2+/2++/3/''/3+/4 → live MAX = 1 → next = 2（复用）
+    assert tmp_dal.next_take_number(sid, "1") == 2
+
+
+def test_start_take_succeeds_after_vacating_soft_deleted(tmp_dal: DAL) -> None:
+    """start_take 通过内部 vacate 解决软删行冲突（复用号 = 新 take 拿干净 ''）。
+
+    shot="1" 组内 take 1 live，take 2 软删 → start_take 复用号 2，成功：
+      软删行 (2, '') 被挪到 (2, '+')，新 take 落 (2, '')。
+    """
+    sid = tmp_dal.create_scene("scene_start_no_collide")
+    tmp_dal.start_take(sid, "1", 1000.0)   # → number=1 (live)
+    t2 = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
+    tmp_dal.delete_take(t2)  # 软删 take 2
+
+    # 复用语义：next_take_number 返回 2（live MAX+1）
+    next_num = tmp_dal.next_take_number(sid, "1")
+    assert next_num == 2, f"期望 2，实际 {next_num}"
+
+    # start_take 内部 vacate 后不撞 UNIQUE
+    new_tid = tmp_dal.start_take(sid, "1", 1002.0)
+    take = tmp_dal.get_take(new_tid)
+    assert take is not None
+    assert take.take_number == 2
+    assert take.take_suffix == ""  # 新 take 落干净 ''
+
+
+def test_update_take_meta_soft_deleted_vacates_on_number_change(tmp_dal: DAL) -> None:
+    """手动把号改到被软删行占的 (shot,number,'') → 软删行 vacate（挪到 '+'），被编辑 take 落干净 ''。
+
+    场景：shot="1" 组内 take 1(live)，take 2(软删)。把 take 1 改成 number=2：
+      复用语义：软删行 vacate 让出 ''，take 1 落 (2, '') 不加后缀。
+    """
+    sid = tmp_dal.create_scene("scene_meta_suffix_soft")
+    t1 = tmp_dal.start_take(sid, "1", 1000.0)   # → number=1 (live)
+    t2 = tmp_dal.start_take(sid, "1", 1001.0)   # → number=2
+    tmp_dal.delete_take(t2)  # 软删 take 2
+
+    # 把 take 1 的编号改成 2，软删行占了 (shot="1", 2,'')，新语义：vacate 后落干净 ''
+    tmp_dal.update_take_meta(t1, take_number=2)
+
+    take1 = tmp_dal.get_take(t1)
+    assert take1 is not None
+    assert take1.take_number == 2
+    assert take1.take_suffix == "", f"期望干净 '' 后缀，实际 '{take1.take_suffix}'"
+
+
+def test_update_take_meta_case_a_append_reuses_soft_deleted(tmp_dal: DAL) -> None:
+    """情形 A（仅移场）：目标场已有软删行，append 用 live MAX+1，复用软删号。
+
+    scene1 有 take 1(live)；scene2 有 take 1(live)、take 2(软删)。
+    把 take(scene1, 1) 移到 scene2 → live MAX(scene2, shot="1")=1 → 新号=2（复用软删号）。
+    """
+    sid1 = tmp_dal.create_scene("scene_a_skip_s1")
+    sid2 = tmp_dal.create_scene("scene_a_skip_s2")
+    t_from = tmp_dal.start_take(sid1, "1", 1000.0)   # scene1 take1
+    tmp_dal.start_take(sid2, "1", 1001.0)              # scene2 take1 (live)
+    t2s2 = tmp_dal.start_take(sid2, "1", 1002.0)      # scene2 take2
+    tmp_dal.delete_take(t2s2)  # 软删 scene2 的 take 2
+
+    # 移场（情形 A）：live MAX(scene2, shot="1")=1 → 新号=2（复用），不跳到 3
+    tmp_dal.update_take_meta(t_from, scene_id=sid2)
+
+    moved = tmp_dal.get_take(t_from)
+    assert moved is not None
+    assert moved.scene_id == sid2
+    assert moved.take_number == 2, f"期望复用软删号 2，实际 {moved.take_number}"
+
+
+def test_restore_take_no_unique_conflict_after_vacate(tmp_dal: DAL) -> None:
+    """回归：delete take → 新建（复用号，vacate）→ restore 被删的那条 → 不撞 UNIQUE。
+
+    复用语义下 next_take_number 返回 live MAX+1=2，start_take vacate 把旧软删行挪到 '+'，
+    新 take 落 (2, '')，restore 后旧 take 在 (2, '+')，不撞新 take 的 (2, '')。
+    """
+    sid = tmp_dal.create_scene("scene_restore_no_conflict")
+    tmp_dal.start_take(sid, "1", 1000.0)   # → number=1 (live)
+    t2 = tmp_dal.start_take(sid, "1", 1001.0)  # → number=2
+
+    # 软删 t2（号=2）
+    tmp_dal.delete_take(t2)
+
+    # next_take_number 复用 2（live MAX+1）
+    next_num = tmp_dal.next_take_number(sid, "1")
+    assert next_num == 2
+    # start_take vacate：t2 被挪到 '+'，新 take 落 (2, '')
+    t3 = tmp_dal.start_take(sid, "1", 1002.0)
+
+    # restore t2（现在在 (2, '+')）：不撞新 take 的 (2, '')
+    tmp_dal.restore_take(t2)
+
+    # 验证两条 take 都可见
+    restored = tmp_dal.get_take(t2)
+    assert restored is not None
+    assert restored.take_number == 2
+    assert restored.take_suffix == "+"  # 已被挪到 '+'
+    assert restored.deleted_at is None  # type: ignore[attr-defined]
+
+    take_new = tmp_dal.get_take(t3)
+    assert take_new is not None
+    assert take_new.take_number == 2
+    assert take_new.take_suffix == ""

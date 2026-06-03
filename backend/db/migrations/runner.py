@@ -18,6 +18,7 @@ MIGRATION_FILES: dict[int, str] = {
     1: "v1_init.sql",
     2: "v2_scene_heading.sql",
     3: "v3_scene_take_soft_delete.sql",
+    4: "v4_takes_shot_unique.sql",
 }
 
 

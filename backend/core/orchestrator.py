@@ -152,20 +152,25 @@ class Orchestrator:
         # P1 #2：先同步 session.scene_id，确保 take.end 时 scene_id 已就绪
         self.session.activate_scene(scene_id)
 
-        # take_number = COALESCE(MAX(take_number),0)+1，永不复用已删号
-        take_number = self.dal.next_take_number(scene_id)
+        # shot=None 时归一为 ''（v4 NOT NULL DEFAULT ''，DeepSeek #2 注）
+        shot = payload.shot if payload.shot is not None else ""
 
+        # take_number 由 dal.start_take 内部原子分配（BEGIN IMMEDIATE 事务内 MAX+1+vacate+INSERT）
+        # orchestrator 不再单独调 next_take_number；read-back 通过 get_take 获取实际号
         take_id = self.dal.start_take(
             scene_id=scene_id,
-            take_number=take_number,
+            shot=shot,
             start_ts=payload.start_ts,
-            shot=payload.shot,
         )
+        # read-back：取实际写入的 take_number（start_take 原子分配）
+        take_row = self.dal.get_take(take_id)
+        take_number = take_row.take_number if take_row is not None else 1
+
         self.session.take_start(
             take_id=take_id,
             take_number=take_number,
             start_ts=payload.start_ts,
-            shot=payload.shot,
+            shot=shot,
         )
 
         self.publish(

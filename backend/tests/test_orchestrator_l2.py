@@ -222,12 +222,12 @@ async def test_take_end_assembles_previous_notes(tmp_dal: DAL) -> None:
     scene_id = tmp_dal.create_scene("scene_pn1")
 
     # 预置两条历史 take，带 script_diff
-    old_take1 = tmp_dal.start_take(scene_id, take_number=1, start_ts=time.time() - 200)
+    old_take1 = tmp_dal.start_take(scene_id, "1", time.time() - 200)
     tmp_dal.update_take_l2_output(
         old_take1,
         {"script_diff_summary": "第1条take偏差记录", "line_matches": []},
     )
-    old_take2 = tmp_dal.start_take(scene_id, take_number=2, start_ts=time.time() - 100)
+    old_take2 = tmp_dal.start_take(scene_id, "1", time.time() - 100)
     tmp_dal.update_take_l2_output(
         old_take2,
         {"script_diff_summary": "第2条take偏差记录", "line_matches": []},
@@ -554,9 +554,9 @@ async def test_previous_notes_caps_at_5_takes(tmp_dal: DAL) -> None:
     """10 条历史 take → previous_notes 只取最近 5 条。"""
     scene_id = tmp_dal.create_scene("scene_pn5")
 
-    # 插入 10 条带 summary 的历史 take
+    # 插入 10 条带 summary 的历史 take（shot="1" 组，自动分配号 1-10）
     for i in range(1, 11):
-        tid = tmp_dal.start_take(scene_id, take_number=i, start_ts=float(i))
+        tid = tmp_dal.start_take(scene_id, "1", float(i))
         tmp_dal.update_take_l2_output(tid, {"script_diff_summary": f"summary_{i:02d}", "line_matches": []})
 
     captured_inputs: list = []
@@ -585,7 +585,7 @@ async def test_previous_notes_caps_total_chars(tmp_dal: DAL) -> None:
 
     long_summary = "X" * 400
     for i in range(1, 6):
-        tid = tmp_dal.start_take(scene_id, take_number=i, start_ts=float(i))
+        tid = tmp_dal.start_take(scene_id, "1", float(i))
         tmp_dal.update_take_l2_output(tid, {"script_diff_summary": long_summary, "line_matches": []})
 
     captured_inputs: list = []

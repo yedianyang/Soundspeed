@@ -32,9 +32,9 @@ CREATE TABLE IF NOT EXISTS takes (
     take_id          INTEGER PRIMARY KEY AUTOINCREMENT,
     scene_id         INTEGER NOT NULL
         REFERENCES scenes (scene_id) ON DELETE RESTRICT,
+    shot             TEXT    NOT NULL DEFAULT '',    -- 镜次编号，如 "Shot_2B"；'' 表示无镜（v4）
     take_number      INTEGER NOT NULL,               -- 本场次内的 take 编号，从 1 起
     take_suffix      TEXT    NOT NULL DEFAULT '',    -- 后缀，冲突时追加 '+' / '++'（v3）
-    shot             TEXT,                           -- 镜次编号，如 "Shot_2B"
     start_ts         REAL    NOT NULL,               -- take 开始 Unix 时间戳（秒，含小数）
     end_ts           REAL,                           -- take 结束 Unix 时间戳，进行中时为 NULL
     status           TEXT    NOT NULL DEFAULT 'tbd'
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS takes (
     deleted_at       REAL,                           -- 软删时间戳，NULL 表示未删除（v3）
     created_at       REAL    NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS REAL)),
     updated_at       REAL    NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS REAL)),
-    UNIQUE (scene_id, take_number, take_suffix)
+    UNIQUE (scene_id, shot, take_number, take_suffix)
 );
 
 CREATE INDEX IF NOT EXISTS ix_takes_scene_id
@@ -223,4 +223,4 @@ BEGIN
         VALUES (NEW.line_id, NEW.text, NEW.character);
 END;
 
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
