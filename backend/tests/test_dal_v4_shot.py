@@ -395,3 +395,74 @@ def test_update_take_meta_max_iter_guard_raises(tmp_dal: DAL, monkeypatch) -> No
     #   iter=1: '++' 不在 taken → 1 >= 1=True → 抛 RuntimeError
     with pytest.raises(RuntimeError, match="后缀循环超过"):
         tmp_dal.update_take_meta(t_edit, take_number=4)
+
+
+# ── start_take 显式 take_number（底部 Take 弹窗手动指定待录号）──────────────────
+
+
+def test_start_take_explicit_number_empty_group(tmp_dal: DAL) -> None:
+    """空组传显式号 → 直接落该号，suffix=''。"""
+    sid = tmp_dal.create_scene("s_explicit_empty")
+    tid, num = tmp_dal.start_take(sid, "A", 1000.0, take_number=5)
+    assert num == 5
+    take = tmp_dal.get_take(tid)
+    assert take is not None
+    assert take.take_number == 5
+    assert take.take_suffix == ""
+
+
+def test_start_take_explicit_number_skips_ahead(tmp_dal: DAL) -> None:
+    """组内已有 live 1、2，显式跳到 5 → 落 5（不是自动的 3），suffix=''。"""
+    sid = tmp_dal.create_scene("s_explicit_skip")
+    tmp_dal.start_take(sid, "A", 1000.0)  # number=1
+    tmp_dal.start_take(sid, "A", 1001.0)  # number=2
+    tid, num = tmp_dal.start_take(sid, "A", 1002.0, take_number=5)
+    assert num == 5
+    take = tmp_dal.get_take(tid)
+    assert take is not None
+    assert take.take_number == 5
+    assert take.take_suffix == ""
+
+
+def test_start_take_explicit_number_collides_live_gets_suffix(tmp_dal: DAL) -> None:
+    """显式号撞 live 占用者（往回退占已用号）→ 新 take 落后缀，live 占用者不被挪。"""
+    sid = tmp_dal.create_scene("s_explicit_collide")
+    live_tid, _ = tmp_dal.start_take(sid, "A", 1000.0)  # number=1 (live, 占 '')
+    new_tid, num = tmp_dal.start_take(sid, "A", 1001.0, take_number=1)
+    assert num == 1
+    new_take = tmp_dal.get_take(new_tid)
+    live_take = tmp_dal.get_take(live_tid)
+    assert new_take is not None and live_take is not None
+    assert new_take.take_number == 1
+    assert new_take.take_suffix == "+"  # 新 take 顺位加后缀
+    assert live_take.take_suffix == ""  # live 占用者永不被挪
+
+
+def test_start_take_explicit_number_reuses_soft_deleted_slot(tmp_dal: DAL) -> None:
+    """显式号落在被软删行占着的 '' 号位 → vacate 让位，新 live take 拿干净 ''。"""
+    sid = tmp_dal.create_scene("s_explicit_vacate")
+    tmp_dal.start_take(sid, "A", 1000.0)  # number=1 (live)
+    t2, _ = tmp_dal.start_take(sid, "A", 1001.0)  # number=2
+    tmp_dal.delete_take(t2)  # 软删 2，占着 (A,2,'')
+
+    new_tid, num = tmp_dal.start_take(sid, "A", 1002.0, take_number=2)
+    assert num == 2
+    new_take = tmp_dal.get_take(new_tid)
+    old_take = tmp_dal.get_take_any(t2)  # 软删行用 _any 才取得到
+    assert new_take is not None and old_take is not None
+    assert new_take.take_number == 2
+    assert new_take.take_suffix == ""  # 新 live take 拿干净号位
+    assert old_take.take_suffix == "+"  # 软删占用者被挪去让位
+    assert old_take.deleted_at is not None  # 仍是软删状态
+
+
+def test_start_take_no_explicit_number_unchanged(tmp_dal: DAL) -> None:
+    """不传显式号 → 行为不变：自动 MAX+1，suffix=''。"""
+    sid = tmp_dal.create_scene("s_auto_unchanged")
+    tmp_dal.start_take(sid, "A", 1000.0)  # number=1
+    tid, num = tmp_dal.start_take(sid, "A", 1001.0)  # 自动 → 2
+    assert num == 2
+    take = tmp_dal.get_take(tid)
+    assert take is not None
+    assert take.take_number == 2
+    assert take.take_suffix == ""

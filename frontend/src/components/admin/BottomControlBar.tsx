@@ -55,6 +55,8 @@ interface BottomControlBarProps {
   onCreateScene: () => void
   // 改 Shot（事件 6）：free-text，只更新 workSlot，不发 PATCH。
   onChangeShot: (shot: string | null) => void
+  // 改 Take：手动指定待录号，只更新 workSlot，不发 PATCH（下一次 REC 作为显式号传后端）。
+  onChangeTake: (takeNumber: number) => void
   onNextTake: () => void
   nextTakeBusy?: boolean
   onDeleteTake: () => void
@@ -85,6 +87,7 @@ export default function BottomControlBar({
   onSelectScene,
   onCreateScene,
   onChangeShot,
+  onChangeTake,
   onNextTake,
   nextTakeBusy = false,
   onDeleteTake,
@@ -96,6 +99,7 @@ export default function BottomControlBar({
 }: BottomControlBarProps) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [shotDraft, setShotDraft] = useState("")
+  const [takeDraft, setTakeDraft] = useState("")
 
   // currentTakeId 为 null（本会话尚无 take）→ 作用于「当前 take」的控件（Mark / Delete）禁用。
   const noTake = currentTakeId == null
@@ -106,11 +110,19 @@ export default function BottomControlBar({
     onChangeShot(v ? v : null)
   }
 
+  // 改 Take：解析为正整数才提交（take 号从 1 起，挡掉空/0/负/非数字）。
+  const commitTake = () => {
+    const n = Number.parseInt(takeDraft.trim(), 10)
+    if (Number.isFinite(n) && n >= 1) onChangeTake(n)
+  }
+
   // 录制中（E）：Scene / Shot / Next Take / Delete / 撤销 全禁，只有 Mark 可点。
   // 因录制而禁用的控件加淡红遮罩（recordingDisabled），区别于普通灰色 disabled（opacity-50）。
   const sceneDisabled = isRecording || sceneBusy
   // Shot 现在改 workSlot（无需 take），故只受录制锁约束，不再受 noTake 限制。
   const shotDisabled = isRecording
+  // Take 与 Shot 对称：手动改待录号也只受录制锁约束。
+  const takeDisabled = isRecording
   const nextDisabled = !activeScene || takeBusy || nextTakeBusy || isRecording
   // Mark 作用于 currentTakeRecord，受 noTake 约束。Delete 作用于 workSlot 组最新 live take，
   // 空组（canDeleteSlot=false）禁用。
@@ -250,23 +262,56 @@ export default function BottomControlBar({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            {/* Take（只读 badge）：读 workSlot.take_number。决策 4：计次由系统自动定，用户不手动管，
-                故无下拉编辑。显示已录最新（空组为 1）；REC 才推进到下一条（后端 next_take_number）。 */}
-            <div
-              className={cn(
-                stageButton,
-                "cursor-default select-none",
-                disabledTone(true, false),
-              )}
-              title="待录 Take（系统按 Shot 自动计次）"
+            {/* Take（与 Shot 同构的下拉数字弹窗）：读 workSlot.take_number 显示已录最新（空组为 1）。
+                平时 REC 由后端按 Shot 自动计次；用户可手动改待录号，下一次 REC 作为显式号传后端
+                （撞 live 号后端落后缀）。 */}
+            <DropdownMenu
+              onOpenChange={(open) => {
+                if (open) setTakeDraft(slotTakeNumber != null ? String(slotTakeNumber) : "")
+              }}
             >
-              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                Take
-              </span>
-              <span className="font-semibold text-sm text-foreground">
-                {slotTakeLabel}
-              </span>
-            </div>
+              <DropdownMenuTrigger asChild disabled={takeDisabled}>
+                <Button
+                  variant="ghost"
+                  size="default"
+                  className={cn(stageButton, disabledTone(true, takeDisabled))}
+                  title={isRecording ? "录制中不可改号" : "改待录 Take 号"}
+                >
+                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Take
+                  </span>
+                  <span className="font-semibold text-sm text-foreground">
+                    {slotTakeLabel}
+                  </span>
+                  <ChevronDown className="size-3 text-muted-foreground" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-48 p-2">
+                <DropdownMenuLabel className="px-1">Take</DropdownMenuLabel>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    commitTake()
+                  }}
+                  className="flex items-center gap-1.5 px-1"
+                >
+                  <Input
+                    autoFocus
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    step={1}
+                    value={takeDraft}
+                    onChange={(e) => setTakeDraft(e.target.value)}
+                    placeholder="例：5"
+                    className="h-8 text-sm"
+                  />
+                  <Button type="submit" size="icon-sm" className="rounded-full">
+                    <Check className="size-3.5" />
+                  </Button>
+                </form>
+              </DropdownMenuContent>
+            </DropdownMenu>
 
             {/* Mark：改当前 take 的 status（循环 MARK_ORDER）。无 take → 禁用。 */}
             <Button

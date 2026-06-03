@@ -193,6 +193,12 @@ export default function AdminHome() {
   const workSlot = workSlotOverride ?? derivedInitialSlot
   const setWorkSlot = setWorkSlotOverride
 
+  // 用户在底部 Take 弹窗手动指定的「待录号」。workSlot.take_number 平时显示的是组内最新已录号
+  //（REC 时后端 MAX+1 推进），不能直接当显式号回传——否则正常 REC 会拿最新号撞 live 落后缀。
+  // 故单独记录手动号：仅下一次 REC 消费并作为显式号传后端；任何其它槽操作（切场/换镜/Next Take/删）
+  // 都清空它，避免把旧语境的号串到新槽。null → REC 走后端自动 MAX+1（默认）。
+  const [manualTakeNumber, setManualTakeNumber] = useState<number | null>(null)
+
   // workSlot 组（scene_id, shot）的最新 live take：删（事件 7）的作用对象。底部展示的是 workSlot，
   // 删必须删 workSlot 组里那条，而非 currentTakeRecord（活跃场跨 shot 的 max-take_id）——换镜后两者
   // 指向不同 take，删 currentTakeRecord 会删掉用户看不到、没指向的那条（advisor 指出的 §16 事件 7 偏差）。
@@ -280,7 +286,9 @@ export default function AdminHome() {
 
     // 复用条件收紧（advisor 陷阱 3）：未结束块的 (scene, shot) 必须与 workSlot 一致才复用，
     // 否则换镜后（事件 6 只改 workSlot 不发 API）会把音频录进旧 shot 的空块。
+    // 手动指定了待录号（manualTakeNumber）时也不复用：用户要的是带显式号的新 take，不是复用旧空块。
     const reuseUnended =
+      manualTakeNumber == null &&
       currentTakeRecord != null &&
       !currentTakeEnded &&
       currentTakeRecord.scene_id === sceneId &&
@@ -294,9 +302,15 @@ export default function AdminHome() {
       // 复用未结束的空块（同 scene+shot 的 Next Take 块）：不新建，直接录。workSlot 已指向它。
       return
     }
-    // 否则建新块。start_take 只传 scene+shot，后端取号。失败回滚 recording。
+    // 否则建新块。manualTakeNumber 非 null → 作为显式号传后端（撞 live 落后缀）；null → 后端自动取号。
+    // 失败回滚 recording。
     try {
-      await startTakeMut.mutateAsync({ sceneId, shot: shot === "" ? null : shot })
+      await startTakeMut.mutateAsync({
+        sceneId,
+        shot: shot === "" ? null : shot,
+        takeNumber: manualTakeNumber,
+      })
+      setManualTakeNumber(null) // 显式号已被这次 REC 消费
       // refetch 已落定（mutateAsync await 含 onSuccess 的 invalidate→refetch）：把 workSlot 推到新块。
       syncWorkSlotFromCacheToGroup(sceneId, shot)
     } catch (err) {
@@ -325,6 +339,7 @@ export default function AdminHome() {
     setRecError(null)
     activateScene.mutate(sceneId, {
       onSuccess: () => {
+        setManualTakeNumber(null) // 切场 = 新语境，手动号失效
         const latest = latestLiveTakeInScene(takesMap.values(), sceneId)
         setWorkSlot(
           latest
@@ -365,6 +380,7 @@ export default function AdminHome() {
   // 换镜前若还没录，只改待录槽，不产生孤儿 take。
   const handleChangeShot = (shotInput: string | null) => {
     if (!workSlot) return
+    setManualTakeNumber(null) // 换镜 = 新语境，手动号失效，新镜按其最新号 / 1 显示
     const shot = normShot(shotInput)
     const latest = latestLiveTakeInGroup(takesMap.values(), workSlot.scene_id, shot)
     setWorkSlot({
@@ -372,6 +388,15 @@ export default function AdminHome() {
       shot,
       take_number: latest ? latest.take_number : 1,
     })
+  }
+
+  // ---- 改 Take（底部 Take 弹窗，与 Shot 对称）：手动指定待录号，只改 workSlot 显示 + 记下手动号，
+  // 不发 API。下一次 REC 把它当显式号传后端（号空闲/软删占 → 干净落号；被 live 占 → 后端落后缀）。
+  // 录制中禁改（呼应底部 disabled）。
+  const handleChangeTake = (n: number) => {
+    if (!workSlot || isRecording) return
+    setManualTakeNumber(n)
+    setWorkSlot({ ...workSlot, take_number: n })
   }
 
   // ---- Next take（事件 4）：在同 (scene, shot) 建一个新的空 take 块，不自动开录。----
@@ -384,6 +409,7 @@ export default function AdminHome() {
       return
     }
     setRecError(null)
+    setManualTakeNumber(null) // Next Take 走后端自动取号，手动号失效
     const sceneId = activeScene.scene_id
     const shot = workSlot.shot
     try {
@@ -404,6 +430,7 @@ export default function AdminHome() {
   // vacate 让软删行加 + 让位，新 live take 拿干净同号位（前端正常走事件 2）。故这里刻意不动 workSlot。
   const handleDeleteTake = () => {
     if (!slotLatestTake) return
+    setManualTakeNumber(null) // 删后维持显示号但清手动号，删后 REC 走后端 vacate 复用同号（事件 8）
     const takeId = slotLatestTake.take_id
     deleteTake.mutate(takeId, {
       onSuccess: () => pushUndo(takeId),
@@ -647,6 +674,7 @@ export default function AdminHome() {
         onSelectScene={handleSelectScene}
         onCreateScene={() => setCreateSceneOpen(true)}
         onChangeShot={handleChangeShot}
+        onChangeTake={handleChangeTake}
         onNextTake={handleNextTake}
         nextTakeBusy={takeBlockBusy}
         onDeleteTake={handleDeleteTake}

@@ -393,27 +393,36 @@ class DAL:
         scene_id: int,
         shot: str,
         start_ts: float,
+        take_number: int | None = None,
     ) -> tuple[int, int]:
-        """新建 take 行（suffix=''），返回 (take_id, take_number)。
+        """新建 take 行，返回 (take_id, take_number)。
 
-        take_number 由方法内部在 BEGIN IMMEDIATE 写事务内原子分配：
-          1. 在 txn 内计算 (scene_id, shot) 组内 MAX(live take_number)+1
-          2. _vacate_base_slot：若 (scene_id, shot, take_number, '') 被软删行占着，先让出 ''
-          3. INSERT 新 take，落 (scene_id, shot, take_number, '')
+        take_number 在 BEGIN IMMEDIATE 写事务内确定 + 解析号位冲突：
+          1. 定号：take_number 为 None → (scene_id, shot) 组内 MAX(live)+1；显式传入 → 直接用
+             （用户在底部 Take 弹窗手动指定的待录号）。
+          2. _resolve_base_slot：解析 (scene_id, shot, take_number, '') 号位三态——空闲直接用 ''；
+             被软删行占 → vacate 让位，新 take 仍落 ''；被 live 行占（手动往回退占已用号）→
+             新 take 顺位加后缀（'+'/'++'…），live 占用者永不被挪。
+          3. INSERT 新 take，落 (scene_id, shot, take_number, 解析得的 suffix)。
 
+        自动号路径（take_number=None）行为不变：MAX+1 永不撞 live 行，故 _resolve_base_slot 恒返回
+        ''（空闲或 vacate），等价于旧 _vacate_base_slot + 落 ''。
         原子性依赖单连接 + IMMEDIATE 事务：同一进程单连接下，步骤 1-3 不会被其他写入打断。
         shot='' 表示无镜编号（v4 约定，不报错）。（DeepSeek #1）
         """
         with self._write_tx() as conn:
-            # 步骤 1：txn 内原子取号（scene+shot 分组，排除软删行）
-            take_number = _next_take_number(conn, scene_id, shot)
-            # 步骤 2：让出可能被软删行占着的干净 '' 号位
-            self._vacate_base_slot(conn, scene_id, shot, take_number)
+            # 步骤 1：定号（自动 MAX+1 或用显式传入号）
+            if take_number is None:
+                take_number = _next_take_number(conn, scene_id, shot)
+            # 步骤 2：解析号位冲突（exclude_take_id=-1：新行尚未插入，不排除任何已有行）
+            suffix, _resolution = self._resolve_base_slot(
+                conn, scene_id, shot, take_number, exclude_take_id=-1
+            )
             # 步骤 3：插入新 take
             cur = conn.execute(
-                "INSERT INTO takes (scene_id, shot, take_number, start_ts) "
-                "VALUES (?, ?, ?, ?);",
-                (scene_id, shot, take_number, start_ts),
+                "INSERT INTO takes (scene_id, shot, take_number, take_suffix, start_ts) "
+                "VALUES (?, ?, ?, ?, ?);",
+                (scene_id, shot, take_number, suffix, start_ts),
             )
         return cur.lastrowid, take_number  # type: ignore[return-value]
 

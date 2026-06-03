@@ -71,10 +71,19 @@ export function getTake(id: number): Promise<TakeDetailDTO> {
   return request<TakeDetailDTO>(`/api/v1/takes/${id}`)
 }
 
-export function startTake(sceneId: number, shot?: string | null): Promise<void> {
+// takeNumber：用户在底部 Take 弹窗手动指定的待录号。省略/undefined → 后端按 (scene,shot) 自动 MAX+1。
+export function startTake(
+  sceneId: number,
+  shot?: string | null,
+  takeNumber?: number | null,
+): Promise<void> {
   return request<void>(`/api/v1/take/start`, {
     method: "POST",
-    body: JSON.stringify({ scene_id: sceneId, shot: shot ?? null }),
+    body: JSON.stringify({
+      scene_id: sceneId,
+      shot: shot ?? null,
+      take_number: takeNumber ?? null,
+    }),
   })
 }
 
@@ -309,8 +318,15 @@ export function useRestoreTake() {
 export function useStartTake() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: ({ sceneId, shot }: { sceneId: number; shot?: string | null }) =>
-      startTake(sceneId, shot),
+    mutationFn: ({
+      sceneId,
+      shot,
+      takeNumber,
+    }: {
+      sceneId: number
+      shot?: string | null
+      takeNumber?: number | null
+    }) => startTake(sceneId, shot, takeNumber),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["takes"] }),
   })

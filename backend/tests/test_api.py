@@ -135,6 +135,35 @@ def test_take_start_with_valid_token_publishes_event(tmp_dal: DAL, monkeypatch) 
     assert payload.scene_id == scene_id
     assert payload.shot == "A"
     assert isinstance(payload.start_ts, float)
+    assert payload.take_number is None  # 未传 → None（后端自动取号）
+
+
+def test_take_start_explicit_take_number_passthrough(tmp_dal: DAL, monkeypatch) -> None:
+    """body 带 take_number → 透传进 TakeStartPayload；0/负数被 ge=1 挡成 422。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    scene_id = tmp_dal.create_scene("scene_explicit_num")
+    tmp_dal.set_active_scene(scene_id)
+
+    received: list[object] = []
+    orch.subscribe(TAKE_START, lambda p: received.append(p))
+
+    resp = client.post(
+        "/api/v1/take/start",
+        json={"scene_id": scene_id, "shot": "A", "take_number": 5},
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert resp.status_code == 200
+    assert isinstance(received[0], TakeStartPayload)
+    assert received[0].take_number == 5
+
+    # ge=1：take_number=0 → 422（FastAPI 请求体校验，不进 orchestrator）
+    resp_zero = client.post(
+        "/api/v1/take/start",
+        json={"scene_id": scene_id, "shot": "A", "take_number": 0},
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert resp_zero.status_code == 422
 
 
 def test_take_end_with_valid_token_publishes_event(tmp_dal: DAL, monkeypatch) -> None:

@@ -155,12 +155,13 @@ class Orchestrator:
         # shot=None 时归一为 ''（v4 NOT NULL DEFAULT ''，DeepSeek #2 注）
         shot = payload.shot if payload.shot is not None else ""
 
-        # take_number 由 dal.start_take 内部原子分配（BEGIN IMMEDIATE 事务内 MAX+1+vacate+INSERT）
-        # start_take 返回 (take_id, take_number)，无需 read-back
+        # take_number：payload 带显式号（用户手动指定待录号）→ 用它；None → dal 内部自动 MAX+1。
+        # start_take 在写事务内解析号位冲突，返回最终 (take_id, take_number)，无需 read-back。
         take_id, take_number = self.dal.start_take(
             scene_id=scene_id,
             shot=shot,
             start_ts=payload.start_ts,
+            take_number=payload.take_number,
         )
 
         self.session.take_start(

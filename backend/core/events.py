@@ -73,6 +73,8 @@ class TakeStartPayload:
     scene_id: int
     shot: str | None
     start_ts: float
+    # 待录 take 的显式号（用户在底部 Take 弹窗手动指定）。None → 后端按 (scene,shot) 自动 MAX+1。
+    take_number: int | None = None
 
 
 @dataclass(frozen=True)
