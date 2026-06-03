@@ -39,6 +39,7 @@ from backend.core.events import (
     ASR_PARTIAL_CH1,
     ASR_PARTIAL_CH2,
     LLM_STATUS,
+    NOTE_PROCESSED,
     TAKE_CHANGED,
 )
 from backend.core.orchestrator import Orchestrator
@@ -67,6 +68,7 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
             ASR_PARTIAL_CH2,
             ASR_FINAL_CH1,
             ASR_FINAL_CH2,
+            NOTE_PROCESSED,
             TAKE_CHANGED,
             LLM_STATUS,
         ):

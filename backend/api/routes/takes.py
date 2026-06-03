@@ -281,79 +281,58 @@ class NoteListOut(BaseModel):
     events: list[NoteOut]
 
 
-@router.post("/notes", status_code=201)
+@router.post("/notes", status_code=202)
 async def create_note(
     body: NoteCreateBody,
     request: Request,
     _: None = Depends(require_admin),
-) -> NoteOut:
-    """创建 note：解析文本 → 定位 take → 写库，返回 NoteOut。"""
-    dal = request.app.state.orchestrator.dal
-    session = request.app.state.orchestrator.session
+) -> dict:
+    """提交 note：解析 @category → fire-and-forget NP Pipeline → 返回 202。
+    
+    NP Pipeline 在后台通过 LLM 判断归属 take 并写库。
+    """
+    orchestrator = request.app.state.orchestrator
     ts = body.ts or time.time()
 
-    # 1. 解析
+    # 1. 规则解析（只提取 @category，不定位 take）
     try:
         note = parse_note(body.text, ts)
     except NoteParseError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # 2. 定位 take_id
-    if note.scene_code is not None and note.take_number is not None:
-        scenes = dal.list_scenes()
-        scene_id = None
-        for s in scenes:
-            if s["scene_code"] == note.scene_code:
-                scene_id = s["scene_id"]
-                break
-        if scene_id is None:
-            raise HTTPException(status_code=404, detail=f"scene not found: {note.scene_code}")
-        takes = dal.list_takes(scene_id)
-        take_id = None
-        for t in takes:
-            if t.take_number == note.take_number:
-                take_id = t.take_id
-                break
-        if take_id is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"take not found: {note.scene_code} #{note.take_number}",
+    # 2. fire-and-forget NP Pipeline
+    try:
+        orchestrator.run_np_async(
+            raw_text=note.raw_text,
+            parsed_category=note.category,
+            ts=note.ts,
+        )
+    except RuntimeError:
+        # 不在 event loop 中（如测试环境），fallback 到当前活跃 take
+        dal = request.app.state.orchestrator.dal
+        session = request.app.state.orchestrator.session
+        if session.take_active and session.take_id is not None:
+            event_id = dal.insert_note(
+                take_id=session.take_id,
+                category=note.category,
+                content=note.content,
+                raw_text=note.raw_text,
+                ts=note.ts,
             )
-    else:
-        if not session.take_active or session.take_id is None:
-            raise HTTPException(status_code=409, detail="no active take")
-        take_id = session.take_id
+            return {
+                "status": "ok",
+                "event_id": event_id,
+                "take_id": session.take_id,
+                "category": note.category,
+                "content": note.content,
+            }
+        raise HTTPException(status_code=409, detail="no active take and no event loop for NP Pipeline")
 
-    # 3. 写库
-    event_id = dal.insert_note(
-        take_id=take_id,
-        category=note.category,
-        content=note.content,
-        raw_text=note.raw_text,
-        ts=note.ts,
-    )
-
-    # 4. 查询 scene_code / take_number 用于响应
-    take = dal.get_take(take_id)
-    scene_code_out: str | None = None
-    take_number_out: int | None = take.take_number if take else None
-    if take:
-        scenes = dal.list_scenes()
-        for s in scenes:
-            if s["scene_id"] == take.scene_id:
-                scene_code_out = s.get("scene_code")
-                break
-
-    return NoteOut(
-        event_id=event_id,
-        take_id=take_id,
-        scene_code=scene_code_out,
-        take_number=take_number_out,
-        category=note.category,
-        content=note.content,
-        raw_text=note.raw_text,
-        ts=note.ts,
-    )
+    return {
+        "status": "processing",
+        "category": note.category,
+        "content": note.content,
+    }
 
 
 @router.get("/takes/{take_id}/notes")

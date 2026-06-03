@@ -133,3 +133,17 @@ class LlmStatusPayload:
     state: str          # "idle" | "downloading" | "loading" | "running"
     task_type: str | None
     take_id: int | None
+
+# Note 事件（4.x NP Pipeline）
+NOTE_PROCESSED = "note.processed"
+
+
+@dataclass(frozen=True)
+class NoteProcessedPayload:
+    """note.processed 的 payload：NP Pipeline 归置完成后发布。"""
+
+    event_id: int
+    take_id: int
+    category: str
+    content: str
+    ts: float

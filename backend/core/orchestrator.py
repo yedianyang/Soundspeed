@@ -19,11 +19,13 @@ from backend.core.events import (
     ASR_FINAL_CH1,
     ASR_FINAL_CH2,
     LLM_STATUS,
+    NOTE_PROCESSED,
     TAKE_CHANGED,
     TAKE_END,
     TAKE_START,
     AsrFinalPayload,
     LlmStatusPayload,
+    NoteProcessedPayload,
     TakeChangedPayload,
     TakeEndPayload,
     TakeStartPayload,
@@ -414,6 +416,90 @@ class Orchestrator:
                 take_number=take_number,
                 status="tbd",
                 script_diff=None,
+            ),
+        )
+
+    def run_np_async(self, raw_text: str, parsed_category: str, ts: float) -> None:
+        """fire-and-forget NP Pipeline：归置 note 到正确的 take。
+
+        在 event loop 内调用，创建后台 Task。
+        """
+        loop = asyncio.get_running_loop()
+        loop.create_task(self._run_np_async(raw_text, parsed_category, ts))
+
+    async def _run_np_async(self, raw_text: str, parsed_category: str, ts: float) -> None:
+        """后台异步 NP Pipeline：构建上下文 → LLM 归置 → 写库 → WS 推送。"""
+        from backend.pipelines.np_note import NPInput, NPParseError, run_np_note
+
+        svc = self._deps.llm_service
+        if svc is None:
+            logger.warning("NP Pipeline: llm_service is None, cannot run")
+            return
+
+        # 构建 take_context
+        scene_id = self.session.scene_id
+        current_take_id = self.session.take_id if self.session.take_active else None
+
+        take_context: list[dict] = []
+        if scene_id is not None:
+            takes = self.dal.list_takes(scene_id)
+            # 取最近 10 条，排除当前活跃 take
+            recent = [t for t in takes if t.take_id != current_take_id][-10:]
+            for t in recent:
+                summary = ""
+                if t.script_diff and isinstance(t.script_diff, dict):
+                    summary = t.script_diff.get("script_diff_summary", "") or ""
+                # 查 scene_code
+                scenes = self.dal.list_scenes()
+                sc = ""
+                for s in scenes:
+                    if s.get("scene_id") == t.scene_id:
+                        sc = s.get("scene_code", "")
+                        break
+                take_context.append({
+                    "take_id": t.take_id,
+                    "scene_code": sc,
+                    "take_number": t.take_number,
+                    "summary": summary,
+                })
+
+        input_data = NPInput(
+            raw_text=raw_text,
+            parsed_category=parsed_category,
+            current_scene_id=scene_id,
+            current_take_id=current_take_id,
+            take_context=take_context,
+            ts=ts,
+        )
+
+        try:
+            output = await run_np_note(input_data, svc, timeout=30.0)
+        except (NPParseError, Exception) as e:
+            logger.warning("NP Pipeline failed for text=%r: %s", raw_text[:80], e)
+            return
+
+        # 写库
+        try:
+            event_id = self.dal.insert_note(
+                take_id=output.take_id,
+                category=output.category,
+                content=output.content,
+                raw_text=raw_text,
+                ts=ts,
+            )
+        except Exception as e:
+            logger.warning("NP Pipeline: insert_note failed: %s", e)
+            return
+
+        # WS 推送
+        self.publish(
+            NOTE_PROCESSED,
+            NoteProcessedPayload(
+                event_id=event_id,
+                take_id=output.take_id,
+                category=output.category,
+                content=output.content,
+                ts=ts,
             ),
         )
 
