@@ -197,6 +197,7 @@ def _split_into_chunks(raw_text: str, chunk_size: int) -> list[str]:
     2. 按 chunk_size 字符数累积段落块成 chunk；段落内不切（保场内完整）。
     3. 若单个段落块本身超过 chunk_size，退化到按行机械切兜底（防超 token）。
     """
+    sep = "\n\n"  # 段落分隔符；size 记账与拼接共用同一来源，避免魔数漂移
     lines = raw_text.splitlines()
     paragraphs = _lines_to_paragraphs(lines)
 
@@ -205,18 +206,18 @@ def _split_into_chunks(raw_text: str, chunk_size: int) -> list[str]:
     current_size = 0
 
     for para in paragraphs:
-        para_size = len(para) + 1  # +1 for separator newline
+        para_size = len(para) + len(sep)
 
         if para_size > chunk_size:
             # 段落本身超限：先 flush 当前积累，再按行切兜底
             if current_parts:
-                chunks.append("\n\n".join(current_parts))
+                chunks.append(sep.join(current_parts))
                 current_parts = []
                 current_size = 0
             chunks.extend(_split_paragraph_by_lines(para, chunk_size))
         elif current_parts and current_size + para_size > chunk_size:
             # 加入后超限：先 flush，新段落开新块
-            chunks.append("\n\n".join(current_parts))
+            chunks.append(sep.join(current_parts))
             current_parts = [para]
             current_size = para_size
         else:
@@ -224,7 +225,7 @@ def _split_into_chunks(raw_text: str, chunk_size: int) -> list[str]:
             current_size += para_size
 
     if current_parts:
-        chunks.append("\n\n".join(current_parts))
+        chunks.append(sep.join(current_parts))
 
     return chunks
 
@@ -300,12 +301,14 @@ def _parse_chunk_output(raw_text: str) -> list[ParsedScene]:
         else:
             scene_code = None
 
-        # slugline：缺省三字段全 None
-        slugline_raw = scene_dict.get("slugline") or {}
+        # slugline：缺省三字段全 None（非 dict 一律归一为空 dict）
+        slugline_raw = scene_dict.get("slugline")
+        if not isinstance(slugline_raw, dict):
+            slugline_raw = {}
         slugline = Slugline(
-            int_ext=slugline_raw.get("int_ext") if isinstance(slugline_raw, dict) else None,
-            time_of_day=slugline_raw.get("time_of_day") if isinstance(slugline_raw, dict) else None,
-            location=slugline_raw.get("location") if isinstance(slugline_raw, dict) else None,
+            int_ext=slugline_raw.get("int_ext"),
+            time_of_day=slugline_raw.get("time_of_day"),
+            location=slugline_raw.get("location"),
         )
 
         # lines
@@ -321,7 +324,7 @@ def _parse_chunk_output(raw_text: str) -> list[ParsedScene]:
             character_raw = line_dict.get("character")
             character: str | None = character_raw if isinstance(character_raw, str) else None
 
-            text_raw = line_dict.get("text", "")
+            text_raw = line_dict.get("text")
             text = str(text_raw) if text_raw is not None else ""
 
             parsed_lines.append(ParsedLine(character=character, text=text))

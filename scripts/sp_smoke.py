@@ -114,6 +114,7 @@ _CHUNK_SIZE = 600  # 缩小以确保 ~1000 字输入触发分块（生产默认 
 async def main() -> int:
     model_path = os.environ.get("GEMMA_MODEL_PATH", "(未设置，将走 HF cache/下载)")
     chunks = _split_into_chunks(SMOKE_SCRIPT, _CHUNK_SIZE)
+    did_chunk = len(chunks) >= 2  # 是否触发分块路径（本探针的验证目标）
 
     print("=" * 68)
     print("SP Pipeline 端到端真模型冒烟探针")
@@ -122,7 +123,7 @@ async def main() -> int:
     print(f"  分块数    : {len(chunks)}（chunk_size={_CHUNK_SIZE}；>1 表示触发了分块路径）")
     print("=" * 68)
 
-    if len(chunks) < 2:
+    if not did_chunk:
         print("⚠️ 警告：输入未触发分块（分块数 < 2），本次未验证分块路径。")
 
     svc: LLMService = get_service()
@@ -202,10 +203,11 @@ async def main() -> int:
     # ── 判定 ─────────────────────────────────────────────────────────────
     scene_count_ok = len(scenes) >= 1  # 至少解析出 1 场就算不全崩
     json_ok = err is None
-    overflow_ok = not (isinstance(err, (ValueError, RuntimeError)))
-    split_ok = len(chunks) >= 2  # 本探针的目的就是验分块路径
+    overflow_ok = not (isinstance(err, (ValueError, RuntimeError)))  # 仅作 FAIL 诊断标签
+    split_ok = did_chunk  # 本探针的目的就是验分块路径
 
-    passed = json_ok and scene_count_ok and overflow_ok
+    # overflow_ok 被 json_ok 蕴含（err is None ⇒ 必非 ValueError/RuntimeError），不重复进 and 链
+    passed = json_ok and scene_count_ok
 
     print("\n" + "=" * 68)
     if passed:
