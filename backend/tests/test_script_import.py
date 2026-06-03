@@ -1,6 +1,6 @@
 """3.C Script Import 单元测试。
 
-覆盖：
+覆盖（FakeDAL 协调逻辑）：
   ① 单场 → active scene 插新版本
   ② 多场新场建场（scene_code 非 None，未命中 → 建场）
   ③ 多场老场（scene_code 命中）→ 插新版本，不重复建场
@@ -9,10 +9,16 @@
   ⑥ 行清洗（空 text 行被 filter、空串 character → None）
   ⑦ 无 active scene 单场 → NoActiveSceneError
 
-全部使用 FakeDAL（实现 ScriptImportDAL Protocol），不加载真实数据库 / 模型。
+覆盖（真 in-memory DAL，单场路径无 2.x 依赖）：
+  ⑧ 真 DAL 单场：UNIQUE(script_id,line_no)、版本自增、line_no 连续、raw_text 口径
+
+FakeDAL 验协调逻辑；真 DAL 验 insert_script 版本自增 / script_lines UNIQUE / FTS5 触发器。
+多场路径真验证待 2.x 合 main → rebase → 用真 DAL 的 get_or_create_scene 重跑。
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterator
 
 import pytest
 
@@ -20,6 +26,7 @@ from backend.core.script_import import (
     NoActiveSceneError,
     import_scenes,
 )
+from backend.db.dal import DAL
 from backend.pipelines.sp_script import ParsedLine, ParsedScene, Slugline
 
 
@@ -345,3 +352,86 @@ def test_raw_text_format() -> None:
     _, raw_text, _ = dal.scripts[0]
     expected = "张三：你好\n（停顿）\n李四：再见"
     assert raw_text == expected
+
+
+# ---------------------------------------------------------------------------
+# ⑧ 真 in-memory DAL 单场验证
+#    单场路径无 2.x 依赖（get_active_scene_id / insert_script / insert_script_line
+#    全在 main），可现在真验。
+#    多场路径（get_or_create_scene）待 2.x 合 main 后补。
+#
+#    注：真 DAL 目前缺 get_or_create_scene（2.x 补入），结构上不满足
+#    ScriptImportDAL Protocol，故单场调用点加 # type: ignore[arg-type]，
+#    标注依赖面：2.x 合并后真 DAL 结构满足 Protocol，此 ignore 可删除。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tmp_dal(tmp_path: object) -> Iterator[DAL]:
+    """每个测试一个临时文件 sqlite DAL（不用 :memory:，DAL 双连接不兼容）。"""
+    import pathlib
+    d = DAL(pathlib.Path(str(tmp_path)) / "test_si.db")
+    try:
+        yield d
+    finally:
+        d.close()
+
+
+def test_real_dal_single_scene_version_and_lines(tmp_dal: DAL) -> None:
+    """真 DAL 单场：版本自增、UNIQUE(script_id,line_no)、line_no 连续、raw_text 口径。"""
+    scene_id = tmp_dal.create_scene("SC_REAL")
+    tmp_dal.set_active_scene(scene_id)
+
+    scenes = [
+        _scene(lines=[
+            ("张三", "你好"),
+            ("李四", ""),         # 空串，应被过滤
+            (None, "（停顿）"),
+            ("", "空 character 归 None"),
+        ])
+    ]
+
+    # 3.x 真 DAL 缺 get_or_create_scene，结构不满足 Protocol；
+    # 2.x 合 main 后真 DAL 结构满足，此 ignore 可删除。
+    import_scenes(
+        scenes, target="current_scene", batch_id="b1", dal=tmp_dal  # type: ignore[arg-type]
+    )
+
+    # --- 版本 ---
+    script = tmp_dal.get_latest_script(scene_id)
+    assert script is not None
+    assert script["version"] == 1
+
+    # --- raw_text 格式（空行已过滤）---
+    expected_raw = "张三：你好\n（停顿）\n空 character 归 None"
+    assert script["raw_text"] == expected_raw
+
+    # --- script_lines：3 行（空 text 已过滤），line_no 连续从 1 ---
+    lines = tmp_dal.list_script_lines(script["script_id"])
+    assert len(lines) == 3
+    assert [ln["line_no"] for ln in lines] == [1, 2, 3]
+    assert lines[0]["character"] == "张三"
+    assert lines[0]["text"] == "你好"
+    assert lines[1]["character"] is None   # 舞台指示行
+    assert lines[2]["character"] is None   # 空串 character → None
+
+
+def test_real_dal_single_scene_version_increments(tmp_dal: DAL) -> None:
+    """真 DAL 第二次导入 → version 自增到 2。"""
+    scene_id = tmp_dal.create_scene("SC_REAL2")
+    tmp_dal.set_active_scene(scene_id)
+
+    scenes1 = [_scene(lines=[("张三", "第一版")])]
+    import_scenes(
+        scenes1, target="current_scene", batch_id="b1", dal=tmp_dal  # type: ignore[arg-type]
+    )
+
+    scenes2 = [_scene(lines=[("张三", "第二版")])]
+    import_scenes(
+        scenes2, target="current_scene", batch_id="b2", dal=tmp_dal  # type: ignore[arg-type]
+    )
+
+    script = tmp_dal.get_latest_script(scene_id)
+    assert script is not None
+    assert script["version"] == 2
+    assert "第二版" in script["raw_text"]
