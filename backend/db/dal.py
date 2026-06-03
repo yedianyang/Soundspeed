@@ -12,6 +12,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -643,3 +644,90 @@ class DAL:
             (script_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── notes (take_events + takes.notes 聚合) ───────────────────────────────
+
+    def insert_note(
+        self,
+        take_id: int,
+        category: str,
+        content: str,
+        raw_text: str,
+        ts: float,
+    ) -> int:
+        """写入一条 note 事件（take_events），并原子更新 takes.notes 聚合。
+
+        原子操作（同一事务）：
+        1. INSERT INTO take_events (take_id, event_type, ts, payload)
+           payload = {"category": category, "content": content, "raw_text": raw_text}
+        2. 重建 takes.notes：SELECT 该 take 所有 manual.note 事件的 ts, category, content，
+           按 ts 升序拼接为：
+           [2026-06-12T14:30:01+00:00] @issue 开头有飞机声
+           用 datetime.fromtimestamp(ts, timezone.utc).isoformat() 生成时间戳格式。
+           如果 content 为空，则不追加内容文本（如 \"[ts] @keeper\"）。
+           拼接后 UPDATE takes SET notes=?, updated_at=... WHERE take_id=?。
+        """
+        payload = {"category": category, "content": content, "raw_text": raw_text}
+        payload_json = json.dumps(payload)
+        with self._write_tx() as conn:
+            cur = conn.execute(
+                "INSERT INTO take_events (take_id, event_type, ts, payload) "
+                "VALUES (?, 'manual.note', ?, ?);",
+                (take_id, ts, payload_json),
+            )
+            event_id = cur.lastrowid
+
+            # 重建 takes.notes 聚合
+            rows = conn.execute(
+                "SELECT ts, payload FROM take_events "
+                "WHERE take_id = ? AND event_type = 'manual.note' "
+                "ORDER BY ts ASC;",
+                (take_id,),
+            ).fetchall()
+
+            lines = []
+            for r in rows:
+                event_ts = r["ts"]
+                p = json.loads(r["payload"])
+                cat = p.get("category", "")
+                cont = p.get("content", "")
+                ts_str = datetime.fromtimestamp(event_ts, tz=timezone.utc).isoformat()
+                if cont:
+                    lines.append("[{}] @{} {}".format(ts_str, cat, cont))
+                else:
+                    lines.append("[{}] @{}".format(ts_str, cat))
+
+            notes_text = "\n".join(lines) if lines else None
+            conn.execute(
+                "UPDATE takes SET notes = ?, updated_at = {} WHERE take_id = ?;".format(
+                    _NOW_TS_SQL
+                ),
+                (notes_text, take_id),
+            )
+        return event_id  # type: ignore[return-value]
+
+    def list_notes(
+        self,
+        take_id: int,
+        category: str | None = None,
+    ) -> list[TakeEvent]:
+        """按 take_id 列出 note 事件（event_type='manual.note'）。
+
+        可选按 category 过滤，按 ts 升序返回。
+        """
+        if category is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM take_events "
+                "WHERE take_id = ? AND event_type = 'manual.note' "
+                "AND json_extract(payload, '$.category') = ? "
+                "ORDER BY ts ASC;",
+                (take_id, category),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM take_events "
+                "WHERE take_id = ? AND event_type = 'manual.note' "
+                "ORDER BY ts ASC;",
+                (take_id,),
+            ).fetchall()
+        return [_row_to_event(r) for r in rows]
