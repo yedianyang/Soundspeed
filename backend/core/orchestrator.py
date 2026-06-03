@@ -42,12 +42,14 @@ logger = logging.getLogger(__name__)
 class Dependencies:
     """Orchestrator 可选外部依赖，用于 1.H take handler。
 
-    llm_service: LLMService 实例，注入到 l2_runner。
+    llm_service: LLMService 实例，注入到 l2_runner / np_runner。
     l2_runner: 异步可调用，签名 (L2Input, LLMService) -> Awaitable[L2Output]。
+    np_runner: 异步可调用，签名 (NPInput, LLMService) -> Awaitable[NPOutput]。
     """
 
     llm_service: Any = field(default=None)
     l2_runner: Any = field(default=None)
+    np_runner: Any = field(default=None)
 
 
 class Orchestrator:
@@ -60,12 +62,14 @@ class Orchestrator:
         *,
         llm_service: Any = None,
         l2_runner: Any = None,
+        np_runner: Any = None,
     ) -> None:
         self.dal = dal
         self.session: SessionState = session if session is not None else SessionState()
-        self._deps = Dependencies(llm_service=llm_service, l2_runner=l2_runner)
+        self._deps = Dependencies(llm_service=llm_service, l2_runner=l2_runner, np_runner=np_runner)
         self._handlers: dict[str, list[Handler]] = {}
         self._l2_task: asyncio.Task[None] | None = None  # 最近一次 L2 后台 task，供测试 await
+        self._np_task: asyncio.Task[None] | None = None  # 最近一次 NP 后台 task，供测试 await
         self._register_builtin_handlers()
 
     def subscribe(self, event_type: str, handler: Handler) -> None:
@@ -422,19 +426,48 @@ class Orchestrator:
     def run_np_async(self, raw_text: str, parsed_category: str, ts: float) -> None:
         """fire-and-forget NP Pipeline：归置 note 到正确的 take。
 
-        在 event loop 内调用，创建后台 Task。
+        在 event loop 内调用，创建后台 Task + done callback。
+        与 L2 流程对齐：runner 由 create_orchestrator 注入，callback 处理错误与 idle。
         """
         loop = asyncio.get_running_loop()
-        loop.create_task(self._run_np_async(raw_text, parsed_category, ts))
+        task = loop.create_task(self._run_np_async(raw_text, parsed_category, ts))
+        task.add_done_callback(
+            lambda t: self._np_done_callback(t, raw_text=raw_text, parsed_category=parsed_category, ts=ts)
+        )
+        self._np_task = task
 
     async def _run_np_async(self, raw_text: str, parsed_category: str, ts: float) -> None:
-        """后台异步 NP Pipeline：构建上下文 → LLM 归置 → 写库 → WS 推送。"""
-        from backend.pipelines.np_note import NPInput, NPParseError, run_np_note
+        """后台异步 NP Pipeline：构建上下文 → LLM 归置 → 写库 → WS 推送。
 
+        llm.status 发射顺序（前端 chip 状态，与 L2 对齐）：
+          模型不在本地 → downloading → ensure_model_ready → loading/running → idle
+          模型已在本地 → loading/running → idle
+        """
         svc = self._deps.llm_service
-        if svc is None:
-            logger.warning("NP Pipeline: llm_service is None, cannot run")
+        np_runner = self._deps.np_runner
+
+        if svc is None or np_runner is None:
+            logger.warning("NP Pipeline: llm_service or np_runner is None, cannot run")
             return
+
+        # 模型缺失时：发 downloading + await ensure_model_ready
+        if not getattr(svc, "model_present", True):
+            self.publish(
+                LLM_STATUS,
+                LlmStatusPayload(state="downloading", task_type="note_struct", take_id=None),
+            )
+            await svc.ensure_model_ready()
+
+        # 发射 llm.status：loading 或 running
+        _state = (
+            "loading"
+            if not getattr(svc, "model_loaded", True)
+            else "running"
+        )
+        self.publish(
+            LLM_STATUS,
+            LlmStatusPayload(state=_state, task_type="note_struct", take_id=None),
+        )
 
         # 构建 take_context
         scene_id = self.session.scene_id
@@ -443,13 +476,11 @@ class Orchestrator:
         take_context: list[dict] = []
         if scene_id is not None:
             takes = self.dal.list_takes(scene_id)
-            # 取最近 10 条，排除当前活跃 take
             recent = [t for t in takes if t.take_id != current_take_id][-10:]
             for t in recent:
                 summary = ""
                 if t.script_diff and isinstance(t.script_diff, dict):
                     summary = t.script_diff.get("script_diff_summary", "") or ""
-                # 查 scene_code
                 scenes = self.dal.list_scenes()
                 sc = ""
                 for s in scenes:
@@ -463,6 +494,8 @@ class Orchestrator:
                     "summary": summary,
                 })
 
+        from backend.pipelines.np_note import NPInput
+
         input_data = NPInput(
             raw_text=raw_text,
             parsed_category=parsed_category,
@@ -472,24 +505,16 @@ class Orchestrator:
             ts=ts,
         )
 
-        try:
-            output = await run_np_note(input_data, svc, timeout=30.0)
-        except (NPParseError, Exception) as e:
-            logger.warning("NP Pipeline failed for text=%r: %s", raw_text[:80], e)
-            return
+        output = await np_runner(input_data, svc)
 
         # 写库
-        try:
-            event_id = self.dal.insert_note(
-                take_id=output.take_id,
-                category=output.category,
-                content=output.content,
-                raw_text=raw_text,
-                ts=ts,
-            )
-        except Exception as e:
-            logger.warning("NP Pipeline: insert_note failed: %s", e)
-            return
+        event_id = self.dal.insert_note(
+            take_id=output.take_id,
+            category=output.category,
+            content=output.content,
+            raw_text=raw_text,
+            ts=ts,
+        )
 
         # WS 推送
         self.publish(
@@ -503,6 +528,27 @@ class Orchestrator:
             ),
         )
 
+    def _np_done_callback(
+        self, task: Any, *, raw_text: str, parsed_category: str, ts: float
+    ) -> None:
+        """NP task done callback：发 idle + 失败时 log warning。
+
+        与 _l2_done_callback 对齐：
+          - 成功：_run_np_async 已推送 NOTE_PROCESSED，callback 只发 idle。
+          - 失败：记 WARNING + 发 idle。note 丢失（无降级写），日志留痕。
+          - 取消：只发 idle。
+        """
+        self.publish(
+            LLM_STATUS,
+            LlmStatusPayload(state="idle", task_type="note_struct", take_id=None),
+        )
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        logger.warning("NP Pipeline failed for text=%r: %s", raw_text[:80], exc)
+
 
 def create_orchestrator(
     dal: DAL,
@@ -510,13 +556,20 @@ def create_orchestrator(
     *,
     llm_service: Any = None,
     l2_runner: Any = None,
+    np_runner: Any = None,
 ) -> Orchestrator:
     """模块级工厂函数，供生产代码与测试注入依赖。
 
     老签名 Orchestrator(dal, session) 零改动，此函数提供更明确的依赖注入入口。
-    llm_service 不为 None 且 l2_runner 未显式传时，自动绑定 run_l2_take（spec §3.1）。
+    llm_service 不为 None 时自动绑定默认 runner：
+      - l2_runner 未显式传 → 绑定 run_l2_take
+      - np_runner 未显式传 → 绑定 run_np_note
     """
-    if llm_service is not None and l2_runner is None:
-        from backend.pipelines.l2_take import run_l2_take
-        l2_runner = run_l2_take
-    return Orchestrator(dal, session, llm_service=llm_service, l2_runner=l2_runner)
+    if llm_service is not None:
+        if l2_runner is None:
+            from backend.pipelines.l2_take import run_l2_take
+            l2_runner = run_l2_take
+        if np_runner is None:
+            from backend.pipelines.np_note import run_np_note
+            np_runner = run_np_note
+    return Orchestrator(dal, session, llm_service=llm_service, l2_runner=l2_runner, np_runner=np_runner)
