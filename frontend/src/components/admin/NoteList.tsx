@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react"
 import { Card } from "@/components/ui/card"
 import { getTakeNotes } from "@/lib/api"
-import type { NoteDTO } from "@/types/api"
+import { useSessionStore } from "@/store/session"
+import type { NoteDTO, PendingNote } from "@/types/api"
 
 const CATEGORY_COLORS: Record<string, string> = {
   keeper: "text-green-600",
@@ -17,11 +18,12 @@ function formatTime(ts: number): string {
 
 interface NoteListProps {
   takeId: number | null
-  refreshKey: number // 每次递增触重新 fetch
+  refreshKey: number
 }
 
 export default function NoteList({ takeId, refreshKey }: NoteListProps) {
   const [notes, setNotes] = useState<NoteDTO[]>([])
+  const pendingNotes = useSessionStore((s) => s.pendingNotes)
 
   useEffect(() => {
     if (takeId == null) {
@@ -37,7 +39,9 @@ export default function NoteList({ takeId, refreshKey }: NoteListProps) {
     return () => { cancelled = true }
   }, [takeId, refreshKey])
 
-  if (takeId == null || notes.length === 0) {
+  const hasNotes = takeId != null && (notes.length > 0 || pendingNotes.length > 0)
+
+  if (!hasNotes) {
     return (
       <Card size="sm" className="p-3 gap-1 text-xs text-muted-foreground">
         暂无备注
@@ -50,6 +54,22 @@ export default function NoteList({ takeId, refreshKey }: NoteListProps) {
 
   return (
     <Card size="sm" className="p-3 gap-1 max-h-[200px] overflow-y-auto">
+      {/* Pending notes（处理中） */}
+      {pendingNotes.map((pn: PendingNote, i: number) => (
+        <div key={`pending-${pn.ts}-${i}`} className="flex items-start gap-2 text-xs py-0.5 opacity-60">
+          <span className="text-muted-foreground font-mono whitespace-nowrap">
+            {formatTime(pn.ts)}
+          </span>
+          <span className={`font-semibold whitespace-nowrap ${CATEGORY_COLORS[pn.category] ?? "text-muted-foreground"}`}>
+            @{pn.category}
+          </span>
+          {pn.content && (
+            <span className="text-foreground break-all">{pn.content}</span>
+          )}
+          <span className="text-muted-foreground italic whitespace-nowrap">处理中...</span>
+        </div>
+      ))}
+      {/* Resolved notes */}
       {sorted.map((n) => (
         <div key={n.event_id} className="flex items-start gap-2 text-xs py-0.5">
           <span className="text-muted-foreground font-mono whitespace-nowrap">

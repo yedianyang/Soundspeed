@@ -133,3 +133,26 @@ export interface NoteListResponse {
   notes_aggregated: string | null
   events: NoteDTO[]
 }
+
+// POST /notes 202 响应（NP Pipeline 非阻塞归置）
+export interface NoteCreateResponse {
+  status: "processing"
+  category: string
+  content: string
+}
+
+// 前端 pending note（已提交、等待 LLM 归置）
+export interface PendingNote {
+  ts: number
+  category: string
+  content: string
+}
+
+// WS note.processed payload
+export interface NoteProcessedMsg {
+  event_id: number
+  take_id: number
+  category: string
+  content: string
+  ts: number
+}

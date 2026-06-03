@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
 import { API_BASE } from "@/lib/config"
 import { useSessionStore } from "@/store/session"
-import type { NoteDTO, NoteListResponse, SceneDTO, ScriptDTO, TakeDTO, TakeDetailDTO, TranscriptSegmentDTO } from "@/types/api"
+import type { NoteCreateResponse, NoteListResponse, SceneDTO, ScriptDTO, TakeDTO, TakeDetailDTO, TranscriptSegmentDTO } from "@/types/api"
 
 export class ApiError extends Error {
   status: number
@@ -146,8 +146,8 @@ export function injectDebugScript(
 
 // ── Note API ──
 
-export function postNote(text: string, ts?: number): Promise<NoteDTO> {
-  return request<NoteDTO>(`/api/v1/notes`, {
+export function postNote(text: string, ts?: number): Promise<NoteCreateResponse> {
+  return request<NoteCreateResponse>(`/api/v1/notes`, {
     method: "POST",
     body: JSON.stringify({ text, ts: ts ?? undefined }),
   })

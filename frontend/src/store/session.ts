@@ -7,6 +7,8 @@ import type {
   TakeDTO,
 } from "@/types/api"
 
+import type { NoteProcessedMsg, PendingNote } from "@/types/api"
+
 export type ConnectionState = "connecting" | "open" | "closed" | "no-token"
 
 // 当前录制 take 的实时转录条目（按声道维护）。
@@ -54,6 +56,9 @@ interface SessionState {
 
   llm: { state: LlmState }
 
+  // pending notes: 已提交、等待 NP Pipeline 归置
+  pendingNotes: PendingNote[]
+
   // ── actions ──
   setToken: (t: string | null) => void
   setConnection: (c: ConnectionState) => void
@@ -61,6 +66,8 @@ interface SessionState {
   applyTakeChanged: (m: TakeChangedMsg) => void
   seedTakes: (list: TakeDTO[]) => void
   setLlm: (state: LlmState) => void
+  addPendingNote: (n: PendingNote) => void
+  noteProcessed: (m: NoteProcessedMsg) => void
   startRecordingLocal: (sceneId: number, shot: string | null) => void
   stopRecordingLocal: () => void
 }
@@ -81,6 +88,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   currentTake: { ...initialCurrentTake },
   takes: new Map(),
   llm: { state: "idle" },
+  pendingNotes: [],
 
   setToken: (t) =>
     set(() => ({
@@ -188,6 +196,16 @@ export const useSessionStore = create<SessionState>((set) => ({
     }),
 
   setLlm: (state) => set(() => ({ llm: { state } })),
+
+  addPendingNote: (n) =>
+    set((s) => ({ pendingNotes: [...s.pendingNotes, n] })),
+
+  noteProcessed: (m) =>
+    set((s) => ({
+      pendingNotes: s.pendingNotes.filter(
+        (p) => !(p.ts === m.ts && p.category === m.category && p.content === m.content)
+      ),
+    })),
 
   startRecordingLocal: (sceneId, shot) =>
     set(() => ({

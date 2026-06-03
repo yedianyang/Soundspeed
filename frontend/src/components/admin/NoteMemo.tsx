@@ -2,6 +2,8 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { postNote } from "@/lib/api"
+import { useSessionStore } from "@/store/session"
+import type { NoteCreateResponse } from "@/types/api"
 
 const CATEGORIES = [
   { key: "keeper", label: "Keeper", color: "bg-green-600" },
@@ -11,20 +13,30 @@ const CATEGORIES = [
 ]
 
 interface NoteMemoProps {
-  onNoteAdded: () => void // 通知父组件刷新 note 列表
+  onNoteAdded: () => void
 }
 
 export default function NoteMemo({ onNoteAdded }: NoteMemoProps) {
   const [text, setText] = useState("")
   const [sending, setSending] = useState(false)
+  const [lastResult, setLastResult] = useState<string | null>(null)
+  const addPendingNote = useSessionStore((s) => s.addPendingNote)
 
   const handleSubmit = async () => {
     const trimmed = text.trim()
     if (!trimmed || sending) return
     setSending(true)
+    setLastResult(null)
     try {
-      await postNote(trimmed)
+      const resp: NoteCreateResponse = await postNote(trimmed)
+      // 添加到 pending notes（前端本地状态）
+      addPendingNote({
+        ts: Date.now() / 1000,
+        category: resp.category,
+        content: resp.content,
+      })
       setText("")
+      setLastResult(`"${resp.content || resp.category}" 已提交，正在归置...`)
       onNoteAdded()
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "提交失败"
@@ -80,6 +92,9 @@ export default function NoteMemo({ onNoteAdded }: NoteMemoProps) {
           {sending ? "..." : "提交"}
         </Button>
       </div>
+      {lastResult && (
+        <p className="text-xs text-muted-foreground animate-pulse">{lastResult}</p>
+      )}
     </Card>
   )
 }

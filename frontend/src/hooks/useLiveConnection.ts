@@ -2,7 +2,7 @@ import { useEffect } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { LiveSocket } from "@/lib/ws"
 import { useSessionStore } from "@/store/session"
-import type { AsrMsg, LlmStatusMsg, TakeChangedMsg } from "@/types/api"
+import type { AsrMsg, LlmStatusMsg, NoteProcessedMsg, TakeChangedMsg } from "@/types/api"
 
 // ch 编码在 topic 后缀（asr.partial.ch1 / asr.final.ch2），不在 payload 里。
 function parseAsrTopic(topic: string): { ch: 1 | 2; isFinal: boolean } | null {
@@ -46,6 +46,13 @@ export function useLiveConnection(): void {
         }
         if (topic === "llm.status") {
           s.setLlm((payload as LlmStatusMsg).state)
+          return
+        }
+        if (topic === "note.processed") {
+          const m = payload as NoteProcessedMsg
+          s.noteProcessed(m)
+          // 刷新受影响的 take 的 notes + takes 列表
+          queryClient.invalidateQueries({ queryKey: ["takes"] })
           return
         }
       },
