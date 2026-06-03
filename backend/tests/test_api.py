@@ -109,17 +109,22 @@ def test_take_start_with_non_ascii_token_returns_401(tmp_dal: DAL, monkeypatch) 
 def test_take_start_with_valid_token_publishes_event(tmp_dal: DAL, monkeypatch) -> None:
     """带正确 Bearer token，POST take/start → 200，orchestrator 收到 TakeStartPayload。
 
-    spy 断言：scene_id==1、shot=="A"、start_ts 是 float（服务端 time.time() 生成）。
+    spy 断言：scene_id 与 active scene 一致、shot=="A"、start_ts 是 float（服务端 time.time() 生成）。
+    2.C：take/start 需要 scene_id == active scene，先建场并激活。
     """
     orch = create_orchestrator(tmp_dal)
     client = _make_client(orch, monkeypatch)
+
+    # 2.C：先建场并激活，否则 take/start → 409
+    scene_id = tmp_dal.create_scene("scene_publish_event")
+    tmp_dal.set_active_scene(scene_id)
 
     received: list[object] = []
     orch.subscribe(TAKE_START, lambda p: received.append(p))
 
     resp = client.post(
         "/api/v1/take/start",
-        json={"scene_id": 1, "shot": "A"},
+        json={"scene_id": scene_id, "shot": "A"},
         headers={"Authorization": f"Bearer {_TOKEN}"},
     )
     assert resp.status_code == 200
@@ -127,7 +132,7 @@ def test_take_start_with_valid_token_publishes_event(tmp_dal: DAL, monkeypatch) 
     assert len(received) == 1
     payload = received[0]
     assert isinstance(payload, TakeStartPayload)
-    assert payload.scene_id == 1
+    assert payload.scene_id == scene_id
     assert payload.shot == "A"
     assert isinstance(payload.start_ts, float)
 
@@ -169,6 +174,7 @@ def test_take_end_creates_l2_task_when_deps_injected(tmp_dal: DAL, monkeypatch) 
     _l2_task 仍为 None。本测试就是守门它不被「简化」回 def。
     """
     scene_id = tmp_dal.create_scene("scene_api_l2")
+    tmp_dal.set_active_scene(scene_id)  # 2.C：take/start 需要 active scene
 
     # stub llm_service（任意非 None）+ stub l2_runner（async 返回假对象）
     stub_svc = MagicMock()
@@ -296,6 +302,7 @@ def test_take_changed_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
     # CI 会超时挂死而非干净 fail。当前环境无 pytest-timeout 插件（--markers 无 timeout），
     # 不引脆弱的 watchdog 线程。TODO: 装 pytest-timeout 后给本函数加 @pytest.mark.timeout(N)。
     scene_id = tmp_dal.create_scene("scene_ws_take")
+    tmp_dal.set_active_scene(scene_id)  # 2.C：take/start 需要 active scene
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
     app = create_app(create_orchestrator(tmp_dal))
 
@@ -434,6 +441,7 @@ def test_list_takes_returns_all(tmp_dal: DAL, monkeypatch) -> None:
     headers = {"Authorization": f"Bearer {_TOKEN}"}
 
     scene_id = tmp_dal.create_scene("scene_lt1")
+    tmp_dal.set_active_scene(scene_id)  # 2.C：take/start 需要 active scene
     # 通过 REST 端点建 take（保证 session 状态正确）
     client.post("/api/v1/take/start", json={"scene_id": scene_id, "shot": "A"}, headers=headers)
     client.post("/api/v1/take/end", headers=headers)
@@ -453,8 +461,11 @@ def test_list_takes_scene_id_filter(tmp_dal: DAL, monkeypatch) -> None:
 
     scene1 = tmp_dal.create_scene("scene_f1a")
     scene2 = tmp_dal.create_scene("scene_f1b")
+    # 2.C：take/start 需要 scene_id == active，交替激活
+    tmp_dal.set_active_scene(scene1)
     client.post("/api/v1/take/start", json={"scene_id": scene1, "shot": None}, headers=headers)
     client.post("/api/v1/take/end", headers=headers)
+    tmp_dal.set_active_scene(scene2)
     client.post("/api/v1/take/start", json={"scene_id": scene2, "shot": None}, headers=headers)
     client.post("/api/v1/take/end", headers=headers)
 
@@ -472,6 +483,7 @@ def test_list_takes_field_contract(tmp_dal: DAL, monkeypatch) -> None:
     headers = {"Authorization": f"Bearer {_TOKEN}"}
 
     scene_id = tmp_dal.create_scene("scene_fc1")
+    tmp_dal.set_active_scene(scene_id)  # 2.C：take/start 需要 active scene
     client.post("/api/v1/take/start", json={"scene_id": scene_id, "shot": "X"}, headers=headers)
     client.post("/api/v1/take/end", headers=headers)
 
@@ -506,6 +518,7 @@ def test_get_take_returns_detail_with_segments(tmp_dal: DAL, monkeypatch) -> Non
     headers = {"Authorization": f"Bearer {_TOKEN}"}
 
     scene_id = tmp_dal.create_scene("scene_det1")
+    tmp_dal.set_active_scene(scene_id)  # 2.C：take/start 需要 active scene
     client.post("/api/v1/take/start", json={"scene_id": scene_id, "shot": None}, headers=headers)
     # 直接用 DAL 插入 segment，避免需要 ASR pipeline
     take_id = tmp_dal.list_takes(scene_id)[0].take_id
@@ -628,6 +641,7 @@ def test_debug_asr_final_persists_segment_when_take_active(tmp_dal: DAL, monkeyp
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
     monkeypatch.setenv("SOUNDSPEED_DEV", "1")
     scene_id = tmp_dal.create_scene("scene_debug_persist")
+    tmp_dal.set_active_scene(scene_id)  # 2.C：take/start 需要 active scene
     orch = create_orchestrator(tmp_dal)
     app = create_app(orch)
     client = TestClient(app)
@@ -866,6 +880,7 @@ def test_dev_token_auth_enforced(tmp_dal: DAL, monkeypatch) -> None:
     monkeypatch.delenv("ADMIN_TOKEN", raising=False)
     monkeypatch.setenv("SOUNDSPEED_DEV", "1")
     scene_id = tmp_dal.create_scene("scene_dev_auth")
+    tmp_dal.set_active_scene(scene_id)  # 2.C：take/start 需要 active scene
     orch = create_orchestrator(tmp_dal)
     # create_app 此时读 env：ADMIN_TOKEN 未设 + SOUNDSPEED_DEV=1 → admin_token="dev"
     app = create_app(orch)
@@ -1126,3 +1141,366 @@ def test_patch_segment_does_not_touch_script_diff(tmp_dal: DAL, monkeypatch) -> 
     client.patch(f"/api/v1/takes/{tid}/segments/{ch1}", json={"speaker": "SPEAKER_09"}, headers=_AUTH)
     detail = client.get(f"/api/v1/takes/{tid}", headers=_AUTH).json()
     assert detail["script_diff"]["script_diff_summary"] == "原始"
+
+
+# ── 2.C：POST /scenes 建场 ──────────────────────────────────────────────────
+
+
+def test_post_scenes_creates_new_scene(tmp_dal: DAL, monkeypatch) -> None:
+    """POST /api/v1/scenes 新 scene_code → 200，created=True。"""
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.post(
+        "/api/v1/scenes",
+        json={"scene_code": "SceneNew_1"},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scene_code"] == "SceneNew_1"
+    assert body["created"] is True
+    assert isinstance(body["scene_id"], int)
+    assert "is_active" in body
+
+
+def test_post_scenes_idempotent_returns_created_false(tmp_dal: DAL, monkeypatch) -> None:
+    """POST /api/v1/scenes 已有 scene_code → 200，created=False，返回既有 scene_id。"""
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp1 = client.post("/api/v1/scenes", json={"scene_code": "SceneIdem"}, headers=_AUTH)
+    resp2 = client.post("/api/v1/scenes", json={"scene_code": "SceneIdem"}, headers=_AUTH)
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert resp2.json()["created"] is False
+    assert resp2.json()["scene_id"] == resp1.json()["scene_id"]
+
+
+def test_post_scenes_missing_scene_code_422(tmp_dal: DAL, monkeypatch) -> None:
+    """POST /api/v1/scenes 缺少 scene_code → 422。"""
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.post("/api/v1/scenes", json={}, headers=_AUTH)
+    assert resp.status_code == 422
+
+
+def test_post_scenes_no_token_401(tmp_dal: DAL, monkeypatch) -> None:
+    """POST /api/v1/scenes 无 token → 401。"""
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.post("/api/v1/scenes", json={"scene_code": "SceneNoAuth"})
+    assert resp.status_code == 401
+
+
+# ── 2.C：POST /scenes/{scene_id}/activate ──────────────────────────────────
+
+
+def test_activate_scene_success(tmp_dal: DAL, monkeypatch) -> None:
+    """POST /scenes/{scene_id}/activate → 200，返回 scene_id + scene_code。"""
+    sid = tmp_dal.create_scene("SceneActivate_1")
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.post(f"/api/v1/scenes/{sid}/activate", headers=_AUTH)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scene_id"] == sid
+    assert body["scene_code"] == "SceneActivate_1"
+    # 确认 DB 里 is_active 已更新
+    active_id = tmp_dal.get_active_scene_id()
+    assert active_id == sid
+
+
+def test_activate_scene_not_found_404(tmp_dal: DAL, monkeypatch) -> None:
+    """POST /scenes/99999/activate → 404。"""
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.post("/api/v1/scenes/99999/activate", headers=_AUTH)
+    assert resp.status_code == 404
+
+
+def test_activate_scene_during_recording_409(tmp_dal: DAL, monkeypatch) -> None:
+    """录制中（session.take_active=True）激活场次 → 409 take_in_progress。"""
+    sid = tmp_dal.create_scene("SceneActivateLocked")
+    tmp_dal.set_active_scene(sid)
+
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    headers = _AUTH
+
+    # 先起一个 take，让 session.take_active=True
+    client.post("/api/v1/take/start", json={"scene_id": sid, "shot": None}, headers=headers)
+    assert orch.session.take_active is True
+
+    sid2 = tmp_dal.create_scene("SceneActivateLocked_2")
+    resp = client.post(f"/api/v1/scenes/{sid2}/activate", headers=headers)
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "take_in_progress"
+
+
+def test_activate_scene_publishes_scene_changed(tmp_dal: DAL, monkeypatch) -> None:
+    """POST /activate → orchestrator publish SCENE_CHANGED。"""
+    from backend.core.events import SCENE_CHANGED, SceneChangedPayload  # noqa: PLC0415
+
+    sid = tmp_dal.create_scene("SceneActivateWS")
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    received: list[object] = []
+    orch.subscribe(SCENE_CHANGED, lambda p: received.append(p))
+
+    client.post(f"/api/v1/scenes/{sid}/activate", headers=_AUTH)
+
+    assert len(received) == 1
+    p = received[0]
+    assert isinstance(p, SceneChangedPayload)
+    assert p.scene_id == sid
+    assert p.scene_code == "SceneActivateWS"
+    assert p.is_active is True
+
+
+# ── 2.C：take.start scene 校验 ─────────────────────────────────────────────
+
+
+def test_take_start_scene_not_active_409(tmp_dal: DAL, monkeypatch) -> None:
+    """take/start scene_id != active → 409 scene_not_active，payload 含 active_scene_id。"""
+    sid1 = tmp_dal.create_scene("SceneActive")
+    sid2 = tmp_dal.create_scene("SceneNotActive")
+    tmp_dal.set_active_scene(sid1)
+
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.post(
+        "/api/v1/take/start",
+        json={"scene_id": sid2, "shot": None},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["detail"]["error"] == "scene_not_active"
+    assert body["detail"]["active_scene_id"] == sid1
+
+
+def test_take_start_no_active_scene_409(tmp_dal: DAL, monkeypatch) -> None:
+    """无 active scene 时 take/start → 409 scene_not_active，active_scene_id=None。"""
+    sid = tmp_dal.create_scene("SceneNoActive")
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.post(
+        "/api/v1/take/start",
+        json={"scene_id": sid, "shot": None},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "scene_not_active"
+
+
+# ── 2.C：PATCH /takes/{take_id} ────────────────────────────────────────────
+
+
+def _make_take(tmp_dal: DAL, scene_code: str = "ScenePatch") -> tuple[int, int]:
+    """建场+激活+开 take+结束 take，返回 (scene_id, take_id)。"""
+    sid = tmp_dal.create_scene(scene_code)
+    tmp_dal.set_active_scene(sid)
+    tid = tmp_dal.start_take(sid, 1, 1000.0)
+    tmp_dal.end_take(tid, 1060.0, "tbd")
+    return sid, tid
+
+
+def test_patch_take_status(tmp_dal: DAL, monkeypatch) -> None:
+    """PATCH /takes/{id} status=keeper → 200，状态改变，有 take_events manual.mark。"""
+    sid, tid = _make_take(tmp_dal, "ScenePatchStatus")
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(f"/api/v1/takes/{tid}", json={"status": "keeper"}, headers=_AUTH)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "keeper"
+    # DAL 里 status 已更新
+    updated_take = tmp_dal.get_take(tid)
+    assert updated_take is not None
+    assert updated_take.status == "keeper"
+    # take_events 有 manual.mark 记录
+    evts = tmp_dal.list_take_events(tid, event_type="manual.mark")
+    assert len(evts) >= 1
+
+
+def test_patch_take_invalid_status_422(tmp_dal: DAL, monkeypatch) -> None:
+    """status 非法值 → 422（pydantic Literal 拦）。"""
+    _, tid = _make_take(tmp_dal, "ScenePatchBadStatus")
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(f"/api/v1/takes/{tid}", json={"status": "bad_value"}, headers=_AUTH)
+    assert resp.status_code == 422
+
+
+def test_patch_take_notes(tmp_dal: DAL, monkeypatch) -> None:
+    """PATCH /takes/{id} notes → 200，notes 已更新。"""
+    _, tid = _make_take(tmp_dal, "ScenePatchNotes")
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(f"/api/v1/takes/{tid}", json={"notes": "NG 原因：灯光"}, headers=_AUTH)
+    assert resp.status_code == 200
+    assert resp.json()["notes"] == "NG 原因：灯光"
+
+
+def test_patch_take_shot(tmp_dal: DAL, monkeypatch) -> None:
+    """PATCH /takes/{id} shot → 200，shot 已更新。"""
+    _, tid = _make_take(tmp_dal, "ScenePatchShot")
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(f"/api/v1/takes/{tid}", json={"shot": "B"}, headers=_AUTH)
+    assert resp.status_code == 200
+    assert resp.json()["shot"] == "B"
+
+
+def test_patch_take_number_swap(tmp_dal: DAL, monkeypatch) -> None:
+    """同场内改 take_number 撞已占用号 → 交换，两条 take 编号互换。"""
+    sid = tmp_dal.create_scene("ScenePatchSwap")
+    tmp_dal.set_active_scene(sid)
+    t1 = tmp_dal.start_take(sid, 1, 1000.0)
+    tmp_dal.end_take(t1, 1010.0, "keeper")
+    t2 = tmp_dal.start_take(sid, 2, 1020.0)
+    tmp_dal.end_take(t2, 1030.0, "ng")
+
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    # 把 t1 的编号改为 2，应触发交换
+    resp = client.patch(f"/api/v1/takes/{t1}", json={"take_number": 2}, headers=_AUTH)
+    assert resp.status_code == 200
+
+    # t1 编号变成 2，t2 编号变成 1
+    t1_updated = tmp_dal.get_take(t1)
+    t2_updated = tmp_dal.get_take(t2)
+    assert t1_updated is not None
+    assert t2_updated is not None
+    assert t1_updated.take_number == 2
+    assert t2_updated.take_number == 1
+
+
+def test_patch_take_scene_id_cross_scene_conflict_409(tmp_dal: DAL, monkeypatch) -> None:
+    """跨场移动，目标 (scene_id, take_number) 已占用 → 409。"""
+    sid1 = tmp_dal.create_scene("ScenePatchCross1")
+    sid2 = tmp_dal.create_scene("ScenePatchCross2")
+    tmp_dal.set_active_scene(sid1)
+
+    t1 = tmp_dal.start_take(sid1, 1, 1000.0)
+    tmp_dal.end_take(t1, 1010.0, "keeper")
+    t2 = tmp_dal.start_take(sid2, 1, 1020.0)
+    tmp_dal.end_take(t2, 1030.0, "keeper")
+
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    # 把 t1 移到 sid2 且指定 take_number=1（已被 t2 占用），应 409
+    resp = client.patch(f"/api/v1/takes/{t1}", json={"scene_id": sid2, "take_number": 1}, headers=_AUTH)
+    assert resp.status_code == 409
+
+
+def test_patch_take_scene_id_invalid_404(tmp_dal: DAL, monkeypatch) -> None:
+    """改 scene_id 到不存在的场次 → 404。"""
+    _, tid = _make_take(tmp_dal, "ScenePatchBadScene")
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch(f"/api/v1/takes/{tid}", json={"scene_id": 99999}, headers=_AUTH)
+    assert resp.status_code == 404
+
+
+def test_patch_take_recording_change_scene_409(tmp_dal: DAL, monkeypatch) -> None:
+    """录制中（end_ts IS NULL）改 scene_id → 409 take_in_progress。"""
+    sid = tmp_dal.create_scene("ScenePatchRecording")
+    tmp_dal.set_active_scene(sid)
+
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    headers = _AUTH
+
+    # 开 take，不结束（end_ts IS NULL）
+    client.post("/api/v1/take/start", json={"scene_id": sid, "shot": None}, headers=headers)
+    tid = tmp_dal.list_takes(sid)[0].take_id
+
+    sid2 = tmp_dal.create_scene("ScenePatchRecording2")
+    resp = client.patch(f"/api/v1/takes/{tid}", json={"scene_id": sid2}, headers=headers)
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "take_in_progress"
+
+
+def test_patch_take_recording_change_notes_ok(tmp_dal: DAL, monkeypatch) -> None:
+    """录制中改 notes 允许（200）。"""
+    sid = tmp_dal.create_scene("ScenePatchRecordingNotes")
+    tmp_dal.set_active_scene(sid)
+
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    headers = _AUTH
+
+    client.post("/api/v1/take/start", json={"scene_id": sid, "shot": None}, headers=headers)
+    tid = tmp_dal.list_takes(sid)[0].take_id
+
+    resp = client.patch(f"/api/v1/takes/{tid}", json={"notes": "现场备注"}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["notes"] == "现场备注"
+
+
+def test_patch_take_not_found_404(tmp_dal: DAL, monkeypatch) -> None:
+    """PATCH /takes/99999 → 404。"""
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.patch("/api/v1/takes/99999", json={"notes": "x"}, headers=_AUTH)
+    assert resp.status_code == 404
+
+
+def test_patch_take_publishes_take_changed(tmp_dal: DAL, monkeypatch) -> None:
+    """PATCH 成功后 orchestrator publish TAKE_CHANGED。"""
+    from backend.core.events import TAKE_CHANGED, TakeChangedPayload  # noqa: PLC0415
+
+    _, tid = _make_take(tmp_dal, "ScenePatchWS")
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    received: list[object] = []
+    orch.subscribe(TAKE_CHANGED, lambda p: received.append(p))
+
+    client.patch(f"/api/v1/takes/{tid}", json={"status": "ng"}, headers=_AUTH)
+
+    assert len(received) == 1
+    p = received[0]
+    assert isinstance(p, TakeChangedPayload)
+    assert p.take_id == tid
+    assert p.status == "ng"
+
+
+# ── 2.C：DELETE /takes/{take_id} ───────────────────────────────────────────
+
+
+def test_delete_take_success_204(tmp_dal: DAL, monkeypatch) -> None:
+    """DELETE /takes/{id} → 204，take 已从 DB 删除。"""
+    _, tid = _make_take(tmp_dal, "SceneDelete")
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.delete(f"/api/v1/takes/{tid}", headers=_AUTH)
+    assert resp.status_code == 204
+    assert tmp_dal.get_take(tid) is None
+
+
+def test_delete_take_not_found_404(tmp_dal: DAL, monkeypatch) -> None:
+    """DELETE /takes/99999 → 404。"""
+    client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
+    resp = client.delete("/api/v1/takes/99999", headers=_AUTH)
+    assert resp.status_code == 404
+
+
+def test_delete_take_recording_409(tmp_dal: DAL, monkeypatch) -> None:
+    """录制中（end_ts IS NULL）删除 → 409 take_in_progress。"""
+    sid = tmp_dal.create_scene("SceneDeleteRecording")
+    tmp_dal.set_active_scene(sid)
+
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    headers = _AUTH
+
+    client.post("/api/v1/take/start", json={"scene_id": sid, "shot": None}, headers=headers)
+    tid = tmp_dal.list_takes(sid)[0].take_id
+
+    resp = client.delete(f"/api/v1/takes/{tid}", headers=headers)
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "take_in_progress"
+
+
+def test_delete_take_publishes_take_deleted(tmp_dal: DAL, monkeypatch) -> None:
+    """DELETE 成功后 orchestrator publish TAKE_DELETED。"""
+    from backend.core.events import TAKE_DELETED, TakeDeletedPayload  # noqa: PLC0415
+
+    sid, tid = _make_take(tmp_dal, "SceneDeleteWS")
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    received: list[object] = []
+    orch.subscribe(TAKE_DELETED, lambda p: received.append(p))
+
+    client.delete(f"/api/v1/takes/{tid}", headers=_AUTH)
+
+    assert len(received) == 1
+    p = received[0]
+    assert isinstance(p, TakeDeletedPayload)
+    assert p.take_id == tid
+    assert p.scene_id == sid

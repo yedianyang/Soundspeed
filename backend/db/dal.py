@@ -837,6 +837,55 @@ class DAL:
                 (take_id, event_payload_json),
             )
 
+    def next_take_number(self, scene_id: int) -> int:
+        """返回下一个 take_number（COALESCE(MAX,0)+1），永不复用已删号。"""
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(take_number), 0) + 1 AS next_num "
+            "FROM takes WHERE scene_id = ?;",
+            (scene_id,),
+        ).fetchone()
+        return int(row["next_num"])
+
+    def get_or_create_scene(
+        self,
+        scene_code: str,
+        *,
+        description: str | None = None,
+        shoot_date: str | None = None,
+        int_ext: str | None = None,
+        time_of_day: str | None = None,
+        location: str | None = None,
+    ) -> tuple[int, bool]:
+        """返回 (scene_id, created)。created=True 表示本次新建，False 表示复用已有行。
+
+        行为：先 SELECT，命中返回 (id, False)（忽略余参数，不更新已有行）；
+        未命中 INSERT 返回 (id, True)；INSERT 撞唯一索引时兜底重 SELECT。
+        """
+        # 先查
+        row = self._conn.execute(
+            "SELECT scene_id FROM scenes WHERE scene_code = ?;",
+            (scene_code,),
+        ).fetchone()
+        if row is not None:
+            return int(row["scene_id"]), False
+
+        # 未命中，尝试 INSERT
+        try:
+            with self._write_tx() as conn:
+                cur = conn.execute(
+                    "INSERT INTO scenes (scene_code, description, shoot_date, int_ext, time_of_day, location) "
+                    "VALUES (?, ?, ?, ?, ?, ?);",
+                    (scene_code, description, shoot_date, int_ext, time_of_day, location),
+                )
+            return int(cur.lastrowid), True  # type: ignore[arg-type]
+        except sqlite3.IntegrityError:
+            # 并发下 INSERT 撞唯一索引，兜底重 SELECT
+            row = self._conn.execute(
+                "SELECT scene_id FROM scenes WHERE scene_code = ?;",
+                (scene_code,),
+            ).fetchone()
+            return int(row["scene_id"]), False  # type: ignore[index]
+
     def delete_take(self, take_id: int) -> None:
         """硬删 take，子表靠 ON DELETE CASCADE 自动清，同时在 audit_log 留审计快照。
 

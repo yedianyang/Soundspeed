@@ -28,6 +28,10 @@ MANUAL_MARK = "manual.mark"
 QUERY_REQUEST = "query.request"
 SCRIPT_UPLOAD = "script.upload"
 
+# 2.C 新增事件
+TAKE_DELETED = "take.deleted"
+SCENE_CHANGED = "scene.changed"
+
 
 # ── Payload dataclass ─────────────────────────────────────────────────────────
 
@@ -133,3 +137,20 @@ class LlmStatusPayload:
     state: str          # "idle" | "downloading" | "loading" | "running"
     task_type: str | None
     take_id: int | None
+
+
+@dataclass(frozen=True)
+class TakeDeletedPayload:
+    """take.deleted 的 payload（2.C）。"""
+
+    take_id: int
+    scene_id: int
+
+
+@dataclass(frozen=True)
+class SceneChangedPayload:
+    """scene.changed 的 payload（2.C）。"""
+
+    scene_id: int
+    scene_code: str
+    is_active: bool

@@ -819,3 +819,64 @@ def test_delete_take_writes_audit_log(tmp_dal: DAL) -> None:
 def test_delete_take_nonexistent_is_noop(tmp_dal: DAL) -> None:
     """delete_take 传不存在的 take_id 静默 no-op，不抛异常。"""
     tmp_dal.delete_take(99999)  # 不应抛异常
+
+
+# ── 2.C 新增：next_take_number ────────────────────────────────────────────────
+
+
+def test_next_take_number_empty_scene_returns_1(tmp_dal: DAL) -> None:
+    """空场（没有任何 take）时 next_take_number 返回 1。"""
+    sid = tmp_dal.create_scene("scene_ntn_empty")
+    assert tmp_dal.next_take_number(sid) == 1
+
+
+def test_next_take_number_increments(tmp_dal: DAL) -> None:
+    """已有 take 1、2 时返回 3。"""
+    sid = tmp_dal.create_scene("scene_ntn_incr")
+    tmp_dal.start_take(sid, 1, 1000.0)
+    tmp_dal.start_take(sid, 2, 1001.0)
+    assert tmp_dal.next_take_number(sid) == 3
+
+
+def test_next_take_number_no_reuse_deleted_middle(tmp_dal: DAL) -> None:
+    """take 1/2/3，删 2 后 next_take_number 仍是 4（单调，不复用已删号）。"""
+    sid = tmp_dal.create_scene("scene_ntn_del")
+    t1 = tmp_dal.start_take(sid, 1, 1000.0)
+    t2 = tmp_dal.start_take(sid, 2, 1001.0)
+    t3 = tmp_dal.start_take(sid, 3, 1002.0)
+    tmp_dal.end_take(t1, 1010.0, "keeper")
+    tmp_dal.end_take(t2, 1020.0, "ng")
+    tmp_dal.end_take(t3, 1030.0, "keeper")
+    tmp_dal.delete_take(t2)
+    # 剩余 take 1、3，下一个应是 4（MAX=3, +1=4），而非 len+1=3
+    assert tmp_dal.next_take_number(sid) == 4
+
+
+# ── 2.C 新增：get_or_create_scene ────────────────────────────────────────────
+
+
+def test_get_or_create_scene_new_returns_created_true(tmp_dal: DAL) -> None:
+    """新 scene_code 建场返回 created=True，scene_id > 0。"""
+    sid, created = tmp_dal.get_or_create_scene("NewScene_1")
+    assert created is True
+    assert isinstance(sid, int)
+    assert sid > 0
+
+
+def test_get_or_create_scene_existing_returns_created_false(tmp_dal: DAL) -> None:
+    """已有 scene_code 再次调用返回 created=False，返回既有 scene_id。"""
+    sid1, _ = tmp_dal.get_or_create_scene("Existing_Scene")
+    sid2, created = tmp_dal.get_or_create_scene("Existing_Scene")
+    assert created is False
+    assert sid2 == sid1
+
+
+def test_get_or_create_scene_does_not_update_existing(tmp_dal: DAL) -> None:
+    """重复调用时忽略额外参数，不更新已有行 description。"""
+    sid1, _ = tmp_dal.get_or_create_scene("Scene_NoUpdate", description="original")
+    sid2, _ = tmp_dal.get_or_create_scene("Scene_NoUpdate", description="changed")
+    # 查 description，应仍为 original
+    scenes = tmp_dal.list_scenes()
+    target = next(s for s in scenes if s["scene_id"] == sid1)
+    assert target["description"] == "original"
+    assert sid2 == sid1

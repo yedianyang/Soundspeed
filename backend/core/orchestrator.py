@@ -152,9 +152,8 @@ class Orchestrator:
         # P1 #2：先同步 session.scene_id，确保 take.end 时 scene_id 已就绪
         self.session.activate_scene(scene_id)
 
-        # take_number = 当前 scene 已有 take 数量 + 1
-        existing = self.dal.list_takes(scene_id)
-        take_number = len(existing) + 1
+        # take_number = COALESCE(MAX(take_number),0)+1，永不复用已删号
+        take_number = self.dal.next_take_number(scene_id)
 
         take_id = self.dal.start_take(
             scene_id=scene_id,
