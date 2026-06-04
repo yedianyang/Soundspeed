@@ -1,7 +1,6 @@
 import { useState } from "react"
 import {
   Check,
-  Mic,
   Plus,
   Trash2,
   Undo2,
@@ -31,6 +30,7 @@ import { cn, formatElapsed } from "@/lib/utils"
 import type { Status } from "@/types/take"
 import type { SceneDTO } from "@/types/api"
 import TakeSpeakerSelect from "@/components/admin/TakeSpeakerSelect"
+import MemoInput from "@/components/admin/MemoInput"
 
 interface BottomControlBarProps {
   isRecording: boolean
@@ -71,6 +71,9 @@ interface BottomControlBarProps {
   // 各操作 inflight 时禁用，避免重复触发。
   sceneBusy?: boolean
   takeBusy?: boolean
+
+  // 打字 memo 提交后回调（触发 NoteList 刷新已落库 notes）。
+  onNoteAdded?: () => void
 }
 
 export default function BottomControlBar({
@@ -102,6 +105,7 @@ export default function BottomControlBar({
   undoBusy = false,
   sceneBusy = false,
   takeBusy = false,
+  onNoteAdded,
 }: BottomControlBarProps) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [shotDraft, setShotDraft] = useState("")
@@ -145,22 +149,9 @@ export default function BottomControlBar({
 
   return (
     <div className="flex-shrink-0 border-t bg-background">
-      {/* Memo input */}
-      <div className="px-4 pt-2 pb-1.5">
-        <div className="flex items-center gap-2 h-11 px-4 rounded-4xl bg-muted/60 focus-within:bg-muted transition-colors">
-          <Input
-            placeholder="Typing memo · 例：第三条结尾好，可以用"
-            className="flex-1 bg-transparent border-0 ring-0 rounded-none text-sm focus:outline-none placeholder:text-muted-foreground/70 focus-visible:ring-0"
-          />
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="rounded-full text-muted-foreground hover:text-foreground"
-            title="按麦录音 memo"
-          >
-            <Mic className="size-4" />
-          </Button>
-        </div>
+      {/* Memo input（真实打字 memo 输入口；类别走 @语法，Mic 预留语音入口）*/}
+      <div className="relative z-30 px-4 pt-2 pb-1.5">
+        <MemoInput onNoteAdded={onNoteAdded} />
       </div>
 
       {/* Controls: left stack + right REC (absolute) */}

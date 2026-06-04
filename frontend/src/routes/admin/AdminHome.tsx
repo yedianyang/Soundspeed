@@ -11,7 +11,6 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import BottomControlBar from "@/components/admin/BottomControlBar"
-import NoteMemo from "@/components/admin/NoteMemo"
 import NoteList from "@/components/admin/NoteList"
 import { MARK_ORDER } from "@/lib/constants"
 import { cn, formatTakeLabel } from "@/lib/utils"
@@ -652,13 +651,17 @@ export default function AdminHome() {
         pending={createScene.isPending || activateScene.isPending}
       />
 
-      {/* Note memo box — above BottomControlBar；takeId 取 2.x 派生的 currentTakeId */}
-      <div className="flex-shrink-0 px-4 pb-2 flex flex-col gap-2">
-        <NoteMemo onNoteAdded={() => setNoteRefresh((k) => k + 1)} />
-        <NoteList takeId={currentTakeId} refreshKey={noteRefresh} />
-      </div>
+      {/* ============ 底部 dock：note 队列浮层 + 控制栏 ============ */}
+      <div className="relative flex-shrink-0">
+        {/* Note 队列浮层：从底栏 MemoInput 顶部向上延伸，半透明盖在 main 上，上圆角下直角。
+            bottom-[calc(100%-26px)]：浮层底边藏进 pill 顶下 17px（26 = 9 缝隙 + 17 藏量），由 pill(z-30)
+            盖住，形成从输入框背后弹出。该距离恒定，不随控制行/REC 高度变。无 note 时 NoteList 返回 null。
+            pointer-events-none 让浮层 padding 区穿透到 main；NoteList 的 Card 自带 pointer-events-auto 可滚。 */}
+        <div className="pointer-events-none absolute inset-x-0 bottom-[calc(100%-26px)] z-20 px-4">
+          <NoteList takeId={currentTakeId} refreshKey={noteRefresh} />
+        </div>
 
-      <BottomControlBar
+        <BottomControlBar
         isRecording={isRecording}
         onToggleRecording={handleToggleRecording}
         mark={mark}
@@ -707,7 +710,10 @@ export default function AdminHome() {
         // ── 1.x：本 take 在场演员选择（diarization 回填匹配范围）──
         speakerIds={takeSpeakerIds}
         onSpeakerIdsChange={setTakeSpeakerIds}
-      />
+        // 打字 memo（已下沉到底栏 MemoInput）提交后刷新 NoteList
+        onNoteAdded={() => setNoteRefresh((k) => k + 1)}
+        />
+      </div>
     </div>
   )
 }

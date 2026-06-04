@@ -41,22 +41,24 @@ export default function NoteList({ takeId, refreshKey }: NoteListProps) {
 
   const hasNotes = takeId != null && (notes.length > 0 || pendingNotes.length > 0)
 
+  // 浮层模式：无 note（pending + resolved 都空）时不渲染，避免空浮层永久遮住 main 一条。
   if (!hasNotes) {
-    return (
-      <Card size="sm" className="p-3 gap-1 text-xs text-muted-foreground">
-        暂无备注
-      </Card>
-    )
+    return null
   }
 
   // 按时间倒序
   const sorted = [...notes].reverse()
 
   return (
-    <Card size="sm" className="p-3 gap-1 max-h-[200px] overflow-y-auto">
+    // pb-[35px] = 16(可见上间距) + 17(藏量) + 2(上移)；藏量 17 与 AdminHome 浮层
+    // bottom-[calc(100%-26px)] 的 17 同源，改一处两处都要改（否则浮层底边与 pill 顶错位）。
+    <Card
+      size="sm"
+      className="pointer-events-auto px-3 pt-4 pb-[35px] gap-1 max-h-[40vh] overflow-y-auto bg-background rounded-t-2xl rounded-b-none shadow-[0_-4px_16px_rgba(0,0,0,0.1)] ring-0"
+    >
       {/* Pending notes（处理中） */}
       {pendingNotes.map((pn: PendingNote, i: number) => (
-        <div key={`pending-${pn.ts}-${i}`} className="flex items-start gap-2 text-xs py-0.5 opacity-60">
+        <div key={`pending-${pn.ts}-${i}`} className="flex items-center gap-2 text-xs py-0.5 opacity-60">
           <span className="text-muted-foreground font-mono whitespace-nowrap">
             {formatTime(pn.ts)}
           </span>
@@ -71,7 +73,7 @@ export default function NoteList({ takeId, refreshKey }: NoteListProps) {
       ))}
       {/* Resolved notes */}
       {sorted.map((n) => (
-        <div key={n.event_id} className="flex items-start gap-2 text-xs py-0.5">
+        <div key={n.event_id} className="flex items-center gap-2 text-xs py-0.5">
           <span className="text-muted-foreground font-mono whitespace-nowrap">
             {formatTime(n.ts)}
           </span>
