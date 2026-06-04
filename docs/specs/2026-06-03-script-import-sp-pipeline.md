@@ -157,9 +157,46 @@ def get_or_create_scene(
 - **分场**：按 slugline 切场边界；**单场 / 无明显 slugline → 归为一场**（`scene_code=null`、`slugline` 全 `null`）。
 - **slugline 理解整体交 LLM 结构化**（用户定）：场次号抽取 + 内外景/时间/地点三要素**都由 `script_parse` LLM 在输出里给**，不另写规则/正则解析器。实测**约一半剧本有场次号、镜次号不一定有**，故 `scene_code=null` 与 slugline 部分字段缺失是**常态合法值**，不是错误——append-only 路径（§0 分叉 1）是常规分支，不是边缘兜底。
 - **容错**：脏数据（空行、页眉页码、非对白噪声）丢弃或归舞台指示行，不抛异常。
-- **体量约束**：整本剧本分场输出远超 `script_parse.max_tokens=2048`（`config.py:54`）。3.B 必须采用**分块或按场循环**解析，不能一把梭整本。3.A 不定 prompt，但钉死「解析必须分场循环、单次调用输出可控」这条约束。
+- **体量约束**：整本剧本分场输出远超 `script_parse.max_tokens`（现 **8192**，`config.py`；实测 out≈1.29×raw，整本 ~2 万字≈4 万 tok=5×n_ctx）。3.B 必须**分块**解析，不能一把梭整本（实测 `chunk_size=1500` 字符≈窗口 40% 安全，可放宽 ~3000）。**prompt v1 见 §4.1（3.B 已实现并经用户确认）。**
 
 输入文本常见全角冒号格式（`角色：台词`），但解析器吃 raw，**不假设固定分隔符**（拍照 OCR / 不同剧本排版不一定有冒号）。
+
+### 4.1 prompt v1（3.B 已实现，2026-06-04 用户确认为当前任务主 prompt）
+
+> Source of truth 在代码：system = `backend/llm/config.py` 的 `TASK_CONFIG["script_parse"]["system"]`，user = `backend/pipelines/sp_script.py` 的 `_build_user_message`。此处为快照——改 prompt 改代码、回填此节。gen 参数 `temperature=0.1`、`max_tokens=8192`。
+
+**System prompt：**
+
+```
+你是剧本解析器。把输入的剧本片段解析为 JSON，直接输出合法 JSON，不要 markdown 代码块。
+
+输出格式：
+{"scenes": [{"scene_code": "string或null", "slugline": {"int_ext": "string或null", "time_of_day": "string或null", "location": "string或null"}, "lines": [{"character": "string或null", "text": "string"}]}]}
+
+规则：scene_code 是剧本中明确写出的场次号（如「场3」「3A」），没有就填 null。character 是说话角色名，舞台指示行填 null。
+
+示例输入：
+内 咖啡馆 日
+罗湘：我们先聊聊。
+（罗湘坐下）
+
+示例输出：
+{"scenes": [{"scene_code": null, "slugline": {"int_ext": "内", "time_of_day": "日", "location": "咖啡馆"}, "lines": [{"character": "罗湘", "text": "我们先聊聊。"}, {"character": null, "text": "罗湘坐下"}]}]}
+```
+
+**User prompt**（`{chunk_text}` 为分块后单块剧本原文，≤1500 字符）：
+
+```
+请解析以下剧本片段，输出 JSON。直接输出 JSON，不要 markdown 代码块。
+
+{chunk_text}
+```
+
+**设计理由：** 极简版（schema + 1 个 few-shot，不堆细则）——4B Gemma 实测 prompt 越长越乱，堆规则反退步。slugline 理解整体交 LLM（不写正则，见 §4）。
+
+**实测确认（2026-06-04，《双日寒铳》docx/pdf，探针 `scripts/sp_material_probe.py`）：** 性能 OK，用户确认为主 prompt。场次（`scene_code`）/ slugline 三要素 / 对白（`character`+`text`）/ 舞台指示（`character=null`）均正确结构化；slugline **顺序反转**（few-shot 是「内 咖啡馆 日」正序，真实台本「大漠·沙梁 日 外」int_ext 在末尾）仍泛化抽对；括号表演提示（`沙里红（压着嗓子）：`）自动剥离为 `character=沙里红`。
+
+**已知瑕疵（待权衡，不反射改）：** 角色名开头、无冒号的舞台指示（`铁面屠笑了。…`）被误判成对白、挂到该角色名下。修需在 system 加规则，但权衡 4B 极简原则（加细则可能 regress 更多），暂记录不动。
 
 ---
 
