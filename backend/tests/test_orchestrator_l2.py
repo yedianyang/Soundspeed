@@ -184,6 +184,73 @@ async def test_take_end_handler_l2_failure_still_publishes(tmp_dal: DAL) -> None
 
 
 @pytest.mark.asyncio
+async def test_take_end_preserves_user_mark_status_sync(tmp_dal: DAL) -> None:
+    """录音中 Mark=keeper，停录（无 L2）后 status 不被写死回 tbd——库与同步 take.changed 都保留 keeper。
+
+    回归：_on_take_end 曾硬编码 status='tbd'，把用户 Mark 冲掉（停录后状态回退 bug）。
+    """
+    scene_id = tmp_dal.create_scene("scene_mark_sync")
+    session = SessionState()
+    session.activate_scene(scene_id)
+    # 无 llm_service → 不跑 L2，只走同步 end 路径
+    orch = create_orchestrator(tmp_dal, session)
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot="1", start_ts=time.time()))
+    take_id = session.take_id
+    assert take_id is not None
+
+    # 用户录音中 Mark = keeper
+    tmp_dal.set_take_status(take_id, "keeper")
+
+    received_changed: list[TakeChangedPayload] = []
+    orch.subscribe(TAKE_CHANGED, lambda p: received_changed.append(p))  # type: ignore[arg-type]
+
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+
+    # 库里 status 保留 keeper（end_take 不写死 tbd）
+    take = tmp_dal.get_take(take_id)
+    assert take is not None
+    assert take.status == "keeper"
+    # 同步 take.changed 也带 keeper（前端据此更新 store，不回退）
+    assert len(received_changed) == 1
+    assert received_changed[0].status == "keeper"
+
+
+@pytest.mark.asyncio
+async def test_take_end_preserves_user_mark_status_through_l2(tmp_dal: DAL) -> None:
+    """录音中 Mark=keeper，停录后 L2 完成的 take.changed 也保留 keeper（第二回退源）。
+
+    回归：L2 完成路径同样硬编码 status='tbd'，会在停录数秒后二次把 Mark 冲掉。
+    """
+    scene_id = tmp_dal.create_scene("scene_mark_l2")
+    stub_runner = _make_stub_l2_runner()
+    stub_svc = _make_stub_llm_service()
+    session = SessionState()
+    session.activate_scene(scene_id)
+    orch = create_orchestrator(tmp_dal, session, llm_service=stub_svc, l2_runner=stub_runner)
+
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot="1", start_ts=time.time()))
+    take_id = session.take_id
+    assert take_id is not None
+
+    tmp_dal.set_take_status(take_id, "keeper")
+
+    received_changed: list[TakeChangedPayload] = []
+    orch.subscribe(TAKE_CHANGED, lambda p: received_changed.append(p))  # type: ignore[arg-type]
+
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
+    await orch._l2_task  # type: ignore[attr-defined]
+
+    # 库 + 两次 take.changed（同步 end + L2 完成）都保留 keeper
+    take = tmp_dal.get_take(take_id)
+    assert take is not None
+    assert take.status == "keeper"
+    assert len(received_changed) == 2
+    assert all(c.status == "keeper" for c in received_changed)
+
+
+@pytest.mark.asyncio
 async def test_take_end_writes_line_matches(tmp_dal: DAL) -> None:
     """L2 完成后 line_matches 中 line_no != -1 的写 take_line_matches；line_no=-1 跳过。"""
     scene_id = tmp_dal.create_scene("scene_lm1")
@@ -222,12 +289,12 @@ async def test_take_end_assembles_previous_notes(tmp_dal: DAL) -> None:
     scene_id = tmp_dal.create_scene("scene_pn1")
 
     # 预置两条历史 take，带 script_diff
-    old_take1 = tmp_dal.start_take(scene_id, take_number=1, start_ts=time.time() - 200)
+    old_take1, _ = tmp_dal.start_take(scene_id, "1", time.time() - 200)
     tmp_dal.update_take_l2_output(
         old_take1,
         {"script_diff_summary": "第1条take偏差记录", "line_matches": []},
     )
-    old_take2 = tmp_dal.start_take(scene_id, take_number=2, start_ts=time.time() - 100)
+    old_take2, _ = tmp_dal.start_take(scene_id, "1", time.time() - 100)
     tmp_dal.update_take_l2_output(
         old_take2,
         {"script_diff_summary": "第2条take偏差记录", "line_matches": []},
@@ -554,9 +621,9 @@ async def test_previous_notes_caps_at_5_takes(tmp_dal: DAL) -> None:
     """10 条历史 take → previous_notes 只取最近 5 条。"""
     scene_id = tmp_dal.create_scene("scene_pn5")
 
-    # 插入 10 条带 summary 的历史 take
+    # 插入 10 条带 summary 的历史 take（shot="1" 组，自动分配号 1-10）
     for i in range(1, 11):
-        tid = tmp_dal.start_take(scene_id, take_number=i, start_ts=float(i))
+        tid, _ = tmp_dal.start_take(scene_id, "1", float(i))
         tmp_dal.update_take_l2_output(tid, {"script_diff_summary": f"summary_{i:02d}", "line_matches": []})
 
     captured_inputs: list = []
@@ -585,7 +652,7 @@ async def test_previous_notes_caps_total_chars(tmp_dal: DAL) -> None:
 
     long_summary = "X" * 400
     for i in range(1, 6):
-        tid = tmp_dal.start_take(scene_id, take_number=i, start_ts=float(i))
+        tid, _ = tmp_dal.start_take(scene_id, "1", float(i))
         tmp_dal.update_take_l2_output(tid, {"script_diff_summary": long_summary, "line_matches": []})
 
     captured_inputs: list = []

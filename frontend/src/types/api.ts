@@ -17,6 +17,41 @@ export interface SceneDTO {
   location: string | null // slugline 地点：街道 / 咖啡馆 …（v2，可能 null）
 }
 
+// ── Scene 写操作（2.C）──
+
+// POST /api/v1/scenes body。scene_code 必填，其余可选 slugline / 元数据。
+export interface CreateSceneBody {
+  scene_code: string
+  description?: string
+  shoot_date?: string
+  int_ext?: string
+  time_of_day?: string
+  location?: string
+}
+
+// POST /api/v1/scenes 响应。created 区分新建 / 复用（两者都 200）。
+export interface CreateSceneResult {
+  scene_id: number
+  scene_code: string
+  created: boolean
+  is_active: number
+}
+
+// POST /api/v1/scenes/{scene_id}/activate 响应。
+export interface ActivateSceneResult {
+  scene_id: number
+  scene_code: string
+}
+
+// PATCH /api/v1/takes/{id} body，全可选。status ∈ keeper/ng/hold/tbd。
+export interface PatchTakeBody {
+  status?: TakeStatus
+  scene_id?: number
+  shot?: string | null
+  take_number?: number
+  notes?: string | null
+}
+
 // ── Script DTO（GET /api/v1/scenes/{scene_id}/script，spec 2026-06-01 §2.3）──
 
 export interface ScriptLineDTO {
@@ -58,13 +93,15 @@ export interface ScriptDiff {
 export interface TakeDTO {
   take_id: number
   scene_id: number
-  take_number: number
   shot: string | null
+  take_number: number
+  take_suffix: string // 冲突后缀：'' / '+' / '++'…，显示时拼成 `Take 3+`（formatTakeLabel）
   start_ts: number
   end_ts: number | null
   status: TakeStatus
   script_diff: ScriptDiff | null
   notes: string | null
+  deleted_at: number | null // 软删时间戳，null 表示未删除；restore 后回 null
   created_at: number
   updated_at: number
 }
@@ -106,6 +143,19 @@ export type TakeChangedMsg = Pick<
   TakeDTO,
   "take_id" | "scene_id" | "take_number" | "status" | "script_diff"
 >
+
+// take.deleted（2.C）：删某条 take 后广播，让历史列表移除该条。
+export interface TakeDeletedMsg {
+  take_id: number
+  scene_id: number
+}
+
+// scene.changed（2.C）：建/切场后广播，让场次列表 + 活跃场显示刷新。
+export interface SceneChangedMsg {
+  scene_id: number
+  scene_code: string
+  is_active: number // SQLite 0 | 1，与 SceneDTO.is_active 对齐
+}
 
 export type LlmState = "idle" | "loading" | "running" | "downloading"
 

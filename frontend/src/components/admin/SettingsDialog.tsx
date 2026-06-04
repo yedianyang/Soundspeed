@@ -257,8 +257,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
   // ---- dev 测试面板：paste ASR JSON → 一键跑完整 take ----
   const { data: scenes } = useScenes()
   const activeScene = pickActiveScene(scenes)
-  const startRecordingLocal = useSessionStore((s) => s.startRecordingLocal)
-  const stopRecordingLocal = useSessionStore((s) => s.stopRecordingLocal)
+  const resetSegments = useSessionStore((s) => s.resetSegments)
   const [asrJson, setAsrJson] = useState(DEV_ASR_SAMPLE)
   const [running, setRunning] = useState(false)
   const [runStatus, setRunStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
@@ -310,11 +309,9 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
       return
     }
     setRunning(true)
-    // 必须 startRecordingLocal：清 segments、置 recording=true / take_id=null，使 take.changed 绑定门
-    // 重绑到新 take。否则 currentTake 停在上一次 REC 的 take_id，applyAsr 的跨-take 守卫会把本次注入帧
-    // 全丢（transcript 空），且 take_number 不显示。recording=true 后无论后端是否在 /debug/asr 盖
-    // take_id 都能正确绑定。
-    startRecordingLocal(activeScene.scene_id, null)
+    // 清 segments，避免上一次注入残留。currentTakeId 由 applyTakeChanged 兜底顶到新 take（单调最大 id），
+    // applyAsr 跨-take 守卫随之对齐；新 take 的编号经 take.changed + refetch 显示。
+    resetSegments()
     try {
       await startTake(activeScene.scene_id, null)
       setRunStatus({ kind: "info", msg: `注入 ${segs.length} 段…` })
@@ -330,7 +327,6 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
       console.error("run full take failed", err)
       setRunStatus({ kind: "error", msg: "请求失败（看 console / 是否 SOUNDSPEED_DEV=1）" })
     } finally {
-      stopRecordingLocal()
       setRunning(false)
     }
   }

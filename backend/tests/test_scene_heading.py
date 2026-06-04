@@ -41,14 +41,14 @@ def _make_client(orchestrator, monkeypatch) -> TestClient:
 # ── 1. 迁移 v2 ────────────────────────────────────────────────────────────────
 
 
-def test_v2_migration_user_version_is_2(tmp_path: Path) -> None:
-    """apply_migrations 后 PRAGMA user_version == 2。"""
+def test_v2_migration_user_version_is_current(tmp_path: Path) -> None:
+    """apply_migrations 后 PRAGMA user_version 等于当前最新版本（v4 后为 4）。"""
     db_path = tmp_path / "test.db"
     apply_migrations(db_path)
     conn = _raw_conn(db_path)
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
     conn.close()
-    assert version == 2
+    assert version == 4
 
 
 def test_v2_migration_scenes_has_three_new_columns(tmp_path: Path) -> None:
@@ -65,15 +65,15 @@ def test_v2_migration_scenes_has_three_new_columns(tmp_path: Path) -> None:
 
 
 def test_v2_migration_idempotent(tmp_path: Path) -> None:
-    """apply_migrations 重复调用不报错（v2 幂等）。"""
+    """apply_migrations 重复调用不报错（幂等）。"""
     db_path = tmp_path / "test.db"
     apply_migrations(db_path)
-    # 第二次：version==2，runner 跳过全部，不报错
+    # 第二次：version==4（最新），runner 跳过全部，不报错
     apply_migrations(db_path)
     conn = _raw_conn(db_path)
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
     conn.close()
-    assert version == 2
+    assert version == 4
 
 
 def test_v2_migration_preserves_existing_scenes_rows(tmp_path: Path) -> None:
@@ -93,12 +93,12 @@ def test_v2_migration_preserves_existing_scenes_rows(tmp_path: Path) -> None:
     # 此时 user_version==1（v1_init.sql 末尾 PRAGMA user_version=1）
     conn.close()
 
-    # 现在 apply_migrations，期望升到 v2
+    # 现在 apply_migrations，期望升到 v4（当前最新）
     apply_migrations(db_path)
 
     conn = _raw_conn(db_path)
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert version == 2
+    assert version == 4
     row = conn.execute("SELECT int_ext, time_of_day, location FROM scenes WHERE scene_code='OldScene';").fetchone()
     assert row is not None
     assert row["int_ext"] is None

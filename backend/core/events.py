@@ -28,6 +28,10 @@ MANUAL_MARK = "manual.mark"
 QUERY_REQUEST = "query.request"
 SCRIPT_UPLOAD = "script.upload"
 
+# 2.C 新增事件
+TAKE_DELETED = "take.deleted"
+SCENE_CHANGED = "scene.changed"
+
 
 # ── Payload dataclass ─────────────────────────────────────────────────────────
 
@@ -69,6 +73,8 @@ class TakeStartPayload:
     scene_id: int
     shot: str | None
     start_ts: float
+    # 待录 take 的显式号（用户在底部 Take 弹窗手动指定）。None → 后端按 (scene,shot) 自动 MAX+1。
+    take_number: int | None = None
 
 
 @dataclass(frozen=True)
@@ -147,3 +153,20 @@ class NoteProcessedPayload:
     category: str
     content: str
     ts: float
+
+
+@dataclass(frozen=True)
+class TakeDeletedPayload:
+    """take.deleted 的 payload（2.C）。"""
+
+    take_id: int
+    scene_id: int
+
+
+@dataclass(frozen=True)
+class SceneChangedPayload:
+    """scene.changed 的 payload（2.C）。"""
+
+    scene_id: int
+    scene_code: str
+    is_active: bool

@@ -1,7 +1,19 @@
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { API_BASE } from "@/lib/config"
 import { useSessionStore } from "@/store/session"
-import type { NoteCreateResponse, NoteListResponse, SceneDTO, ScriptDTO, TakeDTO, TakeDetailDTO, TranscriptSegmentDTO } from "@/types/api"
+import type {
+  ActivateSceneResult,
+  CreateSceneBody,
+  CreateSceneResult,
+  NoteCreateResponse,
+  NoteListResponse,
+  PatchTakeBody,
+  SceneDTO,
+  ScriptDTO,
+  TakeDTO,
+  TakeDetailDTO,
+  TranscriptSegmentDTO,
+} from "@/types/api"
 
 export class ApiError extends Error {
   status: number
@@ -61,15 +73,69 @@ export function getTake(id: number): Promise<TakeDetailDTO> {
   return request<TakeDetailDTO>(`/api/v1/takes/${id}`)
 }
 
-export function startTake(sceneId: number, shot?: string | null): Promise<void> {
+// takeNumber：用户在底部 Take 弹窗手动指定的待录号。省略/undefined → 后端按 (scene,shot) 自动 MAX+1。
+export function startTake(
+  sceneId: number,
+  shot?: string | null,
+  takeNumber?: number | null,
+): Promise<void> {
   return request<void>(`/api/v1/take/start`, {
     method: "POST",
-    body: JSON.stringify({ scene_id: sceneId, shot: shot ?? null }),
+    body: JSON.stringify({
+      scene_id: sceneId,
+      shot: shot ?? null,
+      take_number: takeNumber ?? null,
+    }),
   })
 }
 
 export function endTake(): Promise<void> {
   return request<void>(`/api/v1/take/end`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  })
+}
+
+// ── Scene / Take 写操作（2.C）──
+// 失败抛 ApiError（带 .status）：409 take_in_progress / take_number_conflict / scene_not_active，
+// 404 不存在。调用处按 status catch。
+
+// 建场或复用同 scene_code 的场（都 200，created 区分）。
+export function createScene(body: CreateSceneBody): Promise<CreateSceneResult> {
+  return request<CreateSceneResult>(`/api/v1/scenes`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+// 把某场置为活跃。录制中 → 409 take_in_progress；不存在 → 404。
+export function activateScene(sceneId: number): Promise<ActivateSceneResult> {
+  return request<ActivateSceneResult>(`/api/v1/scenes/${sceneId}/activate`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  })
+}
+
+// 改某条 take（status/shot/scene_id/take_number/notes 全可选）。录制中改 scene_id/take_number → 409。
+// 撞号后端自动加后缀返回 200（带新 take_suffix），不再 409 take_number_conflict。
+// 目标场不存在 / take 不存在 → 404。
+export function patchTake(takeId: number, body: PatchTakeBody): Promise<TakeDTO> {
+  return request<TakeDTO>(`/api/v1/takes/${takeId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  })
+}
+
+// 软删某条 take。204 无 body；录制中 → 409；不存在 → 404。可经 restoreTake 撤销。
+export function deleteTake(takeId: number): Promise<void> {
+  return request<void>(`/api/v1/takes/${takeId}`, { method: "DELETE" })
+}
+
+// 撤销软删，返回恢复后的 TakeDTO。未软删 / 不存在 → 404。
+// ⚠ 若该 take 的三元（scene_id, take_number, take_suffix）已被新 take 占用，后端 UNIQUE 约束会报 500，
+// 调用处需 catch 并优雅提示（见 useRestoreTake / handleUndoDelete）。
+export function restoreTake(takeId: number): Promise<TakeDTO> {
+  return request<TakeDTO>(`/api/v1/takes/${takeId}/restore`, {
     method: "POST",
     body: JSON.stringify({}),
   })
@@ -196,5 +262,96 @@ export function useTake(id: number, enabled: boolean) {
     queryKey: takeQueryKey(id),
     queryFn: () => getTake(id),
     enabled,
+  })
+}
+
+// ── mutation hooks（2.C）──
+// 后端是否在这些写操作上 publish WS 未明（只 take.deleted / scene.changed 是新增明确事件）。
+// 故每个 mutation 成功后自助 invalidate，不依赖 WS 回灌。用 invalidate→refetch（而非乐观更新），
+// 避免与 WS patch-merge 双写。
+
+export function useCreateScene() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: createScene,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: scenesQueryKey() })
+    },
+  })
+}
+
+export function useActivateScene() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (sceneId: number) => activateScene(sceneId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: scenesQueryKey() })
+    },
+  })
+}
+
+export function usePatchTake() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ takeId, body }: { takeId: number; body: PatchTakeBody }) =>
+      patchTake(takeId, body),
+    onSuccess: () => {
+      // 改 scene_id/take_number 可能挪场，takes 与 scenes 都可能受影响。
+      queryClient.invalidateQueries({ queryKey: ["takes"] })
+      queryClient.invalidateQueries({ queryKey: scenesQueryKey() })
+    },
+  })
+}
+
+export function useDeleteTake() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (takeId: number) => deleteTake(takeId),
+    onSuccess: (_data, takeId) => {
+      // seedTakes 只增不删，invalidate→refetch 不会把已删条目从 store Map 抹掉。
+      // 必须显式 removeTake，否则 HistoryTakes 仍显示该条（与 take.deleted WS 处理对称）。
+      useSessionStore.getState().removeTake(takeId)
+      queryClient.invalidateQueries({ queryKey: ["takes"] })
+    },
+  })
+}
+
+export function useRestoreTake() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (takeId: number) => restoreTake(takeId),
+    onSuccess: () => {
+      // 恢复后 take 重新出现：refetch 把它 seed 回 store Map。
+      queryClient.invalidateQueries({ queryKey: ["takes"] })
+    },
+  })
+}
+
+// startTake / endTake 自助 invalidate ["takes"]：take.changed（5 字段 Pick）不带 end_ts，
+// 只有 refetch 能把真实 end_ts / shot / start_ts 填进 store Map。REC 状态机判「take 是否已结束」
+// 读 end_ts，故必须 await 这个 mutation（含 onSuccess 的 invalidate）后再做下一步决策。
+export function useStartTake() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      sceneId,
+      shot,
+      takeNumber,
+    }: {
+      sceneId: number
+      shot?: string | null
+      takeNumber?: number | null
+    }) => startTake(sceneId, shot, takeNumber),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["takes"] }),
+  })
+}
+
+export function useEndTake() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => endTake(),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["takes"] }),
   })
 }

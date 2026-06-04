@@ -22,6 +22,14 @@ from backend.db.migrations.runner import apply_migrations
 # SQLite 3.39.4 不支持 unixepoch('now', 'subsec')，用 strftime 兼容写法
 _NOW_TS_SQL = "CAST(strftime('%s', 'now') AS REAL)"
 
+# vacate / restore / update_take_meta 里 '+' 后缀循环的最大迭代次数守卫（DeepSeek #3）
+# 测试可 monkeypatch 成低值以验证超限异常
+_MAX_SUFFIX_ITER = 1000
+
+# _resolve_base_slot 的 exclude_take_id 哨兵：新 take 尚未 INSERT、无既有 take_id 可排除时传它。
+# 任何真实 take_id ≥ 1（AUTOINCREMENT），故 -1 不会误排除任何行。
+_NO_EXCLUDE_TAKE_ID = -1
+
 
 # ── 数据类（read 方法的返回类型）────────────────────────────────────────────
 
@@ -30,8 +38,9 @@ _NOW_TS_SQL = "CAST(strftime('%s', 'now') AS REAL)"
 class Take:
     take_id: int
     scene_id: int
+    shot: str  # 镜次编号；'' 表示无镜（v4 NOT NULL DEFAULT ''）
     take_number: int
-    shot: str | None
+    take_suffix: str  # 冲突后缀，默认 ''，冲突时 '+' / '++' …（v3）
     start_ts: float
     end_ts: float | None
     status: str  # 'keeper' | 'ng' | 'hold' | 'tbd'
@@ -39,6 +48,7 @@ class Take:
     audio_quality: str | None
     script_diff: dict | None  # L2 输出，DAL 负责 json.loads；写入时也传 dict
     notes: str | None
+    deleted_at: float | None  # 软删时间戳，NULL 表示未删除（v3）
     created_at: float
     updated_at: float
 
@@ -75,7 +85,65 @@ class TakeEvent:
     created_at: float
 
 
+# ── 自定义异常 ────────────────────────────────────────────────────────────────
+
+
+class TakeNumberConflictError(Exception):
+    """跨场移动时目标 (scene_id, take_number) 已被占用，无法自动解决冲突。
+
+    上层路由应将此异常映射为 HTTP 409。
+    """
+
+
 # ── 内部辅助 ──────────────────────────────────────────────────────────────────
+
+
+def _next_take_number(conn: sqlite3.Connection, scene_id: int, shot: str) -> int:
+    """(scene_id, shot) 组内下一个可用 take_number（live MAX+1，软删号可复用）。
+
+    事务内调用版本，直接用传入的 conn，不开新事务。
+    空组返回 1。
+    """
+    row = conn.execute(
+        "SELECT COALESCE(MAX(take_number), 0) + 1 AS next_num "
+        "FROM takes WHERE scene_id = ? AND shot = ? AND deleted_at IS NULL;",
+        (scene_id, shot),
+    ).fetchone()
+    return int(row["next_num"])
+
+
+def _alloc_free_suffix(
+    conn: sqlite3.Connection,
+    scene_id: int,
+    shot: str,
+    take_number: int,
+    exclude_take_id: int,
+    start: str = "+",
+) -> str:
+    """在 (scene_id, shot, take_number) 下找一个空闲 take_suffix，从 start 开始顺位追加 '+'。
+
+    取占用集合（软删 + live 均算占用），排除 exclude_take_id 自身。
+    找到第一个不在占用集合中的 suffix 即返回。
+    超 _MAX_SUFFIX_ITER 次迭代抛 RuntimeError（含「后缀循环超过 N 次」子串）。
+    """
+    taken_rows = conn.execute(
+        "SELECT take_suffix FROM takes "
+        "WHERE scene_id = ? AND shot = ? AND take_number = ? AND take_id != ?;",
+        (scene_id, shot, take_number, exclude_take_id),
+    ).fetchall()
+    taken_suffixes = {r["take_suffix"] for r in taken_rows}
+
+    new_suffix = start
+    _iter = 0
+    while new_suffix in taken_suffixes:
+        _iter += 1
+        if _iter >= _MAX_SUFFIX_ITER:
+            raise RuntimeError(
+                f"后缀循环超过 {_MAX_SUFFIX_ITER} 次，"
+                f"scene_id={scene_id} shot={shot!r} take_number={take_number}"
+            )
+        new_suffix = new_suffix + "+"
+    return new_suffix
 
 
 def _row_to_take(row: sqlite3.Row) -> Take:
@@ -85,6 +153,7 @@ def _row_to_take(row: sqlite3.Row) -> Take:
         take_id=row["take_id"],
         scene_id=row["scene_id"],
         take_number=row["take_number"],
+        take_suffix=row["take_suffix"],
         shot=row["shot"],
         start_ts=row["start_ts"],
         end_ts=row["end_ts"],
@@ -93,6 +162,7 @@ def _row_to_take(row: sqlite3.Row) -> Take:
         audio_quality=row["audio_quality"],
         script_diff=json.loads(script_diff) if script_diff else None,
         notes=row["notes"],
+        deleted_at=row["deleted_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -249,38 +319,141 @@ class DAL:
 
     # ── takes ────────────────────────────────────────────────────────────────
 
+    def _vacate_base_slot(
+        self,
+        conn: sqlite3.Connection,
+        scene_id: int,
+        shot: str,
+        take_number: int,
+    ) -> None:
+        """若 (scene_id, shot, take_number, '') 被一条软删行占着，把该软删行的 suffix 顺位追加 '+'。
+
+        规则：
+          - 只处理软删行（deleted_at IS NOT NULL）占着 suffix='' 的情形。
+          - 若 '' 未被软删行占（空闲或被 live 行占），no-op。
+          - 找到后：在该 scene+shot+number 下循环找一个既不撞软删也不撞 live 的空 suffix，
+            UPDATE 软删行的 take_suffix，让出 ''。
+
+        注意：「vacate 软删占用者让位加 '+' 到 live」与「给被编辑 take 加后缀」是两路不对称逻辑：
+        前者只动软删行；后者只动 live 的被编辑行，永不挪已有 live 占用者（DeepSeek #4 注）。
+
+        调用时必须在写事务内（BEGIN IMMEDIATE 已持有），直接用传入 conn 操作，不开新事务。
+        """
+        occupant = conn.execute(
+            "SELECT take_id, take_suffix FROM takes "
+            "WHERE scene_id = ? AND shot = ? AND take_number = ? AND take_suffix = '' "
+            "AND deleted_at IS NOT NULL;",
+            (scene_id, shot, take_number),
+        ).fetchone()
+        if occupant is None:
+            return  # no-op：'' 未被软删行占
+
+        # 从 '+' 开始顺位找空闲 suffix（_alloc_free_suffix 含 MAX_ITER 守卫）
+        new_suffix = _alloc_free_suffix(
+            conn, scene_id, shot, take_number, exclude_take_id=occupant["take_id"]
+        )
+        conn.execute(
+            "UPDATE takes SET take_suffix = ? WHERE take_id = ?;",
+            (new_suffix, occupant["take_id"]),
+        )
+
+    def _resolve_base_slot(
+        self,
+        conn: sqlite3.Connection,
+        target_scene: int,
+        target_shot: str,
+        target_number: int,
+        exclude_take_id: int,
+    ) -> tuple[str, str]:
+        """查目标四元 (target_scene, target_shot, target_number, '') 的占用状态，返回 (target_suffix, conflict_resolution)。
+
+        三态：
+        - '' 未被占用 → ("", "none")
+        - 被软删行占 → _vacate_base_slot 让出 '' → ("", "vacate")
+        - 被 live 行占 → 被编辑 take 加后缀 → (suffix, "suffix")
+
+        不对称规则（DeepSeek #4 注）：vacate 只动软删行；加后缀只动被编辑 take，live 占用者永不被挪。
+        调用时必须在写事务内（BEGIN IMMEDIATE 已持有），直接用传入 conn 操作，不开新事务。
+        """
+        occupant_row = conn.execute(
+            "SELECT take_id, deleted_at FROM takes "
+            "WHERE scene_id = ? AND shot = ? AND take_number = ? AND take_suffix = '' "
+            "AND take_id != ?;",
+            (target_scene, target_shot, target_number, exclude_take_id),
+        ).fetchone()
+
+        if occupant_row is None:
+            return ("", "none")
+        if occupant_row["deleted_at"] is not None:
+            self._vacate_base_slot(conn, target_scene, target_shot, target_number)
+            return ("", "vacate")
+        # live 行占用 → 被编辑 take 顺位加后缀（_alloc_free_suffix 含 MAX_ITER 守卫）
+        suffix = _alloc_free_suffix(
+            conn, target_scene, target_shot, target_number, exclude_take_id=exclude_take_id
+        )
+        return (suffix, "suffix")
+
     def start_take(
         self,
         scene_id: int,
-        take_number: int,
+        shot: str,
         start_ts: float,
-        shot: str | None = None,
-    ) -> int:
-        """新建 take 行，返回 take_id。"""
+        take_number: int | None = None,
+    ) -> tuple[int, int]:
+        """新建 take 行，返回 (take_id, take_number)。
+
+        take_number 在 BEGIN IMMEDIATE 写事务内确定 + 解析号位冲突：
+          1. 定号：take_number 为 None → (scene_id, shot) 组内 MAX(live)+1；显式传入 → 直接用
+             （用户在底部 Take 弹窗手动指定的待录号）。
+          2. _resolve_base_slot：解析 (scene_id, shot, take_number, '') 号位三态——空闲直接用 ''；
+             被软删行占 → vacate 让位，新 take 仍落 ''；被 live 行占（手动往回退占已用号）→
+             新 take 顺位加后缀（'+'/'++'…），live 占用者永不被挪。
+          3. INSERT 新 take，落 (scene_id, shot, take_number, 解析得的 suffix)。
+
+        自动号路径（take_number=None）行为不变：MAX+1 永不撞 live 行，故 _resolve_base_slot 恒返回
+        ''（空闲或 vacate），等价于旧 _vacate_base_slot + 落 ''。
+        原子性依赖单连接 + IMMEDIATE 事务：同一进程单连接下，步骤 1-3 不会被其他写入打断。
+        shot='' 表示无镜编号（v4 约定，不报错）。（DeepSeek #1）
+        """
         with self._write_tx() as conn:
-            cur = conn.execute(
-                "INSERT INTO takes (scene_id, take_number, start_ts, shot) "
-                "VALUES (?, ?, ?, ?);",
-                (scene_id, take_number, start_ts, shot),
+            # 步骤 1：定号（自动 MAX+1 或用显式传入号）
+            if take_number is None:
+                take_number = _next_take_number(conn, scene_id, shot)
+            # 步骤 2：解析号位冲突（新行尚未插入，不排除任何已有行）
+            suffix, _resolution = self._resolve_base_slot(
+                conn, scene_id, shot, take_number, exclude_take_id=_NO_EXCLUDE_TAKE_ID
             )
-        return cur.lastrowid  # type: ignore[return-value]
+            # 步骤 3：插入新 take
+            cur = conn.execute(
+                "INSERT INTO takes (scene_id, shot, take_number, take_suffix, start_ts) "
+                "VALUES (?, ?, ?, ?, ?);",
+                (scene_id, shot, take_number, suffix, start_ts),
+            )
+        return cur.lastrowid, take_number  # type: ignore[return-value]
 
     def end_take(
         self,
         take_id: int,
         end_ts: float,
-        status: str,
+        status: str | None = None,
         script_diff: dict | None = None,
         notes: str | None = None,
     ) -> None:
-        """
-        更新 take 结束时间、状态、L2 输出。
+        """更新 take 结束时间，可选更新 status / L2 输出。
+
+        status / script_diff / notes 走 preserve-on-None（COALESCE）：传 None 即保留库中原值，
+        不清零。故 end_take 只负责标记结束 + 写入显式给的字段，不覆盖它没被给的列
+        （status 是用户 Mark、script_diff 由 L2 单独写、notes 由 memo 写，各有其主，end_take 不碰）。
         script_diff 传 dict，DAL 内部 json.dumps 后存库；读取时 json.loads 还原。
+        与 update_take_np_output 同构的 COALESCE 写法。
         """
         script_diff_json = json.dumps(script_diff) if script_diff is not None else None
         with self._write_tx() as conn:
             conn.execute(
-                f"UPDATE takes SET end_ts = ?, status = ?, script_diff = ?, notes = ?, "
+                f"UPDATE takes SET end_ts = ?, "
+                f"status = COALESCE(?, status), "
+                f"script_diff = COALESCE(?, script_diff), "
+                f"notes = COALESCE(?, notes), "
                 f"updated_at = {_NOW_TS_SQL} "
                 f"WHERE take_id = ?;",
                 (end_ts, status, script_diff_json, notes, take_id),
@@ -311,22 +484,29 @@ class DAL:
             )
 
     def get_take(self, take_id: int) -> Take | None:
-        """按 take_id 获取单条 take，不存在返回 None。"""
+        """按 take_id 获取单条 take，不存在或已软删返回 None。"""
+        row = self._conn.execute(
+            "SELECT * FROM takes WHERE take_id = ? AND deleted_at IS NULL;", (take_id,)
+        ).fetchone()
+        return _row_to_take(row) if row else None
+
+    def get_take_any(self, take_id: int) -> Take | None:
+        """按 take_id 获取单条 take（含软删行），不存在返回 None。供 restore 端点使用。"""
         row = self._conn.execute(
             "SELECT * FROM takes WHERE take_id = ?;", (take_id,)
         ).fetchone()
         return _row_to_take(row) if row else None
 
     def list_takes(self, scene_id: int | None = None) -> list[Take]:
-        """返回 take 列表，可按 scene_id 过滤，按 take_number 升序。"""
+        """返回 take 列表（排除软删行），可按 scene_id 过滤，按 take_number 升序。"""
         if scene_id is not None:
             rows = self._conn.execute(
-                "SELECT * FROM takes WHERE scene_id = ? ORDER BY take_number ASC;",
+                "SELECT * FROM takes WHERE scene_id = ? AND deleted_at IS NULL ORDER BY take_number ASC;",
                 (scene_id,),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT * FROM takes ORDER BY take_number ASC;"
+                "SELECT * FROM takes WHERE deleted_at IS NULL ORDER BY take_number ASC;"
             ).fetchall()
         return [_row_to_take(r) for r in rows]
 
@@ -731,3 +911,327 @@ class DAL:
                 (take_id,),
             ).fetchall()
         return [_row_to_event(r) for r in rows]
+    # ── 2.B 新增方法 ─────────────────────────────────────────────────────────
+
+    def set_take_status(self, take_id: int, status: str) -> None:
+        """更新 take 的 status，并在 take_events 写一条 manual.mark 事件。
+
+        status 必须是 'keeper' / 'ng' / 'hold' / 'tbd' 之一，否则抛 ValueError。
+        单事务内完成：UPDATE takes + INSERT take_events（inline，不调 insert_take_event 避免嵌套事务）。
+        """
+        _VALID_STATUSES = {"keeper", "ng", "hold", "tbd"}
+        if status not in _VALID_STATUSES:
+            raise ValueError(
+                f"非法 status 值 {status!r}，必须是 {sorted(_VALID_STATUSES)} 之一"
+            )
+        payload_json = json.dumps({"status": status})
+        with self._write_tx() as conn:
+            conn.execute(
+                f"UPDATE takes SET status = ?, updated_at = {_NOW_TS_SQL} WHERE take_id = ?;",
+                (status, take_id),
+            )
+            conn.execute(
+                f"INSERT INTO take_events (take_id, event_type, ts, payload) "
+                f"VALUES (?, 'manual.mark', {_NOW_TS_SQL}, ?);",
+                (take_id, payload_json),
+            )
+
+    def update_take_meta(
+        self,
+        take_id: int,
+        *,
+        shot: str | None = None,
+        scene_id: int | None = None,
+        take_number: int | None = None,
+        notes: str | None = None,
+    ) -> None:
+        """部分更新 take 元数据，处理 UNIQUE(scene_id, shot, take_number, take_suffix) 冲突。在单个事务内完成。
+
+        字段语义：
+        - shot：None 表示不改；'' 是合法值（清空 shot 标注）；非 None 表示改 shot。
+        - notes：None 表示不改，空串 "" 是合法值（清空备注）。
+        - scene_id：目标场次 ID，None 表示不改（保持当前场）。目标 scene 不存在时抛 ValueError。
+        - take_number：目标编号，None 表示不改或由冲突算法自动计算。
+
+        冲突处理（spec §16 四元 key）：
+        - 情形 A：仅改 scene_id（无 take_number）→ 追加为目标 (scene, target_shot) 组 live MAX+1。
+        - 情形 B/C/D：改 take_number 或 shot（含跨场）→ 若目标四元 (scene,shot,number,'') 被占用
+          （含软删行），按规则处理：软删占用者 → vacate 让出 ''；live 占用者 → 被编辑 take 加后缀。
+          （DeepSeek #4 注：两路不对称：vacate 只动软删行，加后缀只动被编辑 take，live 占用者永不被挪）
+
+        成功后写一条 take_events（event_type='manual.edit'），payload 含 changed_fields 列表
+        和 conflict_resolution（'append' / 'suffix' / 'none'）。
+
+        status 字段不在本方法，走 set_take_status。
+        """
+        # 取当前 take 快照（事务外读，仅用于后续判断）
+        row = self._conn.execute(
+            "SELECT scene_id, take_number, shot FROM takes WHERE take_id = ? AND deleted_at IS NULL;",
+            (take_id,),
+        ).fetchone()
+        if row is None:
+            return
+
+        cur_scene: int = row["scene_id"]
+        cur_number: int = row["take_number"]
+        cur_shot: str = row["shot"]  # v4 后 NOT NULL
+
+        # 确定目标 scene 和 shot
+        target_scene = scene_id if scene_id is not None else cur_scene
+        target_shot = shot if shot is not None else cur_shot  # None 用 cur；'' 是合法的空 shot
+        is_cross_scene = (scene_id is not None) and (scene_id != cur_scene)
+        is_shot_change = (shot is not None) and (shot != cur_shot)
+
+        with self._write_tx() as conn:
+            # 涉及 scene_id 变更，先校验目标 scene 存在
+            if scene_id is not None:
+                exists = conn.execute(
+                    "SELECT 1 FROM scenes WHERE scene_id = ?;", (scene_id,)
+                ).fetchone()
+                if not exists:
+                    raise ValueError(f"目标 scene_id={scene_id} 不存在")
+
+            # 计算目标编号及冲突解决方式
+            conflict_resolution = "none"
+            target_number: int
+            target_suffix: str = ""
+
+            if take_number is None:
+                if is_cross_scene:
+                    # 情形 A：移场，追加到目标 (scene, target_shot) 组 live MAX+1（软删号可复用）
+                    target_number = _next_take_number(conn, target_scene, target_shot)
+                    conflict_resolution = "append"
+                    # 若目标四元 (target_scene, target_shot, target_number, '') 被软删行占着，先让出 ''
+                    self._vacate_base_slot(conn, target_scene, target_shot, target_number)
+                elif is_shot_change:
+                    # 决策 3：仅改 shot（同场），保留 take_number，落到目标 (scene, target_shot, number, '')
+                    target_number = cur_number
+                    target_suffix, res = self._resolve_base_slot(
+                        conn, target_scene, target_shot, target_number, exclude_take_id=take_id
+                    )
+                    if res == "suffix":
+                        conflict_resolution = res
+                else:
+                    # 无 take_number，无跨场，无 shot 变更 → 不改编号
+                    target_number = cur_number
+            else:
+                target_number = take_number
+                if target_number != cur_number or is_cross_scene or is_shot_change:
+                    # 检查目标四元 (scene, target_shot, number, '') 是否被占用（排除自己）
+                    # 不对称规则（DeepSeek #4）：
+                    #   - 占用者是软删 → vacate 让出 ''，被编辑 take 落干净 ''
+                    #   - 占用者是 live → 被编辑 take 顺位加后缀（live 行永不被挪）
+                    target_suffix, res = self._resolve_base_slot(
+                        conn, target_scene, target_shot, target_number, exclude_take_id=take_id
+                    )
+                    if res == "suffix":
+                        conflict_resolution = res
+
+            # 汇总需要更新的字段
+            set_clauses: list[str] = []
+            params: list[Any] = []
+
+            if scene_id is not None:
+                set_clauses.append("scene_id = ?")
+                params.append(target_scene)
+            if target_number != cur_number or conflict_resolution == "suffix" or is_shot_change:
+                set_clauses.append("take_number = ?")
+                params.append(target_number)
+                set_clauses.append("take_suffix = ?")
+                params.append(target_suffix)
+            elif take_number is not None and target_number == cur_number and not is_cross_scene and not is_shot_change:
+                # 同场改号但号未变（目标与当前相同），suffix 也不变，无需写 take_number/take_suffix
+                pass
+            if shot is not None:
+                set_clauses.append("shot = ?")
+                params.append(target_shot)
+            if notes is not None:
+                set_clauses.append("notes = ?")
+                params.append(notes)
+
+            # 记录本次改动的业务字段（供 take_events payload）
+            changed_fields: list[str] = []
+            if scene_id is not None:
+                changed_fields.append("scene_id")
+            if target_number != cur_number:
+                changed_fields.append("take_number")
+            if is_cross_scene and take_number is None:
+                changed_fields.append("take_number")  # append 也改了编号
+            if target_suffix:
+                changed_fields.append("take_suffix")
+            if shot is not None:
+                changed_fields.append("shot")
+            if notes is not None:
+                changed_fields.append("notes")
+
+            if set_clauses:
+                set_clauses.append(f"updated_at = {_NOW_TS_SQL}")
+                params.append(take_id)
+                conn.execute(
+                    f"UPDATE takes SET {', '.join(set_clauses)} WHERE take_id = ?;",
+                    params,
+                )
+
+            # 写 take_events（manual.edit），inline 不调 insert_take_event
+            event_payload_json = json.dumps(
+                {
+                    "changed_fields": changed_fields,
+                    "conflict_resolution": conflict_resolution,
+                    "final_suffix": target_suffix,
+                }
+            )
+            conn.execute(
+                f"INSERT INTO take_events (take_id, event_type, ts, payload) "
+                f"VALUES (?, 'manual.edit', {_NOW_TS_SQL}, ?);",
+                (take_id, event_payload_json),
+            )
+
+    def next_take_number(self, scene_id: int, shot: str) -> int:
+        """返回 (scene_id, shot) 组内下一个可用 take_number（live MAX+1，软删号可复用）。
+
+        复用语义：以当前 live（deleted_at IS NULL）行中最大 take_number 为基准，
+        返回 MAX(live)+1。软删行不占号位，删掉最新 take 后下次可拿回同一号。
+        空组返回 1。shot='' 表示无镜组（v4 约定）。
+
+        注意：此方法用于外部读取「当前组下一号」供 UI 展示（决策 4），
+        start_take 内部在写事务里重新原子计算，不直接用此值写库。
+        """
+        return _next_take_number(self._conn, scene_id, shot)
+
+    def get_or_create_scene(
+        self,
+        scene_code: str,
+        *,
+        description: str | None = None,
+        shoot_date: str | None = None,
+        int_ext: str | None = None,
+        time_of_day: str | None = None,
+        location: str | None = None,
+    ) -> tuple[int, bool]:
+        """返回 (scene_id, created)。created=True 表示本次新建，False 表示复用已有行。
+
+        行为：先 SELECT，命中返回 (id, False)（忽略余参数，不更新已有行）；
+        未命中 INSERT 返回 (id, True)；INSERT 撞唯一索引时兜底重 SELECT。
+        """
+        # 先查
+        row = self._conn.execute(
+            "SELECT scene_id FROM scenes WHERE scene_code = ?;",
+            (scene_code,),
+        ).fetchone()
+        if row is not None:
+            return int(row["scene_id"]), False
+
+        # 未命中，尝试 INSERT
+        try:
+            with self._write_tx() as conn:
+                cur = conn.execute(
+                    "INSERT INTO scenes (scene_code, description, shoot_date, int_ext, time_of_day, location) "
+                    "VALUES (?, ?, ?, ?, ?, ?);",
+                    (scene_code, description, shoot_date, int_ext, time_of_day, location),
+                )
+            return int(cur.lastrowid), True  # type: ignore[arg-type]
+        except sqlite3.IntegrityError:
+            # 并发下 INSERT 撞唯一索引，兜底重 SELECT
+            row = self._conn.execute(
+                "SELECT scene_id FROM scenes WHERE scene_code = ?;",
+                (scene_code,),
+            ).fetchone()
+            return int(row["scene_id"]), False  # type: ignore[index]
+
+    def delete_take(self, take_id: int) -> None:
+        """软删 take：设置 deleted_at 时间戳，子表数据保留（不触发 CASCADE）。
+
+        执行顺序（单事务）：SELECT 快照 → INSERT audit_log → UPDATE deleted_at。
+        take 不存在时静默 no-op。
+        """
+        with self._write_tx() as conn:
+            snapshot = conn.execute(
+                "SELECT take_id, scene_id, take_number, status, shot, notes, "
+                "start_ts, end_ts FROM takes WHERE take_id = ?;",
+                (take_id,),
+            ).fetchone()
+            if snapshot is None:
+                return
+
+            audit_payload = json.dumps(
+                {
+                    "take_id": snapshot["take_id"],
+                    "scene_id": snapshot["scene_id"],
+                    "take_number": snapshot["take_number"],
+                    "status": snapshot["status"],
+                    "shot": snapshot["shot"],
+                    "notes": snapshot["notes"],
+                    "start_ts": snapshot["start_ts"],
+                    "end_ts": snapshot["end_ts"],
+                }
+            )
+            conn.execute(
+                f"INSERT INTO audit_log (actor, action, payload, ts) "
+                f"VALUES ('user', 'take.delete', ?, {_NOW_TS_SQL});",
+                (audit_payload,),
+            )
+            conn.execute(
+                f"UPDATE takes SET deleted_at = {_NOW_TS_SQL} WHERE take_id = ?;",
+                (take_id,),
+            )
+
+    def restore_take(self, take_id: int) -> None:
+        """撤销软删：清除 deleted_at，在 audit_log 写 take.restore。
+
+        take 不存在时静默 no-op。
+
+        兜底逻辑（DeepSeek #2）：正常路径下软删行在被复用（start_take）时已被 _vacate_base_slot
+        挪到 '+'，restore 后落回其当前 suffix 不撞 live 行。
+        但若极端情况下 (scene, shot, number, suffix) 与 live 行冲突，则顺位追加 '+'
+        直到找到空闲 suffix，更新后再清 deleted_at，防止抛 500。
+
+        ⚠ 注（schema 限制）：当前 UNIQUE(scene_id, shot, take_number, take_suffix) 包含软删行，
+        因此被 restore 的 (tuple) 在库中必然唯一，live_conflict 在正常路径下不可达，
+        fallback + MAX_ITER 属防御性死码。若未来改成 partial unique（仅 live 行），fallback 会生效。
+        """
+        with self._write_tx() as conn:
+            # 取被恢复行的快照（含软删行）
+            snap = conn.execute(
+                "SELECT scene_id, shot, take_number, take_suffix FROM takes WHERE take_id = ?;",
+                (take_id,),
+            ).fetchone()
+            if snap is None:
+                return  # 不存在，no-op
+
+            scene_id = snap["scene_id"]
+            shot = snap["shot"]
+            take_number = snap["take_number"]
+            current_suffix = snap["take_suffix"]
+
+            # 检查 (scene, shot, number, current_suffix) 是否与 live 行冲突（排除自己）
+            # 只检查 live 行：UNIQUE 约束仅在 (live) 行间有意义（SQLite 中软删行也受约束）
+            live_conflict = conn.execute(
+                "SELECT take_id FROM takes "
+                "WHERE scene_id = ? AND shot = ? AND take_number = ? AND take_suffix = ? "
+                "AND take_id != ? AND deleted_at IS NULL;",
+                (scene_id, shot, take_number, current_suffix, take_id),
+            ).fetchone()
+
+            if live_conflict is not None:
+                # 兜底：顺位找空闲 suffix（_alloc_free_suffix 含 MAX_ITER 守卫）
+                # start=current_suffix+"+"：从当前 suffix 顺位追加，占用集合含软删行（DeepSeek #2）
+                new_suffix = _alloc_free_suffix(
+                    conn, scene_id, shot, take_number,
+                    exclude_take_id=take_id,
+                    start=current_suffix + "+",
+                )
+                conn.execute(
+                    "UPDATE takes SET take_suffix = ? WHERE take_id = ?;",
+                    (new_suffix, take_id),
+                )
+
+            conn.execute(
+                "UPDATE takes SET deleted_at = NULL WHERE take_id = ?;",
+                (take_id,),
+            )
+            audit_payload = json.dumps({"take_id": take_id})
+            conn.execute(
+                f"INSERT INTO audit_log (actor, action, payload, ts) "
+                f"VALUES ('user', 'take.restore', ?, {_NOW_TS_SQL});",
+                (audit_payload,),
+            )
