@@ -16,6 +16,8 @@ KIMI_SETUP.md
 .playwright-mcp/
 .superpowers/
 reasonix.toml
+.codegraph/
+.pnpm-store/
 
 # 密钥 / 环境变量
 .env
