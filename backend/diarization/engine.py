@@ -35,9 +35,10 @@ class DiarizationEngine:
     hf_token：HuggingFace access token，用于访问 gated 模型。
     model_id：diarization pipeline 模型 ID（默认 pyannote/speaker-diarization-community-1，pyannote.audio 4.0 原生）。
 
-    声纹 embedding 统一用 pipeline 自带的 community-1（512 维）：diarize 取 per-speaker
-    centroid，enroll（extract_embedding）取主说话人 centroid——同一空间才能跨 take / 与
-    注册演员比对。**不**再用独立 wespeaker 模型（256 维，空间不兼容）。
+    声纹 embedding 统一用 pipeline 自带的 community-1（实测产出 256 维，pipeline 内部用
+    resnet34 embedder）：diarize 取 per-speaker centroid，enroll（extract_embedding）取主
+    说话人 centroid——两条路径走同一 pipeline、同一 output.speaker_embeddings，故同空间、
+    同维度，才能跨 take / 与注册演员比对。
     """
 
     def __init__(
@@ -122,9 +123,8 @@ class DiarizationEngine:
         annotation = getattr(output, "speaker_diarization", output)
         turns = self._turns_from_diarization(annotation)
 
-        # 每说话人 embedding（跨 take 声纹比对）：只用 4.0 pipeline 直接产出的 centroids
-        # （community-1，固定 512 维）。**不**回退到独立 wespeaker 模型——那是另一套 embedding
-        # 空间（256 维），混进台账会维度/语义都对不上（见 registry 跨 take 匹配）。
+        # 每说话人 embedding（跨 take 声纹比对）：用 4.0 pipeline 直接产出的 centroids
+        # （community-1，实测 256 维）。enroll 走同一 pipeline 同一属性，故同空间可比。
         # pipeline 没给（无活跃说话人 / OracleClustering）时 embedding 留 None，registry 直接顺位新号。
         speaker_embeddings = getattr(output, "speaker_embeddings", None)
         if speaker_embeddings is not None and len(speaker_embeddings) > 0:
@@ -171,7 +171,7 @@ class DiarizationEngine:
         ]
 
     def extract_embedding(self, pcm_int16: np.ndarray) -> "np.ndarray | None":
-        """从一段音频提取声纹 embedding（用于 enrollment），与 diarize 同空间（community-1，512 维）。
+        """从一段音频提取声纹 embedding（用于 enrollment），与 diarize 同空间（community-1，实测 256 维）。
 
         做法：把音频喂进 diarization pipeline，取**说话时长最长的说话人**的 centroid。
         enroll 应是单人干净独白（建议 ≥15s）；若检测到多说话人，取主说话人并告警。
