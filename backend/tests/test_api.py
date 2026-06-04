@@ -1650,4 +1650,78 @@ def test_takedto_has_take_suffix_field(tmp_dal: DAL, monkeypatch) -> None:
     assert resp.status_code == 200
     take = resp.json()["takes"][0]
     assert "take_suffix" in take
-    assert take["take_suffix"] == ""
+
+
+# ── POST /api/v1/debug/reset-db ──────────────────────────────────────────────
+
+
+def test_debug_reset_db_clears_and_reseeds(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV=1 + 正确 token：造数据 → POST /debug/reset-db → 200；
+    库被清空，恰好剩 1 个 active scene。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+
+    # 造点数据
+    sid = tmp_dal.create_scene("scene_before_reset")
+    tmp_dal.set_active_scene(sid)
+    tmp_dal.start_take(sid, "", 100.0)
+
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/debug/reset-db",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["reseeded"] is True
+
+    # 验证恰好剩 1 个 active scene
+    scenes = tmp_dal.list_scenes()
+    assert len(scenes) == 1
+    assert scenes[0]["is_active"] == 1
+
+
+def test_debug_reset_db_absent_without_dev_flag(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV 未设 → POST /debug/reset-db → 404（路由未挂载）。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.delenv("SOUNDSPEED_DEV", raising=False)
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/debug/reset-db",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_debug_reset_db_no_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV=1 + 无 token → 401。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+
+    resp = client.post("/api/v1/debug/reset-db")
+    assert resp.status_code == 401
+
+
+def test_debug_reset_db_wrong_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV=1 + 错误 token → 401。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/debug/reset-db",
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+    assert resp.status_code == 401

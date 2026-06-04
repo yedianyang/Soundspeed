@@ -188,6 +188,20 @@ export interface DebugScriptHeading {
   location?: string
 }
 
+// dev-only 全量清库（后端仅 SOUNDSPEED_DEV=1 挂载 /api/v1/debug/reset-db）。
+// 清空所有业务表，后端用 seed_dev_scene 重播种一个 active 空场，返回 {status, reseeded}。
+// 危险操作不可恢复，调用处需二次确认。成功后建议整页 reload 派生干净状态。
+export interface ResetDbResult {
+  status: string
+  reseeded: boolean
+}
+
+export function resetDb(): Promise<ResetDbResult> {
+  return request<ResetDbResult>(`/api/v1/debug/reset-db`, {
+    method: "POST",
+  })
+}
+
 export function injectDebugScript(
   lines: DebugScriptLine[],
   sceneId?: number,

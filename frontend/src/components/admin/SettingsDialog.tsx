@@ -6,6 +6,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from "@/components/ui/dialog"
 import {
   Select,
@@ -28,6 +29,7 @@ import {
   injectDebugAsr,
   injectDebugScript,
   pickActiveScene,
+  resetDb,
   startTake,
   useScenes,
   type DebugAsrSeg,
@@ -37,6 +39,14 @@ import { Check, ChevronDown, ChevronRight } from "lucide-react"
 import { Plus, Trash2, User, AudioLines, Link2, Server, FlaskConical } from "lucide-react"
 
 const DEV = import.meta.env.DEV
+
+function statusTextClass(kind: "info" | "error" | "done"): string {
+  return kind === "error"
+    ? "text-xs text-destructive"
+    : kind === "done"
+      ? "text-xs text-green-600"
+      : "text-xs text-muted-foreground"
+}
 
 const DEBUG_ASR_PLACEHOLDER = `{
   "speakers": ["SPEAKER_00", "SPEAKER_01"],
@@ -263,6 +273,10 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
   const [runStatus, setRunStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
   const [scriptText, setScriptText] = useState(DEV_SCRIPT_SAMPLE)
   const [scriptStatus, setScriptStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
+  // 一键清空数据库：二次确认弹窗开关 + 状态 pill（沿用 scriptStatus 的展示风格）。
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false)
+  const [resetting, setResetting] = useState(false)
+  const [resetStatus, setResetStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
   // slugline heading（随剧本注入写到场次）。预填默认场景头。
   const [heading, setHeading] = useState({ int_ext: "室外", time_of_day: "日", location: "街道" })
 
@@ -294,6 +308,22 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
       setScriptStatus({ kind: "error", msg: "请求失败（看 console / 是否 SOUNDSPEED_DEV=1）" })
     } finally {
       setRunning(false)
+    }
+  }
+
+  const handleResetDb = async () => {
+    if (resetting) return
+    setResetting(true)
+    setResetStatus({ kind: "info", msg: "清空中…" })
+    try {
+      await resetDb()
+      // 成功 → 整页 reload，从空/新库重新派生 UI（不必手动同步各处缓存状态）。
+      location.reload()
+    } catch (err) {
+      console.error("reset db failed", err)
+      setResetStatus({ kind: "error", msg: "清空失败（看 console / 是否 SOUNDSPEED_DEV=1 / token）" })
+      setResetting(false)
+      setConfirmResetOpen(false)
     }
   }
 
@@ -756,15 +786,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                     注入剧本到当前场次
                   </Button>
                   {scriptStatus && (
-                    <span
-                      className={
-                        scriptStatus.kind === "error"
-                          ? "text-xs text-destructive"
-                          : scriptStatus.kind === "done"
-                            ? "text-xs text-green-600"
-                            : "text-xs text-muted-foreground"
-                      }
-                    >
+                    <span className={statusTextClass(scriptStatus.kind)}>
                       {scriptStatus.msg}
                     </span>
                   )}
@@ -800,15 +822,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                     {running ? "运行中…" : "一键跑完整 take"}
                   </Button>
                   {runStatus && (
-                    <span
-                      className={
-                        runStatus.kind === "error"
-                          ? "text-xs text-destructive"
-                          : runStatus.kind === "done"
-                            ? "text-xs text-green-600"
-                            : "text-xs text-muted-foreground"
-                      }
-                    >
+                    <span className={statusTextClass(runStatus.kind)}>
                       {runStatus.msg}
                     </span>
                   )}
@@ -817,11 +831,83 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                   L2 摘要需 Gemma 权重，否则降级（script_diff 为空）。
                 </span>
               </div>
+
+              <Separator />
+
+              {/* ---- 危险区：一键清空数据库内容 ---- */}
+              <div className="grid gap-2">
+                <div className="flex items-center gap-2">
+                  <Trash2 className="size-4 text-destructive" />
+                  <span className="text-sm font-medium text-destructive">危险操作</span>
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  清空全部业务数据（场次 / take / 剧本 / 转写），不可恢复。仅 dev 测试用。
+                </span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    className="gap-1.5"
+                    disabled={resetting}
+                    onClick={() => {
+                      setResetStatus(null)
+                      setConfirmResetOpen(true)
+                    }}
+                  >
+                    <Trash2 className="size-4" />
+                    {resetting ? "清空中…" : "一键清空数据库内容"}
+                  </Button>
+                  {resetStatus && (
+                    <span className={statusTextClass(resetStatus.kind)}>
+                      {resetStatus.msg}
+                    </span>
+                  )}
+                </div>
+              </div>
               </>
             )}
           </TabsContent>
         </Tabs>
       </DialogContent>
+
+      {/* 一键清空数据库 — 二次确认（无 AlertDialog 组件，用 Dialog 搭等效确认） */}
+      {DEV && (
+        <Dialog
+          open={confirmResetOpen}
+          onOpenChange={(o) => {
+            // 清空进行中不允许关弹窗（避免误触；成功会 reload，失败由 handler 关闭）。
+            if (resetting) return
+            setConfirmResetOpen(o)
+          }}
+        >
+          <DialogContent className="sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle>清空数据库内容</DialogTitle>
+              <DialogDescription>
+                确定清空全部数据库内容？此操作不可恢复。
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={resetting}
+                onClick={() => setConfirmResetOpen(false)}
+              >
+                取消
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={resetting}
+                onClick={handleResetDb}
+              >
+                {resetting ? "清空中…" : "确定清空"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </Dialog>
   )
 }

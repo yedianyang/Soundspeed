@@ -1088,6 +1088,29 @@ class DAL:
                 (take_id,),
             )
 
+    def reset_all(self) -> None:
+        """单事务内清空全部业务表（dev 专用）。
+
+        按「子表先于父表」顺序 DELETE，遵循外键约束（PRAGMA foreign_keys ON）：
+          take_line_matches / take_events / transcript_segments
+            → takes → script_lines → scripts → scenes
+            → audit_log → active_observers（无 FK，顺序任意）
+
+        FTS5 影子表（script_lines_fts*）靠 script_lines 上的 BEFORE DELETE 触发器同步，
+        DELETE FROM script_lines 会逐行触发 FTS 删除，影子表随之清空。
+        方法只做清空，不负责重新播种（播种在端点层）。
+        """
+        with self._write_tx() as conn:
+            conn.execute("DELETE FROM take_line_matches;")
+            conn.execute("DELETE FROM take_events;")
+            conn.execute("DELETE FROM transcript_segments;")
+            conn.execute("DELETE FROM takes;")
+            conn.execute("DELETE FROM script_lines;")
+            conn.execute("DELETE FROM scripts;")
+            conn.execute("DELETE FROM scenes;")
+            conn.execute("DELETE FROM audit_log;")
+            conn.execute("DELETE FROM active_observers;")
+
     def restore_take(self, take_id: int) -> None:
         """撤销软删：清除 deleted_at，在 audit_log 写 take.restore。
 
