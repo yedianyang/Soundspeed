@@ -16,6 +16,38 @@ class DeviceError(RuntimeError):
     """采集设备无法打开、或采集中途失败时抛出。"""
 
 
+def _open_input_stream(
+    device: int | str, config: AudioConfig
+) -> tuple[sd.InputStream, int, int]:
+    """打开设备 InputStream 并 start，返回 (stream, rate, channels)。
+
+    失败时抛 DeviceError（query 失败或 PortAudioError）。
+    调用方负责 stop/close 流。
+    """
+    try:
+        info = sd.query_devices(device, "input")
+    except (ValueError, sd.PortAudioError) as exc:
+        available = "\n".join(
+            f"  [{i}] {d['name']}"
+            for i, d in enumerate(sd.query_devices())
+            if d["max_input_channels"] > 0
+        )
+        raise DeviceError(
+            f"找不到输入设备 {device!r}。可用输入设备：\n{available}"
+        ) from exc
+    rate = int(info["default_samplerate"])
+    channels = int(info["max_input_channels"])
+    try:
+        stream = sd.InputStream(
+            device=device, samplerate=rate,
+            channels=channels, dtype="float32",
+        )
+        stream.start()
+    except sd.PortAudioError as exc:
+        raise DeviceError(f"打开设备 {device!r} 失败：{exc}") from exc
+    return stream, rate, channels
+
+
 class DeviceSource(AudioSource):
     """从声卡 / 虚拟声卡 / USB 接口 / 录音机 line-out 实时采集。
 
@@ -31,31 +63,9 @@ class DeviceSource(AudioSource):
         self._overflow_count = 0
 
     def _open(self) -> tuple[int, int]:
-        try:
-            info = sd.query_devices(self._device, "input")
-        except (ValueError, sd.PortAudioError) as exc:
-            available = "\n".join(
-                f"  [{i}] {d['name']}"
-                for i, d in enumerate(sd.query_devices())
-                if d["max_input_channels"] > 0
-            )
-            raise DeviceError(
-                f"找不到输入设备 {self._device!r}。可用输入设备：\n{available}"
-            ) from exc
-        rate = int(info["default_samplerate"])
-        channels = int(info["max_input_channels"])
+        stream, rate, channels = _open_input_stream(self._device, self._config)
+        self._stream = stream
         self._block_frames = rate * self._config.chunk_ms // 1000
-        try:
-            self._stream = sd.InputStream(
-                device=self._device, samplerate=rate,
-                channels=channels, dtype="float32",
-            )
-            self._stream.start()
-        except sd.PortAudioError as exc:
-            if self._stream is not None:
-                self._stream.close()
-                self._stream = None
-            raise DeviceError(f"打开设备 {self._device!r} 失败：{exc}") from exc
         return rate, channels
 
     def _read_raw_block(self) -> np.ndarray:
@@ -85,28 +95,9 @@ def _default_probe(device: int | str, config: AudioConfig) -> None:
     成功则静默返回；失败则抛 DeviceError。
     open_device_with_fallback 用此函数探测候选设备，不保留已打开的流。
     """
-    try:
-        info = sd.query_devices(device, "input")
-    except (ValueError, sd.PortAudioError) as exc:
-        raise DeviceError(f"找不到输入设备 {device!r}") from exc
-
-    rate = int(info["default_samplerate"])
-    channels = int(info["max_input_channels"])
-    block_frames = rate * config.chunk_ms // 1000
-    try:
-        stream = sd.InputStream(
-            device=device, samplerate=rate,
-            channels=channels, dtype="float32",
-        )
-        stream.start()
-        # 成功：立即停止并关闭（探测完成）
-        stream.stop()
-        stream.close()
-    except sd.PortAudioError as exc:
-        raise DeviceError(f"打开设备 {device!r} 失败：{exc}") from exc
-
-    # 静默使用，避免 unused variable warning
-    _ = block_frames
+    stream, _rate, _channels = _open_input_stream(device, config)
+    stream.stop()
+    stream.close()
 
 
 def open_device_with_fallback(
@@ -128,18 +119,10 @@ def open_device_with_fallback(
     全部失败则抛 DeviceError，消息包含所有已尝试的候选列表。
     """
     probe = _probe if _probe is not None else _default_probe
-
-    seen: set[int | str] = set()
-    tried: list[int | str] = []
+    unique = list(dict.fromkeys(c for c in candidates if c is not None))
     last_exc: DeviceError | None = None
 
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        tried.append(candidate)
+    for candidate in unique:
         try:
             probe(candidate, config)
             return candidate
@@ -148,5 +131,5 @@ def open_device_with_fallback(
             last_exc = exc
 
     raise DeviceError(
-        f"全部候选设备均无法打开（已尝试：{tried}）"
+        f"全部候选设备均无法打开（已尝试：{unique}）"
     ) from last_exc

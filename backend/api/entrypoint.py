@@ -148,11 +148,9 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
                 ),
             )
 
-        # 候选顺序：解析到的 idx → 系统默认 → 第一个可用设备 index
-        # open_device_with_fallback 探测每个候选是否真能打开（防幽灵设备 PortAudioError）
-        # 返回首个成功的 index，再构造未开的 DeviceSource 让 StreamDriver 正常 with 进入
-        first_device_idx = devices[0].index if devices else None
-        candidates = [idx, default_idx, first_device_idx]
+        # 候选顺序：解析到的 idx → 系统默认 → 所有可用设备（open_device_with_fallback 去重保序）
+        # 探测每个候选是否真能打开（防幽灵设备 PortAudioError），返回首个成功的 index
+        candidates = [idx, default_idx, *(d.index for d in devices)]
         try:
             winning = open_device_with_fallback(candidates, AudioConfig())
         except DeviceError:
