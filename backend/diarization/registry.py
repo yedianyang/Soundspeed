@@ -5,7 +5,7 @@
   - 未命中 / 本 take 没挂演员 → per-take 匿名 "说话人N"（仅本 take 标签，**不持久化**）
 
 无状态、无 DB 依赖：注册演员台账只通过 speakers 路由（设置面板）维护，diarization
-不再往里自动插匿名说话人。embedding 必须与 diarize 同空间（community-1 512 维）。
+不再往里自动插匿名说话人。embedding 必须与 diarize 同空间（community-1，实测 256 维）。
 """
 from __future__ import annotations
 
