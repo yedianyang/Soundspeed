@@ -22,10 +22,10 @@ function readToken(): string | null {
   const stored =
     typeof localStorage !== "undefined" ? localStorage.getItem(LS_TOKEN_KEY) : null
   if (stored && stored.trim()) return stored
-  // dev 自动填：localhost 无需手填 token。后端 DEV 用固定 "dev"，故默认 VITE_ADMIN_TOKEN ?? "dev"。
+  // dev 自动填：localhost 无需手填 token。后端 DEV 用固定 "devtoken"，故默认 VITE_ADMIN_TOKEN ?? "devtoken"。
   // 生产构建（import.meta.env.DEV=false）不自动填，仍需手填 token——不是鉴权绕过，只是已知 dev 默认。
   if (import.meta.env.DEV) {
-    return (import.meta.env.VITE_ADMIN_TOKEN as string | undefined) ?? "dev"
+    return (import.meta.env.VITE_ADMIN_TOKEN as string | undefined) ?? "devtoken"
   }
   return null
 }

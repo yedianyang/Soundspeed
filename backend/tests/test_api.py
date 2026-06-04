@@ -911,12 +911,12 @@ def test_build_app_creates_db_when_missing(monkeypatch, tmp_path) -> None:
 
 
 def test_dev_token_is_fixed_string(monkeypatch) -> None:
-    """SOUNDSPEED_DEV=1 + ADMIN_TOKEN 未设 → resolve_admin_token() == "dev"。"""
+    """SOUNDSPEED_DEV=1 + ADMIN_TOKEN 未设 → resolve_admin_token() == "devtoken"。"""
     from backend.api.auth import resolve_admin_token  # noqa: PLC0415
 
     monkeypatch.delenv("ADMIN_TOKEN", raising=False)
     monkeypatch.setenv("SOUNDSPEED_DEV", "1")
-    assert resolve_admin_token() == "dev"
+    assert resolve_admin_token() == "devtoken"
 
 
 def test_dev_token_env_wins(monkeypatch) -> None:
@@ -929,24 +929,24 @@ def test_dev_token_env_wins(monkeypatch) -> None:
 
 
 def test_non_dev_random_token(monkeypatch) -> None:
-    """非 DEV + ADMIN_TOKEN 未设 → 返回非空随机 token（不等于 "dev"）。"""
+    """非 DEV + ADMIN_TOKEN 未设 → 返回非空随机 token（不等于 "devtoken"）。"""
     from backend.api.auth import resolve_admin_token  # noqa: PLC0415
 
     monkeypatch.delenv("ADMIN_TOKEN", raising=False)
     monkeypatch.delenv("SOUNDSPEED_DEV", raising=False)
     token = resolve_admin_token()
     assert token  # 非空
-    assert token != "dev"
+    assert token != "devtoken"
 
 
 def test_dev_token_auth_enforced(tmp_dal: DAL, monkeypatch) -> None:
-    """DEV 模式下 token 固定为 "dev"，auth 仍生效：正确 token→200，错误 token→401。"""
+    """DEV 模式下 token 固定为 "devtoken"，auth 仍生效：正确 token→200，错误 token→401。"""
     monkeypatch.delenv("ADMIN_TOKEN", raising=False)
     monkeypatch.setenv("SOUNDSPEED_DEV", "1")
     scene_id = tmp_dal.create_scene("scene_dev_auth")
     tmp_dal.set_active_scene(scene_id)  # 2.C：take/start 需要 active scene
     orch = create_orchestrator(tmp_dal)
-    # create_app 此时读 env：ADMIN_TOKEN 未设 + SOUNDSPEED_DEV=1 → admin_token="dev"
+    # create_app 此时读 env：ADMIN_TOKEN 未设 + SOUNDSPEED_DEV=1 → admin_token="devtoken"
     app = create_app(orch)
     from fastapi.testclient import TestClient as _TC  # noqa: PLC0415
     client = _TC(app)
@@ -955,7 +955,7 @@ def test_dev_token_auth_enforced(tmp_dal: DAL, monkeypatch) -> None:
     resp = client.post(
         "/api/v1/take/start",
         json={"scene_id": scene_id, "shot": None},
-        headers={"Authorization": "Bearer dev"},
+        headers={"Authorization": "Bearer devtoken"},
     )
     assert resp.status_code == 200
 
