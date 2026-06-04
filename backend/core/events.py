@@ -38,6 +38,9 @@ SCRIPT_UPLOAD = "script.upload"
 TAKE_DELETED = "take.deleted"
 SCENE_CHANGED = "scene.changed"
 
+# 音频设备 warning（设备拔走时通知前端）
+DEVICE_WARNING = "device.warning"
+
 
 # ── Payload dataclass ─────────────────────────────────────────────────────────
 
@@ -196,3 +199,15 @@ class SceneChangedPayload:
     scene_id: int
     scene_code: str
     is_active: bool
+
+
+@dataclass(frozen=True)
+class DeviceWarningPayload:
+    """device.warning 的 payload（设备拔走 fallback 通知前端）。
+
+    message: 人类可读描述。
+    device_name: 保存的设备名（已不在场）。
+    """
+
+    message: str
+    device_name: str

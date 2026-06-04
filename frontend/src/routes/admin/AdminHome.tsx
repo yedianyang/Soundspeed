@@ -121,16 +121,13 @@ export default function AdminHome() {
   const { data: scenes } = useScenes()
   const activeScene = pickActiveScene(scenes)
 
-  // 头部 Input 芯片显示真实设备名（selected ?? 默认 ?? 首个）。
+  // 头部 Input 芯片显示真实会采集的设备名：selected 是后端权威 index（持久化设备不在场时已是
+  // fallback 设备的 index），直接按它查名，无需前端再算默认/首个 fallback。
   const { data: devicesData } = useDevices()
   const deviceName = (() => {
     const ds = devicesData?.devices ?? []
-    const sel = devicesData?.selected
-    const dev =
-      (sel != null ? ds.find((d) => d.index === sel) : undefined) ??
-      ds.find((d) => d.is_default) ??
-      ds[0]
-    return dev?.name ?? "—"
+    const selected = devicesData?.selected
+    return ds.find((d) => d.index === selected)?.name ?? "—"
   })()
 
   // takes 列表 + seedTakes 桥接挂在 AdminHome（始终挂载），不在 HistoryTakes（桌面端条件挂载）。

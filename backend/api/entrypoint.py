@@ -82,15 +82,19 @@ def build_app() -> FastAPI:
 
 
 def _maybe_wire_live_asr(orchestrator: Orchestrator):
-    """返回 LiveAsrSession（启用时）或 None（未启用）。"""
-    """实时 ASR：take.start 起采集线程，take.end 停。默认启用；SOUNDSPEED_LIVE_ASR=0 可关闭。
+    """返回 LiveAsrSession（启用时）或 None（未启用）。
+
+    实时 ASR：take.start 起采集线程，take.end 停。默认启用；SOUNDSPEED_LIVE_ASR=0 可关闭。
 
     env：
       SOUNDSPEED_LIVE_ASR=0      显式关闭（默认启用）
       SOUNDSPEED_ASR_MODEL=medium  whisper.cpp 模型大小（默认 medium）
-      SOUNDSPEED_AUDIO_DEVICE    设备名或索引（默认首个可用输入设备）
+      SOUNDSPEED_AUDIO_DEVICE    设备名或索引（首次引导用；UI 选过后持久化优先）
       SOUNDSPEED_VAD=energy      VAD 探测器：energy（默认，零依赖）| silero（需 torch venv）
       SOUNDSPEED_MODELS_DIR      Whisper 模型存放目录（默认 ./models/whisper/）
+
+    启动时设备解析优先级：
+      持久化名字（DB app_settings）> env > 系统默认 > 第一个可用
 
     Phase 1：只出实时文本，speaker 留 None。take.end 后批量 diarization 回填是 Phase 2。
     """
@@ -99,7 +103,8 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
 
     from backend.asr import ASRConfig, WhisperRunner
     from backend.asr.live_session import LiveAsrSession
-    from backend.audio.devices import list_input_devices
+    from backend.audio.device_resolve import resolve_device_index, resolve_device_name
+    from backend.audio.devices import get_default_input_index, list_input_devices
     from backend.audio.source import AudioConfig
     from backend.core.events import TAKE_END, TAKE_START
     from backend.vad.models import VadConfig
@@ -118,17 +123,33 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
     )
 
     def _source_factory(device: object):
+        """将 session._device（设备名 str）解析为当前 index，按 index 开流。
+
+        device=None（零设备退化）→ 退系统默认 index；查不到 → 退第一个可用 / 让 sounddevice 自选。
+        device=name（str）→ list_input_devices() 反查当前 index；设备拔走 → 退系统默认 + warning。
+        """
         from backend.audio.device_source import DeviceSource
 
-        if device is None:  # 未选 → SOUNDSPEED_AUDIO_DEVICE 或系统默认
-            dev_env = os.environ.get("SOUNDSPEED_AUDIO_DEVICE")
-            if dev_env is None:
-                import sounddevice as sd
+        devices = list_input_devices()
+        default_idx = get_default_input_index()
+        name_str = device if isinstance(device, str) else None
+        idx, available = resolve_device_index(name_str, devices, default_idx)
 
-                device = sd.default.device[0]
-            else:
-                device = int(dev_env) if dev_env.lstrip("-").isdigit() else dev_env
-        return DeviceSource(device, AudioConfig())  # type: ignore[arg-type]
+        if not available and name_str is not None:
+            # 设备已拔走：log + publish device.warning 事件（前端需在 app.py lifespan 转发才可见）
+            logger.warning("设备 %r 当前不在场，采集 fallback 到系统默认（index=%s）", name_str, idx)
+            from backend.core.events import DEVICE_WARNING, DeviceWarningPayload  # noqa: PLC0415
+
+            orchestrator.publish(
+                DEVICE_WARNING,
+                DeviceWarningPayload(
+                    message=f"设备 '{name_str}' 当前不在场，已 fallback 到系统默认",
+                    device_name=name_str,
+                ),
+            )
+
+        # idx=None（零设备且无默认）→ 传 None 让 sounddevice 自选
+        return DeviceSource(idx, AudioConfig())  # type: ignore[arg-type]
 
     def _detector_factory():
         if vad_kind == "silero":
@@ -139,9 +160,23 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
 
         return EnergyVad()
 
-    # 自动选第一个可用输入设备作为默认（让前端 selected 有明确值）
+    # 启动时全优先级解析初始设备名
     available_devices = list_input_devices()
-    default_device = available_devices[0].index if available_devices else None
+    default_idx = get_default_input_index()
+    persisted_name = orchestrator.dal.get_setting("audio_input_device")
+    env_value = os.environ.get("SOUNDSPEED_AUDIO_DEVICE")
+
+    initial_device_name, source = resolve_device_name(
+        persisted_name=persisted_name,
+        env_value=env_value,
+        devices=available_devices,
+        default_index=default_idx,
+    )
+    logger.info(
+        "实时 ASR 初始设备：%r（来源=%s）",
+        initial_device_name,
+        source,
+    )
 
     session = LiveAsrSession(
         runner=runner,
@@ -149,7 +184,7 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
         source_factory=_source_factory,
         vad_config=VadConfig(),
         detector_factory=_detector_factory,
-        default_device=default_device,
+        default_device=initial_device_name,  # 存名字
     )
     orchestrator.subscribe(TAKE_START, lambda _p: session.start())
     orchestrator.subscribe(TAKE_END, lambda _p: session.stop())
