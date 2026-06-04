@@ -7,3 +7,10 @@ fastapi==0.136.3
 uvicorn==0.48.0
 websockets==16.0
 huggingface_hub==1.17.0
+silero-vad==6.2.1
+onnxruntime==1.26.0
+pywhispercpp==1.5.0
+pyannote.audio==4.0.4
+python-multipart>=0.0.9
+# torch + torchaudio 从 PyTorch CUDA wheel 仓单装（cu128），不走 PyPI
+# pip install "torch==2.11.0+cu128" "torchaudio==2.11.0+cu128" --index-url https://download.pytorch.org/whl/cu128

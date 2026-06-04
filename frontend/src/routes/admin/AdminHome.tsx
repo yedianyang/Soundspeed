@@ -11,7 +11,6 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import BottomControlBar from "@/components/admin/BottomControlBar"
-import { INPUT_DEVICE, INPUT_CHANNELS } from "@/data/mock"
 import { MARK_ORDER } from "@/lib/constants"
 import { cn, formatTakeLabel } from "@/lib/utils"
 import type { Status } from "@/types/take"
@@ -22,6 +21,7 @@ import {
   useActivateScene,
   useCreateScene,
   useDeleteTake,
+  useDevices,
   useEndTake,
   usePatchTake,
   useRestoreTake,
@@ -32,7 +32,8 @@ import {
 import { ApiError } from "@/lib/api"
 import { useLiveConnection } from "@/hooks/useLiveConnection"
 import { useSessionStore } from "@/store/session"
-import { StatusChip, LevelMeter } from "./components/StatusChip"
+import { StatusChip, LiveLevelMeter } from "./components/StatusChip"
+import { useMicLevel } from "@/hooks/useMicLevel"
 import { LiveTranscript } from "./components/LiveTranscript"
 import { ScriptPanel } from "./components/ScriptPanel"
 import { LLMFeedback } from "./components/LLMFeedback"
@@ -107,13 +108,30 @@ export default function AdminHome() {
   const [mobileTab, setMobileTab] = useState("live")
   const [sideTab, setSideTab] = useState("script")
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // 本 take 在场演员（按 Rec 时传 startTake；录制中锁定不可改）
+  const [takeSpeakerIds, setTakeSpeakerIds] = useState<number[]>([])
 
   // ---- WS 连接（admin-scoped，挂一次）----
   useLiveConnection()
 
+  // ---- header 实时麦克风电平（ch1 监看）----
+  const micLevel = useMicLevel()
+
   // ---- scene / take / llm（来自后端 / store）----
   const { data: scenes } = useScenes()
   const activeScene = pickActiveScene(scenes)
+
+  // 头部 Input 芯片显示真实设备名（selected ?? 默认 ?? 首个）。
+  const { data: devicesData } = useDevices()
+  const deviceName = (() => {
+    const ds = devicesData?.devices ?? []
+    const sel = devicesData?.selected
+    const dev =
+      (sel != null ? ds.find((d) => d.index === sel) : undefined) ??
+      ds.find((d) => d.is_default) ??
+      ds[0]
+    return dev?.name ?? "—"
+  })()
 
   // takes 列表 + seedTakes 桥接挂在 AdminHome（始终挂载），不在 HistoryTakes（桌面端条件挂载）。
   // 否则未打开 History 时 LLMFeedback 读空 Map，且重连时无活跃 observer → invalidate 不 refetch，
@@ -308,6 +326,7 @@ export default function AdminHome() {
       await startTakeMut.mutateAsync({
         sceneId,
         shot: shot === "" ? null : shot,
+        speakerIds: takeSpeakerIds,
         takeNumber: manualTakeNumber,
       })
       setManualTakeNumber(null) // 显式号已被这次 REC 消费
@@ -502,16 +521,9 @@ export default function AdminHome() {
             <Button variant="ghost" size="icon-sm" className="rounded-full text-muted-foreground flex-shrink-0" title="导入已录制文件">
               <Folder className="size-4" />
             </Button>
-            <StatusChip label="Input" tone="ok" detail={INPUT_DEVICE} className="min-w-0">
-              <div className="flex items-center gap-1.5 flex-shrink-0">
-                {Array.from({ length: INPUT_CHANNELS }, (_, i) => (
-                  <LevelMeter
-                    key={i}
-                    count={5}
-                    color={i === 0 ? "bg-green-500" : "bg-primary"}
-                  />
-                ))}
-              </div>
+            <StatusChip label="Input" tone="ok" detail={deviceName} className="min-w-0">
+              {/* ch1 实时电平（真实麦克风输入；count 仅展示档位） */}
+              <LiveLevelMeter level={micLevel} count={7} color="bg-green-500" className="ml-0.5" />
             </StatusChip>
             <StatusChip
               label="LLM"
@@ -683,6 +695,9 @@ export default function AdminHome() {
         undoBusy={restoreTake.isPending}
         sceneBusy={activateScene.isPending}
         takeBusy={patchTake.isPending || deleteTake.isPending}
+        // ── 1.x：本 take 在场演员选择（diarization 回填匹配范围）──
+        speakerIds={takeSpeakerIds}
+        onSpeakerIdsChange={setTakeSpeakerIds}
       />
     </div>
   )

@@ -5,6 +5,9 @@ import type {
   LlmState,
   TakeChangedMsg,
   TakeDTO,
+  TakeProcessingMsg,
+  TakeProcessingPhase,
+  TranscriptSegmentDTO,
 } from "@/types/api"
 
 export type ConnectionState = "connecting" | "open" | "closed" | "no-token"
@@ -51,14 +54,19 @@ interface SessionState {
 
   llm: { state: LlmState }
 
+  // take.end 后处理状态条（diarization + Gemma）；done 清空，error 保留到下次录制。null=不显示。
+  processing: { phase: TakeProcessingPhase; detail: string | null } | null
+
   // ── actions ──
   setToken: (t: string | null) => void
   setConnection: (c: ConnectionState) => void
   applyAsr: (ch: 1 | 2, isFinal: boolean, p: AsrMsg) => void
+  applyBackfilledSegments: (takeId: number, segments: TranscriptSegmentDTO[]) => void
   applyTakeChanged: (m: TakeChangedMsg) => void
   seedTakes: (list: TakeDTO[]) => void
   removeTake: (takeId: number) => void
   setLlm: (state: LlmState) => void
+  setTakeProcessing: (m: TakeProcessingMsg) => void
   setCurrentTakeId: (id: number | null) => void
   setRecording: (recording: boolean) => void
   resetSegments: () => void
@@ -73,6 +81,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   isRecording: false,
   takes: new Map(),
   llm: { state: "idle" },
+  processing: null,
 
   setToken: (t) =>
     set(() => ({
@@ -109,6 +118,30 @@ export const useSessionStore = create<SessionState>((set) => ({
           ? [...list.slice(0, -1), seg]
           : [...list, seg]
       return { segments: { ...state.segments, [key]: next } }
+    }),
+
+  // diarization 回填完成：用权威 segments（带 speaker）替换 Live 框里只有 ASR 文本的内容。
+  // 守卫：仅当回填的 take 仍是当前/最后绑定的 take 时替换；若已开新 take（take_id 不同且
+  // 在录），跳过以免覆盖新 take 的实时转录。
+  applyBackfilledSegments: (takeId, segments) =>
+    set((state) => {
+      const cur = state.currentTakeId
+      if (cur != null && cur !== takeId && state.isRecording) {
+        return {}
+      }
+      const toSeg = (d: TranscriptSegmentDTO): LiveSeg => ({
+        text: d.text,
+        speaker: d.speaker,
+        start_frame: d.start_frame,
+        end_frame: d.end_frame,
+        isPartial: false,
+      })
+      return {
+        segments: {
+          ch1: segments.filter((s) => s.ch === 1).map(toSeg),
+          ch2: segments.filter((s) => s.ch === 2).map(toSeg),
+        },
+      }
     }),
 
   applyTakeChanged: (m) =>
@@ -189,6 +222,12 @@ export const useSessionStore = create<SessionState>((set) => ({
     }),
 
   setLlm: (state) => set(() => ({ llm: { state } })),
+
+  // take.end 后处理状态条：done 清空；diarizing/summarizing/error 显示。
+  setTakeProcessing: (m) =>
+    set(() => ({
+      processing: m.phase === "done" ? null : { phase: m.phase, detail: m.detail },
+    })),
 
   // AdminHome 派生「当前 take」后同步进来，作为 applyAsr 跨-take 守卫的权威。
   setCurrentTakeId: (id) =>

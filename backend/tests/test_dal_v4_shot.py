@@ -124,9 +124,9 @@ def test_v4_migration_null_shot_converted_to_empty_string(tmp_path: Path) -> Non
     apply_migrations(db_path)
 
     conn = _raw_conn(db_path)
-    # 验证 user_version == 4
+    # 验证 user_version 升到最新（merge 1.x 后最高版本为 max(MIGRATION_FILES)，不再硬编码 4）
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert version == 4
+    assert version == max(runner_mod.MIGRATION_FILES)
 
     # 验证 NULL 已被转成 ''
     row = conn.execute("SELECT shot FROM takes WHERE scene_id = ?;", (sid,)).fetchone()

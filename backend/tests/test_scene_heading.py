@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from backend.api.app import create_app
 from backend.core.orchestrator import create_orchestrator
 from backend.db.dal import DAL
-from backend.db.migrations.runner import apply_migrations
+from backend.db.migrations.runner import MIGRATION_FILES, apply_migrations
 
 _TOKEN = "test-admin-token"
 
@@ -48,7 +48,7 @@ def test_v2_migration_user_version_is_current(tmp_path: Path) -> None:
     conn = _raw_conn(db_path)
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
     conn.close()
-    assert version == 4
+    assert version == max(MIGRATION_FILES)
 
 
 def test_v2_migration_scenes_has_three_new_columns(tmp_path: Path) -> None:
@@ -73,7 +73,7 @@ def test_v2_migration_idempotent(tmp_path: Path) -> None:
     conn = _raw_conn(db_path)
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
     conn.close()
-    assert version == 4
+    assert version == max(MIGRATION_FILES)
 
 
 def test_v2_migration_preserves_existing_scenes_rows(tmp_path: Path) -> None:
@@ -84,7 +84,7 @@ def test_v2_migration_preserves_existing_scenes_rows(tmp_path: Path) -> None:
     # 这里用 runner 的 MIGRATION_FILES patch 来模拟 v1-only 先跑，再跑 v2
     # 更直接：手动建 v1 结构 + 写行，再 apply_migrations 升级
     conn = sqlite3.connect(db_path)
-    v1_sql = (Path(__file__).parent.parent / "db/migrations/v1_init.sql").read_text()
+    v1_sql = (Path(__file__).parent.parent / "db/migrations/v1_init.sql").read_text(encoding="utf-8")
     conn.executescript(v1_sql)
     conn.execute(
         "INSERT INTO scenes (scene_code) VALUES ('OldScene');"
@@ -98,7 +98,7 @@ def test_v2_migration_preserves_existing_scenes_rows(tmp_path: Path) -> None:
 
     conn = _raw_conn(db_path)
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert version == 4
+    assert version == max(MIGRATION_FILES)
     row = conn.execute("SELECT int_ext, time_of_day, location FROM scenes WHERE scene_code='OldScene';").fetchone()
     assert row is not None
     assert row["int_ext"] is None

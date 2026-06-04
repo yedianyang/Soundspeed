@@ -52,6 +52,15 @@ models/*
 !models/.gitkeep
 !models/*.md
 !models/*.sh
+!models/whisper/
+!models/huggingface/
+models/whisper/*
+!models/whisper/.gitkeep
+models/huggingface/*
+!models/huggingface/.gitkeep
+
+# backend 下运行时下载的模型镜像（ASR runner 默认路径相对 cwd，从 backend/ 跑测试时落这里）
+backend/models/
 
 # 数据 / 录音 —— 全部忽略（现场录音、隐私）
 # 测试夹具放 backend/tests/fixtures/，不受此影响
