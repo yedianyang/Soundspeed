@@ -1,5 +1,5 @@
 """音频输入设备枚举测试（list_input_devices）。注入假 query，不依赖真实设备。"""
-from backend.audio.devices import InputDevice, list_input_devices
+from backend.audio.devices import InputDevice, list_input_devices, parse_default_input_index
 
 # 模拟 sd.query_devices() 返回：含输入与纯输出设备
 _FAKE_DEVICES = [
@@ -65,3 +65,62 @@ def test_dedup_default_flag_merged_to_kept():
     usb = next(d for d in devs if d.name == "麦克风 (USB)")
     assert usb.index == 0
     assert usb.is_default is True
+
+
+# ── parse_default_input_index：_InputOutputPair 兼容性 ───────────────────────
+
+
+class _FakeInputOutputPair:
+    """模拟 sounddevice._InputOutputPair：可索引但不是 list/tuple。"""
+
+    def __init__(self, input_idx: int, output_idx: int) -> None:
+        self._data = (input_idx, output_idx)
+
+    def __getitem__(self, key: int) -> int:
+        return self._data[key]
+
+
+def test_parse_default_input_index_list():
+    """list 形式 (input, output) → 取 input index。"""
+    assert parse_default_input_index([2, 4]) == 2
+
+
+def test_parse_default_input_index_tuple():
+    """tuple 形式 (input, output) → 取 input index。"""
+    assert parse_default_input_index((3, 5)) == 3
+
+
+def test_parse_default_input_index_int():
+    """纯 int → 直接返回。"""
+    assert parse_default_input_index(2) == 2
+
+
+def test_parse_default_input_index_none():
+    """None → None。"""
+    assert parse_default_input_index(None) is None
+
+
+def test_parse_default_input_index_minus_one():
+    """-1（sounddevice 未设哨兵）→ None。"""
+    assert parse_default_input_index(-1) is None
+
+
+def test_parse_default_input_index_input_output_pair():
+    """sounddevice._InputOutputPair 类型（可索引但非 list/tuple）→ 正确取出 input index。"""
+    pair = _FakeInputOutputPair(input_idx=2, output_idx=4)
+    assert parse_default_input_index(pair) == 2
+
+
+def test_parse_default_input_index_input_output_pair_minus_one():
+    """_InputOutputPair input=-1（未设）→ None。"""
+    pair = _FakeInputOutputPair(input_idx=-1, output_idx=4)
+    assert parse_default_input_index(pair) is None
+
+
+def test_list_input_devices_with_input_output_pair_default():
+    """list_input_devices 传入 _InputOutputPair 形式的 default_device → 正确标默认。"""
+    pair = _FakeInputOutputPair(input_idx=0, output_idx=1)
+    devs = list_input_devices(query=lambda: _FAKE_DEVICES, default_device=pair)
+    flagged = [d for d in devs if d.is_default]
+    assert len(flagged) == 1
+    assert flagged[0].index == 0
