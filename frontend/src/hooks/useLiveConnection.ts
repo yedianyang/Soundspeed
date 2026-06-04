@@ -6,7 +6,9 @@ import { useSessionStore } from "@/store/session"
 import type {
   AsrMsg,
   LlmStatusMsg,
+  SceneChangedMsg,
   TakeChangedMsg,
+  TakeDeletedMsg,
   TakeProcessingMsg,
   TakeSegmentsUpdatedMsg,
 } from "@/types/api"
@@ -71,6 +73,20 @@ export function useLiveConnection(): void {
         if (topic === "take.processing") {
           // take.end 后处理进度（分离说话人 / 生成摘要 / 完成 / 出错）→ Live 框状态条
           s.setTakeProcessing(payload as TakeProcessingMsg)
+          return
+        }
+        if (topic === "take.deleted") {
+          // 删除条目 store 只增不删（seedTakes 加性），故既显式 removeTake 又 invalidate 重取对齐。
+          const { take_id } = payload as TakeDeletedMsg
+          s.removeTake(take_id)
+          queryClient.invalidateQueries({ queryKey: ["takes"] })
+          return
+        }
+        if (topic === "scene.changed") {
+          // 建/切场：场次列表 + 活跃场（pickActiveScene 读 is_active）靠重取 scenes 刷新。
+          // payload 形状见 SceneChangedMsg；这里不读字段，权威以重取为准。
+          void (payload as SceneChangedMsg)
+          queryClient.invalidateQueries({ queryKey: ["scenes"] })
           return
         }
         if (topic === "llm.status") {

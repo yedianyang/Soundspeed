@@ -1,7 +1,7 @@
 """ASR 配置（Phase 1：实时 whisper.cpp 转录）。"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

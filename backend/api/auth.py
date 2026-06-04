@@ -2,11 +2,11 @@
 
 ADMIN_TOKEN 解析优先级：
   1. ADMIN_TOKEN env 已设 → 直接使用（最高优先级）。
-  2. SOUNDSPEED_DEV=1 → 固定返回 "dev"（前端可自动填，dev server 确定性）。
+  2. SOUNDSPEED_DEV=1 → 固定返回 "devtoken"（前端可自动填，dev server 确定性）。
   3. 其他 → 随机生成并打印到 console（hackathon 现场友好）。
 
 REST：require_admin 依赖校验 `Authorization: Bearer <token>`，不符 401。
-auth 路径本身不变——固定 "dev" 只是让 dev token 可预测，不绕过鉴权。
+auth 路径本身不变——固定 "devtoken" 只是让 dev token 可预测，不绕过鉴权。
 
 token 在 create_app 时解析并存到 app.state.admin_token，require_admin 通过
 request.app.state 读取——不在 import 时捕获环境（否则测试 monkeypatch.setenv 不生效）。
@@ -24,7 +24,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 _bearer = HTTPBearer(auto_error=False)
 
-_DEV_TOKEN = "dev"
+_DEV_TOKEN = "devtoken"
 
 
 def resolve_admin_token() -> str:

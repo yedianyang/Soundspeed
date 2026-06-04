@@ -55,7 +55,7 @@ def test_build_structured_transcript_empty():
 
 def test_dal_take_speakers_roundtrip(tmp_dal: DAL):
     scene_id = tmp_dal.create_scene("S")
-    take_id = tmp_dal.start_take(scene_id, take_number=1, start_ts=0.0)
+    take_id, _ = tmp_dal.start_take(scene_id, shot="", start_ts=0.0, take_number=1)
     s1 = tmp_dal.insert_speaker("张三", embedding_blob=np.ones(4, dtype=np.float32).tobytes())
     s2 = tmp_dal.insert_speaker("李四")  # 无声纹
 
@@ -77,7 +77,7 @@ def test_dal_take_speakers_roundtrip(tmp_dal: DAL):
 
 def test_dal_structured_transcript_roundtrip(tmp_dal: DAL):
     scene_id = tmp_dal.create_scene("S")
-    take_id = tmp_dal.start_take(scene_id, take_number=1, start_ts=0.0)
+    take_id, _ = tmp_dal.start_take(scene_id, shot="", start_ts=0.0, take_number=1)
     assert tmp_dal.get_take(take_id).structured_transcript is None
 
     doc = {"version": 1, "ch1": [{"speaker": "说话人1", "text": "嗨", "start_ms": 0, "end_ms": 500}]}

@@ -21,22 +21,14 @@ export interface LiveSeg {
   isPartial: boolean
 }
 
-export interface CurrentTake {
-  take_id: number | null
-  scene_id: number | null
-  take_number: number | null
-  shot: string | null
-  recording: boolean
-}
-
 function readToken(): string | null {
   const stored =
     typeof localStorage !== "undefined" ? localStorage.getItem(LS_TOKEN_KEY) : null
   if (stored && stored.trim()) return stored
-  // dev 自动填：localhost 无需手填 token。后端 DEV 用固定 "dev"，故默认 VITE_ADMIN_TOKEN ?? "dev"。
+  // dev 自动填：localhost 无需手填 token。后端 DEV 用固定 "devtoken"，故默认 VITE_ADMIN_TOKEN ?? "devtoken"。
   // 生产构建（import.meta.env.DEV=false）不自动填，仍需手填 token——不是鉴权绕过，只是已知 dev 默认。
   if (import.meta.env.DEV) {
-    return (import.meta.env.VITE_ADMIN_TOKEN as string | undefined) ?? "dev"
+    return (import.meta.env.VITE_ADMIN_TOKEN as string | undefined) ?? "devtoken"
   }
   return null
 }
@@ -49,8 +41,13 @@ interface SessionState {
   // 当前录制 take 的实时转录（按 ch）。partial 替换该声道最后一条 partial，final 落定。
   segments: { ch1: LiveSeg[]; ch2: LiveSeg[] }
 
-  // 当前 take。recording 本地（前端按 start/end）；take_id/take_number 从 take.changed 取。
-  currentTake: CurrentTake
+  // 当前 take 的 take_id。REC/建 take 解耦后，「当前 take」由 AdminHome 从 takes Map + 活跃场派生
+  // （最近一条 take），再经 setCurrentTakeId 同步进来。这里只留 id，供 applyAsr 的跨-take 守卫读，
+  // 不再持 take_number / shot（这些由 AdminHome 从派生 take 读）。
+  currentTakeId: number | null
+
+  // REC 开关（纯前端，与「建 take」解耦）。AdminHome 是唯一 writer；LiveTranscript 等读它显示录制态。
+  isRecording: boolean
 
   // take 列表：Map<take_id, TakeDTO>。getTakes 全量覆盖（权威），take.changed patch-merge 5 字段。
   takes: Map<number, TakeDTO>
@@ -67,18 +64,12 @@ interface SessionState {
   applyBackfilledSegments: (takeId: number, segments: TranscriptSegmentDTO[]) => void
   applyTakeChanged: (m: TakeChangedMsg) => void
   seedTakes: (list: TakeDTO[]) => void
+  removeTake: (takeId: number) => void
   setLlm: (state: LlmState) => void
   setTakeProcessing: (m: TakeProcessingMsg) => void
-  startRecordingLocal: (sceneId: number, shot: string | null) => void
-  stopRecordingLocal: () => void
-}
-
-const initialCurrentTake: CurrentTake = {
-  take_id: null,
-  scene_id: null,
-  take_number: null,
-  shot: null,
-  recording: false,
+  setCurrentTakeId: (id: number | null) => void
+  setRecording: (recording: boolean) => void
+  resetSegments: () => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -86,7 +77,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   connection: readToken() ? "connecting" : "no-token",
 
   segments: { ch1: [], ch2: [] },
-  currentTake: { ...initialCurrentTake },
+  currentTakeId: null,
+  isRecording: false,
   takes: new Map(),
   llm: { state: "idle" },
   processing: null,
@@ -102,11 +94,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   applyAsr: (ch, isFinal, p) =>
     set((state) => {
       // 丢弃来自其他 take 的迟到帧（跨 take 泄漏）。两侧 != null 守卫：dev 注入器（take_id=null）
-      // 与 currentTake 绑定前的窗口仍正常工作。
+      // 与 currentTakeId 绑定前的窗口仍正常工作。
       if (
         p.take_id != null &&
-        state.currentTake.take_id != null &&
-        p.take_id !== state.currentTake.take_id
+        state.currentTakeId != null &&
+        p.take_id !== state.currentTakeId
       ) {
         return {}
       }
@@ -133,8 +125,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   // 在录），跳过以免覆盖新 take 的实时转录。
   applyBackfilledSegments: (takeId, segments) =>
     set((state) => {
-      const cur = state.currentTake.take_id
-      if (cur != null && cur !== takeId && state.currentTake.recording) {
+      const cur = state.currentTakeId
+      if (cur != null && cur !== takeId && state.isRecording) {
         return {}
       }
       const toSeg = (d: TranscriptSegmentDTO): LiveSeg => ({
@@ -168,40 +160,35 @@ export const useSessionStore = create<SessionState>((set) => ({
         })
       } else {
         // 新 take：插入部分条目，其余字段等 getTakes/getTake 补齐。
+        // ⚠ end_ts 此处先填 null，但 take.changed（5 字段 Pick）永不更新 end_ts——只有 getTakes
+        // refetch 能把真实 end_ts 填进来。判断「take 是否已结束」必须以 refetch 后的快照为准。
         takes.set(m.take_id, {
           take_id: m.take_id,
           scene_id: m.scene_id,
           take_number: m.take_number,
+          take_suffix: "",
           status: m.status,
           script_diff: m.script_diff,
           shot: null,
           start_ts: 0,
           end_ts: null,
           notes: null,
+          deleted_at: null,
           created_at: 0,
           updated_at: 0,
         })
       }
 
-      // currentTake 绑定。take.start 与 take.end 都发 status=tbd / script_diff=null 的 take.changed，
-      // 二者不可区分；用 take_id 单调递增（autoincrement）兜底：recording 期间只要来的是 start/end 帧
-      // （script_diff===null）且 take_id 比当前更大（或尚未绑定）就（重）绑定。可重绑 → 若低 id 帧抢先
-      // 到达，后续更高 id 帧会自我纠正到最新 take。
-      let currentTake = state.currentTake
-      if (
-        currentTake.recording &&
-        m.script_diff === null &&
-        (currentTake.take_id === null || m.take_id > currentTake.take_id)
-      ) {
-        currentTake = {
-          ...currentTake,
-          take_id: m.take_id,
-          scene_id: m.scene_id,
-          take_number: m.take_number,
-        }
-      }
+      // currentTakeId 兜底绑定（单调）。REC/建 take 解耦后权威派生在 AdminHome（按活跃场 + 最大
+      // take_id），但 WS 帧往往早于 refetch + 派生 effect 到达；这里先把 currentTakeId 顶到最新
+      // take_id，让 applyAsr 的跨-take 守卫立刻对齐新块。低 id 帧抢先到也会被后续更高 id 帧纠正。
+      // 不分 recording：建空块（Next Take，不录）同样要让 id 跟上。
+      const currentTakeId =
+        state.currentTakeId === null || m.take_id > state.currentTakeId
+          ? m.take_id
+          : state.currentTakeId
 
-      return { takes, currentTake }
+      return { takes, currentTakeId }
     }),
 
   // getTakes 全量覆盖每个 take_id 条目（getTakes 权威）。例外：script_diff 不向下降级到 null——
@@ -220,6 +207,20 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { takes }
     }),
 
+  // 删某条 take（DELETE 成功 / take.deleted WS）。seedTakes 只增不删，故删除必须走这条显式抹掉，
+  // 否则 invalidate→refetch 后该条仍残留在 Map 里。若删的是当前 take，顺手解绑 currentTakeId
+  //（AdminHome 的派生 effect 随后会重指到下一条最近 take）。
+  removeTake: (takeId) =>
+    set((state) => {
+      const unbind = state.currentTakeId === takeId
+      if (!state.takes.has(takeId)) {
+        return unbind ? { currentTakeId: null } : {}
+      }
+      const takes = new Map(state.takes)
+      takes.delete(takeId)
+      return unbind ? { takes, currentTakeId: null } : { takes }
+    }),
+
   setLlm: (state) => set(() => ({ llm: { state } })),
 
   // take.end 后处理状态条：done 清空；diarizing/summarizing/error 显示。
@@ -228,21 +229,13 @@ export const useSessionStore = create<SessionState>((set) => ({
       processing: m.phase === "done" ? null : { phase: m.phase, detail: m.detail },
     })),
 
-  startRecordingLocal: (sceneId, shot) =>
-    set(() => ({
-      segments: { ch1: [], ch2: [] },
-      processing: null, // 新录制开始，清掉上一条 take 的处理状态/错误
-      currentTake: {
-        take_id: null,
-        scene_id: sceneId,
-        take_number: null,
-        shot,
-        recording: true,
-      },
-    })),
+  // AdminHome 派生「当前 take」后同步进来，作为 applyAsr 跨-take 守卫的权威。
+  setCurrentTakeId: (id) =>
+    set((state) => (state.currentTakeId === id ? {} : { currentTakeId: id })),
 
-  stopRecordingLocal: () =>
-    set((state) => ({
-      currentTake: { ...state.currentTake, recording: false },
-    })),
+  setRecording: (recording) =>
+    set((state) => (state.isRecording === recording ? {} : { isRecording: recording })),
+
+  // 清实时转录（REC 开始 / dev 注入开始时调，避免上一条 take 的转录残留）。
+  resetSegments: () => set(() => ({ segments: { ch1: [], ch2: [] } })),
 }))

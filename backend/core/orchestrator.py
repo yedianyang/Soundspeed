@@ -123,6 +123,15 @@ class Orchestrator:
             )
         return payload_take_id
 
+    def _take_status(self, take_id: int) -> str:
+        """读 take 当前 status（用户录音中 Mark 的结果），取不到回退 'tbd'。
+
+        take.end 与 L2 完成的 take.changed 都用它取真实 status，避免写死 'tbd'
+        把用户 Mark 冲掉（停录后状态回退 bug）。
+        """
+        take = self.dal.get_take(take_id)
+        return take.status if take is not None else "tbd"
+
     def _on_asr_final(
         self,
         payload: object,
@@ -161,15 +170,16 @@ class Orchestrator:
         # P1 #2：先同步 session.scene_id，确保 take.end 时 scene_id 已就绪
         self.session.activate_scene(scene_id)
 
-        # take_number = 当前 scene 已有 take 数量 + 1
-        existing = self.dal.list_takes(scene_id)
-        take_number = len(existing) + 1
+        # shot=None 时归一为 ''（v4 NOT NULL DEFAULT ''，DeepSeek #2 注）
+        shot = payload.shot if payload.shot is not None else ""
 
-        take_id = self.dal.start_take(
+        # take_number：payload 带显式号（用户手动指定待录号）→ 用它；None → dal 内部自动 MAX+1。
+        # start_take 在写事务内解析号位冲突，返回最终 (take_id, take_number)，无需 read-back。
+        take_id, take_number = self.dal.start_take(
             scene_id=scene_id,
-            take_number=take_number,
+            shot=shot,
             start_ts=payload.start_ts,
-            shot=payload.shot,
+            take_number=payload.take_number,
         )
         # 挂本 take 在场演员（diarization 回填匹配范围）；无则空关联（全匿名说话人N）
         if payload.speaker_ids:
@@ -178,7 +188,7 @@ class Orchestrator:
             take_id=take_id,
             take_number=take_number,
             start_ts=payload.start_ts,
-            shot=payload.shot,
+            shot=shot,
         )
 
         self.publish(
@@ -206,16 +216,20 @@ class Orchestrator:
             return
 
         self.session.take_end()
-        self.dal.end_take(take_id=take_id, end_ts=payload.end_ts, status="tbd")
+        # end_take 只标记结束，不碰 status/script_diff/notes（preserve-on-None）：用户录音中 Mark 的
+        # status 与（将来接线的）memo notes 都原样保留，不会被停录冲掉。status 单独读出来只为下方
+        # take.changed 广播给前端。
+        self.dal.end_take(take_id=take_id, end_ts=payload.end_ts)
+        status = self._take_status(take_id)
 
-        # 第一次 publish（同步，script_diff=None）
+        # 第一次 publish（同步，script_diff=None）：带真实 status，不写死 tbd
         self.publish(
             TAKE_CHANGED,
             TakeChangedPayload(
                 take_id=take_id,
                 scene_id=self.session.scene_id or 0,
                 take_number=self.session.take_number,
-                status="tbd",
+                status=status,
                 script_diff=None,
             ),
         )
@@ -403,14 +417,15 @@ class Orchestrator:
         if matches_for_dal:
             self.dal.insert_take_line_matches(take_id, matches_for_dal)
 
-        # 第二次 publish（含 script_diff）；用闭包参数保持与 L2Input 一致
+        # 第二次 publish（含 script_diff）；用闭包参数保持与 L2Input 一致。
+        # status 读库真实值，保留用户 Mark（写死 tbd 会在 L2 完成后二次冲掉 Mark）。
         self.publish(
             TAKE_CHANGED,
             TakeChangedPayload(
                 take_id=take_id,
                 scene_id=scene_id,
                 take_number=take_number,
-                status="tbd",
+                status=self._take_status(take_id),
                 script_diff=script_diff_dict,
             ),
         )
@@ -445,6 +460,7 @@ class Orchestrator:
             )
             return
         logger.warning("L2 pipeline failed for task, publishing degraded take.changed: %r", exc)
+        # 降级 publish 也带真实 status，保留用户 Mark（不写死 tbd）
         self.publish(
             TAKE_PROCESSING,
             TakeProcessingPayload(
@@ -458,7 +474,7 @@ class Orchestrator:
                 take_id=take_id,
                 scene_id=scene_id,
                 take_number=take_number,
-                status="tbd",
+                status=self._take_status(take_id),
                 script_diff=None,
             ),
         )

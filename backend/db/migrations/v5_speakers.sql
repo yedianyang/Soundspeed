@@ -1,7 +1,7 @@
--- v3_speakers.sql: 新增跨 take 声纹台账表
--- 2026-06-03
+-- v5_speakers.sql: 新增跨 take 声纹台账表
+-- 2026-06-03（原 v3，与 2.x v3/v4 撞号，merge 后重排到 v5）
 
-PRAGMA user_version = 3;
+PRAGMA user_version = 5;
 
 CREATE TABLE IF NOT EXISTS speakers (
     speaker_id   INTEGER PRIMARY KEY AUTOINCREMENT,

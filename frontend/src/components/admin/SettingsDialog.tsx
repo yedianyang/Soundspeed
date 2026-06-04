@@ -6,6 +6,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from "@/components/ui/dialog"
 import {
   Select,
@@ -30,6 +31,7 @@ import {
   injectDebugAsr,
   injectDebugScript,
   pickActiveScene,
+  resetDb,
   selectDevice,
   setAsrLanguage,
   startTake,
@@ -39,7 +41,7 @@ import {
   type DebugAsrSeg,
   type DebugScriptLine,
 } from "@/lib/api"
-import { FlaskConical, Server } from "lucide-react"
+import { FlaskConical, Server, Trash2 } from "lucide-react"
 import ActorManagementPanel from "@/components/admin/ActorManagementPanel"
 
 const DEV = import.meta.env.DEV
@@ -133,6 +135,14 @@ function AsrLanguageSelect() {
       </span>
     </div>
   )
+}
+
+function statusTextClass(kind: "info" | "error" | "done"): string {
+  return kind === "error"
+    ? "text-xs text-destructive"
+    : kind === "done"
+      ? "text-xs text-green-600"
+      : "text-xs text-muted-foreground"
 }
 
 const DEBUG_ASR_PLACEHOLDER = `{
@@ -316,13 +326,16 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
   // ---- dev 测试面板：paste ASR JSON → 一键跑完整 take ----
   const { data: scenes } = useScenes()
   const activeScene = pickActiveScene(scenes)
-  const startRecordingLocal = useSessionStore((s) => s.startRecordingLocal)
-  const stopRecordingLocal = useSessionStore((s) => s.stopRecordingLocal)
+  const resetSegments = useSessionStore((s) => s.resetSegments)
   const [asrJson, setAsrJson] = useState(DEV_ASR_SAMPLE)
   const [running, setRunning] = useState(false)
   const [runStatus, setRunStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
   const [scriptText, setScriptText] = useState(DEV_SCRIPT_SAMPLE)
   const [scriptStatus, setScriptStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
+  // 一键清空数据库：二次确认弹窗开关 + 状态 pill（沿用 scriptStatus 的展示风格）。
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false)
+  const [resetting, setResetting] = useState(false)
+  const [resetStatus, setResetStatus] = useState<{ kind: "info" | "error" | "done"; msg: string } | null>(null)
   // slugline heading（随剧本注入写到场次）。预填默认场景头。
   const [heading, setHeading] = useState({ int_ext: "室外", time_of_day: "日", location: "街道" })
 
@@ -357,6 +370,22 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
     }
   }
 
+  const handleResetDb = async () => {
+    if (resetting) return
+    setResetting(true)
+    setResetStatus({ kind: "info", msg: "清空中…" })
+    try {
+      await resetDb()
+      // 成功 → 整页 reload，从空/新库重新派生 UI（不必手动同步各处缓存状态）。
+      location.reload()
+    } catch (err) {
+      console.error("reset db failed", err)
+      setResetStatus({ kind: "error", msg: "清空失败（看 console / 是否 SOUNDSPEED_DEV=1 / token）" })
+      setResetting(false)
+      setConfirmResetOpen(false)
+    }
+  }
+
   const handleRunFullTake = async () => {
     if (running) return
     const { segs, error } = parseDebugAsr(asrJson)
@@ -369,11 +398,9 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
       return
     }
     setRunning(true)
-    // 必须 startRecordingLocal：清 segments、置 recording=true / take_id=null，使 take.changed 绑定门
-    // 重绑到新 take。否则 currentTake 停在上一次 REC 的 take_id，applyAsr 的跨-take 守卫会把本次注入帧
-    // 全丢（transcript 空），且 take_number 不显示。recording=true 后无论后端是否在 /debug/asr 盖
-    // take_id 都能正确绑定。
-    startRecordingLocal(activeScene.scene_id, null)
+    // 清 segments，避免上一次注入残留。currentTakeId 由 applyTakeChanged 兜底顶到新 take（单调最大 id），
+    // applyAsr 跨-take 守卫随之对齐；新 take 的编号经 take.changed + refetch 显示。
+    resetSegments()
     try {
       await startTake(activeScene.scene_id, null)
       setRunStatus({ kind: "info", msg: `注入 ${segs.length} 段…` })
@@ -389,7 +416,6 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
       console.error("run full take failed", err)
       setRunStatus({ kind: "error", msg: "请求失败（看 console / 是否 SOUNDSPEED_DEV=1）" })
     } finally {
-      stopRecordingLocal()
       setRunning(false)
     }
   }
@@ -426,6 +452,8 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
             <Separator />
 
             {/* ========== 演员（声纹台账，接 /api/v1/speakers）========== */}
+            {/* merge 注：1.x 把演员/说话人管理重构成独立组件 ActorManagementPanel（接真实
+                /api/v1/speakers 后端），取代 2.x 内联的本地 state 版双栏 UI。 */}
             <ActorManagementPanel />
 
             <Separator />
@@ -549,15 +577,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                     注入剧本到当前场次
                   </Button>
                   {scriptStatus && (
-                    <span
-                      className={
-                        scriptStatus.kind === "error"
-                          ? "text-xs text-destructive"
-                          : scriptStatus.kind === "done"
-                            ? "text-xs text-green-600"
-                            : "text-xs text-muted-foreground"
-                      }
-                    >
+                    <span className={statusTextClass(scriptStatus.kind)}>
                       {scriptStatus.msg}
                     </span>
                   )}
@@ -593,15 +613,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                     {running ? "运行中…" : "一键跑完整 take"}
                   </Button>
                   {runStatus && (
-                    <span
-                      className={
-                        runStatus.kind === "error"
-                          ? "text-xs text-destructive"
-                          : runStatus.kind === "done"
-                            ? "text-xs text-green-600"
-                            : "text-xs text-muted-foreground"
-                      }
-                    >
+                    <span className={statusTextClass(runStatus.kind)}>
                       {runStatus.msg}
                     </span>
                   )}
@@ -610,11 +622,83 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                   L2 摘要需 Gemma 权重，否则降级（script_diff 为空）。
                 </span>
               </div>
+
+              <Separator />
+
+              {/* ---- 危险区：一键清空数据库内容 ---- */}
+              <div className="grid gap-2">
+                <div className="flex items-center gap-2">
+                  <Trash2 className="size-4 text-destructive" />
+                  <span className="text-sm font-medium text-destructive">危险操作</span>
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  清空全部业务数据（场次 / take / 剧本 / 转写），不可恢复。仅 dev 测试用。
+                </span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    className="gap-1.5"
+                    disabled={resetting}
+                    onClick={() => {
+                      setResetStatus(null)
+                      setConfirmResetOpen(true)
+                    }}
+                  >
+                    <Trash2 className="size-4" />
+                    {resetting ? "清空中…" : "一键清空数据库内容"}
+                  </Button>
+                  {resetStatus && (
+                    <span className={statusTextClass(resetStatus.kind)}>
+                      {resetStatus.msg}
+                    </span>
+                  )}
+                </div>
+              </div>
               </>
             )}
           </TabsContent>
         </Tabs>
       </DialogContent>
+
+      {/* 一键清空数据库 — 二次确认（无 AlertDialog 组件，用 Dialog 搭等效确认） */}
+      {DEV && (
+        <Dialog
+          open={confirmResetOpen}
+          onOpenChange={(o) => {
+            // 清空进行中不允许关弹窗（避免误触；成功会 reload，失败由 handler 关闭）。
+            if (resetting) return
+            setConfirmResetOpen(o)
+          }}
+        >
+          <DialogContent className="sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle>清空数据库内容</DialogTitle>
+              <DialogDescription>
+                确定清空全部数据库内容？此操作不可恢复。
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={resetting}
+                onClick={() => setConfirmResetOpen(false)}
+              >
+                取消
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={resetting}
+                onClick={handleResetDb}
+              >
+                {resetting ? "清空中…" : "确定清空"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </Dialog>
   )
 }

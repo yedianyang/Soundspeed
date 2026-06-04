@@ -24,12 +24,24 @@ TakeDTO 有意省略 performer_issues / audio_quality（codex P2）：
 from __future__ import annotations
 
 import time
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.api.auth import require_admin
-from backend.core.events import TAKE_END, TAKE_START, TakeEndPayload, TakeStartPayload
+from backend.core.events import (
+    SCENE_CHANGED,
+    TAKE_CHANGED,
+    TAKE_DELETED,
+    TAKE_END,
+    TAKE_START,
+    SceneChangedPayload,
+    TakeChangedPayload,
+    TakeDeletedPayload,
+    TakeEndPayload,
+    TakeStartPayload,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["takes"])
 
@@ -54,21 +66,25 @@ class SegmentOut(BaseModel):
 
 
 class TakeDTO(BaseModel):
-    """take 行的响应投影（11 字段，有意省略 performer_issues / audio_quality）。
+    """take 行的响应投影（12 字段，有意省略 performer_issues / audio_quality）。
 
     有意省略字段：performer_issues、audio_quality 属 NP Pipeline 输出，1.J-1.L 不暴露。
     前端从 script_diff.line_matches 读行比对（codex P1），不单列 line_matches 字段。
+    take_suffix：冲突后缀，默认 ''；显示时前端拼接为 'Take 3+'，后端只存值。
+    deleted_at：软删时间戳，NULL 表示未删除；restore 后返回 None。
     """
 
     take_id: int
     scene_id: int
-    take_number: int
     shot: str | None
+    take_number: int
+    take_suffix: str
     start_ts: float
     end_ts: float | None
     status: str
     script_diff: dict | None
     notes: str | None
+    deleted_at: float | None
     created_at: float
     updated_at: float
     # diarization 回填后的结构化转录（ASR + speaker 整合，v4）；未回填时为 None
@@ -93,6 +109,9 @@ class TakeStartBody(BaseModel):
     shot: str | None = None
     # 本 take 在场的已注册演员 id（diarization 回填只在这些演员里匹配；空 → 全匿名说话人N）
     speaker_ids: list[int] = []
+    # 用户手动指定的待录 take 号（底部 Take 弹窗）。None → 后端按 (scene,shot) 自动 MAX+1。
+    # ge=1：take 号从 1 起，挡掉 0/负数。
+    take_number: int | None = Field(default=None, ge=1)
 
 
 @router.post("/take/start")
@@ -101,13 +120,25 @@ async def take_start(
     request: Request,
     _: None = Depends(require_admin),
 ) -> dict[str, str]:
-    """起一个 take：服务端生成 start_ts，publish TAKE_START。"""
+    """起一个 take：服务端生成 start_ts，publish TAKE_START。
+
+    校验 scene_id == get_active_scene_id()，不一致 → 409 scene_not_active。
+    校验必须在路由层同步执行，不能推进 orchestrator 异步 handler。
+    """
     orchestrator = request.app.state.orchestrator
+    dal = orchestrator.dal
+    active_scene_id = dal.get_active_scene_id()
+    if body.scene_id != active_scene_id:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "scene_not_active", "active_scene_id": active_scene_id},
+        )
     payload = TakeStartPayload(
         scene_id=body.scene_id,
         shot=body.shot,
         start_ts=time.time(),
         speaker_ids=tuple(body.speaker_ids),
+        take_number=body.take_number,
     )
     orchestrator.publish(TAKE_START, payload)
     return {"status": "ok"}
@@ -252,3 +283,243 @@ async def get_scene_script(
     raw_lines = dal.list_script_lines(script_id)
     lines = [ScriptLineOut(line_no=r["line_no"], character=r["character"], text=r["text"]) for r in raw_lines]
     return {"script": ScriptOut(script_id=script_id, version=version, lines=lines)}
+
+
+# ── 2.C：建场端点 ────────────────────────────────────────────────────────────
+
+
+class CreateSceneBody(BaseModel):
+    """POST /scenes 请求体。"""
+
+    scene_code: str
+    description: str | None = None
+    shoot_date: str | None = None
+    int_ext: str | None = None
+    time_of_day: str | None = None
+    location: str | None = None
+
+
+@router.post("/scenes")
+async def create_scene(
+    body: CreateSceneBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict:
+    """建场（get-or-create）：新建或复用已有 scene_code，均返回 200。
+
+    created=True 表示本次新建，False 表示复用。is_active 反映 DB 当前状态。
+    """
+    dal = request.app.state.orchestrator.dal
+    scene_id, created = dal.get_or_create_scene(
+        body.scene_code,
+        description=body.description,
+        shoot_date=body.shoot_date,
+        int_ext=body.int_ext,
+        time_of_day=body.time_of_day,
+        location=body.location,
+    )
+    active_id = dal.get_active_scene_id()
+    return {
+        "scene_id": scene_id,
+        "scene_code": body.scene_code,
+        "created": created,
+        "is_active": scene_id == active_id,
+    }
+
+
+# ── 2.C：激活场次端点 ─────────────────────────────────────────────────────────
+
+
+@router.post("/scenes/{scene_id}/activate")
+async def activate_scene(
+    scene_id: int,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict:
+    """激活指定场次。
+
+    步骤：录制中检查 → 404 → set_active_scene → 刷新 session → publish SCENE_CHANGED。
+    """
+    orchestrator = request.app.state.orchestrator
+    dal = orchestrator.dal
+    session = orchestrator.session
+
+    # 录制中禁止切场（全局状态，用 session.take_active）
+    if session.take_active:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "take_in_progress"},
+        )
+
+    # 查 scene 是否存在（用 list_scenes 找，顺便取 scene_code）
+    scenes = dal.list_scenes()
+    target = next((s for s in scenes if s["scene_id"] == scene_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="scene not found")
+
+    # 写 DB + 刷新内存
+    dal.set_active_scene(scene_id)
+    session.activate_scene(scene_id)
+
+    # publish WS 事件
+    orchestrator.publish(
+        SCENE_CHANGED,
+        SceneChangedPayload(
+            scene_id=scene_id,
+            scene_code=target["scene_code"],
+            is_active=True,
+        ),
+    )
+
+    return {"scene_id": scene_id, "scene_code": target["scene_code"]}
+
+
+# ── 2.C：PATCH /takes/{take_id} ──────────────────────────────────────────────
+
+
+class PatchTakeBody(BaseModel):
+    """PATCH /takes/{take_id} 请求体（所有字段可选）。"""
+
+    status: Literal["keeper", "ng", "hold", "tbd"] | None = None
+    shot: str | None = None
+    scene_id: int | None = None
+    take_number: int | None = None
+    notes: str | None = None
+
+
+@router.patch("/takes/{take_id}")
+async def patch_take(
+    take_id: int,
+    body: PatchTakeBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> TakeDTO:
+    """部分更新 take 元数据。
+
+    录制中（end_ts IS NULL）：禁改 scene_id/take_number→409；允许改 notes。
+    冲突处理：TakeNumberConflictError→409；目标 scene 不存在→404；take 不存在→404。
+    成功后 publish TAKE_CHANGED，返回更新后的 TakeDTO。
+    """
+    orchestrator = request.app.state.orchestrator
+    dal = orchestrator.dal
+
+    # take 存在性检查
+    take = dal.get_take(take_id)
+    if take is None:
+        raise HTTPException(status_code=404, detail="take not found")
+
+    # 录制中限制（行级判断：end_ts IS NULL）
+    is_recording = take.end_ts is None
+    if is_recording and (body.scene_id is not None or body.take_number is not None):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "take_in_progress"},
+        )
+
+    # 先处理 status（走 set_take_status，写 manual.mark 事件）
+    if body.status is not None:
+        dal.set_take_status(take_id, body.status)
+
+    # 再处理其余字段（走 update_take_meta）
+    # 冲突处理改为后缀追加，不再抛 TakeNumberConflictError（不再 409）
+    has_meta_update = any(
+        v is not None for v in (body.shot, body.scene_id, body.take_number, body.notes)
+    )
+    if has_meta_update:
+        try:
+            dal.update_take_meta(
+                take_id,
+                shot=body.shot,
+                scene_id=body.scene_id,
+                take_number=body.take_number,
+                notes=body.notes,
+            )
+        except ValueError:
+            raise HTTPException(status_code=404, detail="target scene not found")
+
+    # 重新取（update 可能改了字段）
+    updated = dal.get_take(take_id)
+    assert updated is not None  # take 存在性已确认
+
+    # publish TAKE_CHANGED
+    orchestrator.publish(
+        TAKE_CHANGED,
+        TakeChangedPayload(
+            take_id=updated.take_id,
+            scene_id=updated.scene_id,
+            take_number=updated.take_number,
+            status=updated.status,
+            script_diff=updated.script_diff,
+        ),
+    )
+
+    return TakeDTO.model_validate(updated, from_attributes=True)
+
+
+# ── 2.C：DELETE /takes/{take_id}（软删）─────────────────────────────────────
+
+
+@router.delete("/takes/{take_id}", status_code=204)
+async def delete_take(
+    take_id: int,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> None:
+    """软删 take。录制中→409；不存在（含已软删）→404；成功→204。
+
+    子表数据保留（不触发 CASCADE），可通过 restore 端点撤销。
+    删除后 publish TAKE_DELETED。
+    """
+    orchestrator = request.app.state.orchestrator
+    dal = orchestrator.dal
+
+    # 存在性检查（get_take 排除软删行）
+    take = dal.get_take(take_id)
+    if take is None:
+        raise HTTPException(status_code=404, detail="take not found")
+
+    # 录制中禁删（行级判断）
+    if take.end_ts is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "take_in_progress"},
+        )
+
+    scene_id = take.scene_id
+    dal.delete_take(take_id)
+
+    orchestrator.publish(
+        TAKE_DELETED,
+        TakeDeletedPayload(take_id=take_id, scene_id=scene_id),
+    )
+
+
+# ── 2.C：POST /takes/{take_id}/restore ───────────────────────────────────────
+
+
+@router.post("/takes/{take_id}/restore")
+async def restore_take(
+    take_id: int,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> TakeDTO:
+    """撤销软删。
+
+    仅对已软删（deleted_at IS NOT NULL）的 take 有效；
+    未软删或不存在→404；成功→200 + 恢复后的 TakeDTO。
+    """
+    orchestrator = request.app.state.orchestrator
+    dal = orchestrator.dal
+
+    # 查含软删的 take
+    take = dal.get_take_any(take_id)
+    if take is None:
+        raise HTTPException(status_code=404, detail="take not found")
+    if take.deleted_at is None:
+        raise HTTPException(status_code=404, detail="take not deleted")
+
+    dal.restore_take(take_id)
+
+    restored = dal.get_take(take_id)
+    assert restored is not None  # restore 后应可见
+    return TakeDTO.model_validate(restored, from_attributes=True)

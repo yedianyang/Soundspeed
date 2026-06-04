@@ -1,11 +1,11 @@
 """python -m backend.api 启动入口。
 
 读取 env：
-  SOUNDSPEED_DB       数据库文件路径（默认 ./soundspeed.db）
-  ADMIN_TOKEN         管理员 token（缺失时：SOUNDSPEED_DEV=1 固定用 "dev"，否则随机生成并打印）
+  SOUNDSPEED_DB       数据库文件路径（默认 <repo>/data/soundspeed.db，持久；不存在则自动创建）
+  ADMIN_TOKEN         管理员 token（缺失则由 resolve_admin_token 随机生成 + console 打印）
   HOST                监听地址（默认 0.0.0.0）
   PORT                监听端口（默认 8000）
-  SOUNDSPEED_DEV      dev 模式（=1 时挂载 /api/v1/debug/asr + 自动播种 Scene_1 + token 固定为 "dev"）
+  SOUNDSPEED_DEV      dev 模式（=1 时挂载 /api/v1/debug/asr + 自动播种 active scene）
   SOUNDSPEED_LIVE_ASR 实时 ASR 开关（默认启用；=0 显式关闭）
   SOUNDSPEED_ASR_MODEL  Whisper 模型大小（默认 "medium"）
   SOUNDSPEED_MODELS_DIR   Whisper 模型存放目录（默认 ./models/whisper/）

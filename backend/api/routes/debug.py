@@ -3,8 +3,9 @@
 仅在 SOUNDSPEED_DEV=1 时由 create_app 挂载，生产不暴露。
 
 端点列表：
-  POST /api/v1/debug/asr    合成 AsrPartial/FinalPayload → orchestrator.publish
-  POST /api/v1/debug/script 注入剧本行 → scripts + script_lines，供 L2 diff 使用
+  POST /api/v1/debug/asr      合成 AsrPartial/FinalPayload → orchestrator.publish
+  POST /api/v1/debug/script   注入剧本行 → scripts + script_lines，供 L2 diff 使用
+  POST /api/v1/debug/reset-db 清空所有业务表 → seed_dev_scene 重播种一个 active 空场
 
 /debug/asr 用途：1.C（结构化 ASR 输出）落地前手动驱动 1.J transcript 面板验收。
   take_id=None → _on_asr_final 通过 _resolve_take_id 回退 session.take_id；
@@ -23,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from backend.api.auth import require_admin
+from backend.db.seed import seed_dev_scene
 from backend.core.events import (
     ASR_FINAL_CH1,
     ASR_FINAL_CH2,
@@ -159,3 +161,22 @@ async def debug_script(
         "scene_id": scene_id,
         "line_count": len(valid_lines),
     }
+
+
+# ── /debug/reset-db：一键清空数据库并重新播种（dev 专用）────────────────────
+
+
+@router.post("/reset-db")
+async def debug_reset_db(
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict[str, object]:
+    """清空全部业务数据，然后重新播种一个 active 的空场（和 DEV 启动播种一致）。
+
+    语义：dal.reset_all() → seed_dev_scene(dal) → 返回 {"status": "ok", "reseeded": true}。
+    此路由仅在 SOUNDSPEED_DEV=1 时由 create_app 挂载，天然 dev-only。
+    """
+    dal = request.app.state.orchestrator.dal
+    dal.reset_all()
+    seed_dev_scene(dal)
+    return {"status": "ok", "reseeded": True}

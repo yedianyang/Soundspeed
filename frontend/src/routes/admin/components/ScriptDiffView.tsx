@@ -22,8 +22,11 @@ export function ScriptDiffView({ diff }: { diff: ScriptDiff | null }) {
     return <p className="text-sm text-muted-foreground/60">L2 未完成 / 无剧本</p>
   }
 
+  // line_matches 理论上后端总会带（orchestrator 写 script_diff 时必填），但 v3 老库 / 降级路径
+  // 可能存到只有 summary、缺 line_matches 的 script_diff。缺这层守卫时 .filter 会抛、整页白屏
+  // （删除最新 take 把这种坏 diff 顶进 LLMFeedback / 展开卡片即触发）。?? [] 兜底，缺字段当无比对。
   const corrected = diff.corrected_segments ?? []
-  const matches = diff.line_matches
+  const matches = diff.line_matches ?? []
   const detailMatches = matches.filter((m) => m.detail)
 
   if (corrected.length === 0 && matches.length === 0) {
