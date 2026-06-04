@@ -1,7 +1,34 @@
+import { AlertCircle, Loader2 } from "lucide-react"
 import { speakerColor } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 import { useSessionStore, type LiveSeg } from "@/store/session"
 import { TakeDivider } from "./TakeDivider"
+
+// take.end 后处理状态条：分离说话人 / 生成摘要(Gemma) / 出错。
+function ProcessingBanner() {
+  const processing = useSessionStore((s) => s.processing)
+  if (!processing) return null
+
+  if (processing.phase === "error") {
+    return (
+      <div className="flex items-start gap-2 rounded-xl bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <AlertCircle className="size-4 mt-0.5 flex-shrink-0" />
+        <span>{processing.detail ?? "后处理出错"}</span>
+      </div>
+    )
+  }
+
+  const label =
+    processing.phase === "diarizing"
+      ? "正在分离说话人…"
+      : "正在生成场记摘要（Gemma）…"
+  return (
+    <div className="flex items-center gap-2 rounded-xl bg-muted/70 px-3 py-2 text-sm text-muted-foreground">
+      <Loader2 className="size-4 flex-shrink-0 animate-spin" />
+      <span>{label}</span>
+    </div>
+  )
+}
 
 // 渲染用条目：合并两声道后按 start_frame 升序。
 // key 用「声道内位置」idx：每个声道 append-only + 仅替换末尾 partial，索引不会平移/收缩，
@@ -28,6 +55,8 @@ export function LiveTranscript() {
       {currentTake.take_number != null && (
         <TakeDivider no={currentTake.take_number} />
       )}
+
+      <ProcessingBanner />
 
       {hasContent ? (
         <div className="space-y-1.5 leading-relaxed">

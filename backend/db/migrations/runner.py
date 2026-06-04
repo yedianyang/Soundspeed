@@ -17,6 +17,9 @@ MIGRATIONS_DIR = Path(__file__).parent
 MIGRATION_FILES: dict[int, str] = {
     1: "v1_init.sql",
     2: "v2_scene_heading.sql",
+    3: "v3_speakers.sql",
+    4: "v4_take_transcript.sql",
+    5: "v5_take_speakers.sql",
 }
 
 

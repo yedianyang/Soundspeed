@@ -71,6 +71,8 @@ class TakeDTO(BaseModel):
     notes: str | None
     created_at: float
     updated_at: float
+    # diarization 回填后的结构化转录（ASR + speaker 整合，v4）；未回填时为 None
+    structured_transcript: dict | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -89,6 +91,8 @@ class TakeStartBody(BaseModel):
 
     scene_id: int
     shot: str | None = None
+    # 本 take 在场的已注册演员 id（diarization 回填只在这些演员里匹配；空 → 全匿名说话人N）
+    speaker_ids: list[int] = []
 
 
 @router.post("/take/start")
@@ -103,6 +107,7 @@ async def take_start(
         scene_id=body.scene_id,
         shot=body.shot,
         start_ts=time.time(),
+        speaker_ids=tuple(body.speaker_ids),
     )
     orchestrator.publish(TAKE_START, payload)
     return {"status": "ok"}

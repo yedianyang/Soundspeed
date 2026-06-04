@@ -29,9 +29,11 @@ from backend.api.app import create_app
 from backend.core.events import (
     ASR_FINAL_CH1,
     TAKE_END,
+    TAKE_SEGMENTS_UPDATED,
     TAKE_START,
     AsrFinalPayload,
     TakeEndPayload,
+    TakeSegmentsUpdatedPayload,
     TakeStartPayload,
 )
 from backend.core.orchestrator import Orchestrator, create_orchestrator
@@ -349,6 +351,35 @@ def test_asr_final_forwarded_from_background_thread(tmp_dal: DAL, monkeypatch) -
             assert msg["topic"] == "asr.final.ch1"
             assert msg["payload"]["text"] == "hello from background"
             assert msg["payload"]["speaker"] == "A"
+
+
+def test_take_segments_updated_forwarded_from_background_thread(
+    tmp_dal: DAL, monkeypatch
+) -> None:
+    """从后台线程 publish(TAKE_SEGMENTS_UPDATED) → ws 收到 take.segments.updated。
+
+    diarization 回填在 executor 线程内完成后 publish 此事件，前端据此 refetch。
+    若 app.py 转发列表漏注册该 topic（回归 B1），ws 永不收到，本测试会因
+    receive_json 死挂而暴露——与 take.changed / asr.final 同款转发链断言。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+
+    payload = TakeSegmentsUpdatedPayload(take_id=42, scene_id=7)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws:
+            t = threading.Thread(
+                target=lambda: orch.publish(TAKE_SEGMENTS_UPDATED, payload)
+            )
+            t.start()
+            t.join()
+
+            msg = ws.receive_json()
+            assert msg["topic"] == "take.segments.updated"
+            assert msg["payload"]["take_id"] == 42
+            assert msg["payload"]["scene_id"] == 7
 
 
 def test_ws_disconnect_cleans_up(tmp_dal: DAL, monkeypatch) -> None:

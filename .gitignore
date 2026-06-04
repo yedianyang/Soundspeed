@@ -49,6 +49,12 @@ models/*
 !models/.gitkeep
 !models/*.md
 !models/*.sh
+!models/whisper/
+!models/huggingface/
+models/whisper/*
+!models/whisper/.gitkeep
+models/huggingface/*
+!models/huggingface/.gitkeep
 
 # 数据 / 录音 —— 全部忽略（现场录音、隐私）
 # 测试夹具放 backend/tests/fixtures/，不受此影响

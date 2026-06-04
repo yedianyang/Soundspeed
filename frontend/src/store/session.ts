@@ -5,6 +5,9 @@ import type {
   LlmState,
   TakeChangedMsg,
   TakeDTO,
+  TakeProcessingMsg,
+  TakeProcessingPhase,
+  TranscriptSegmentDTO,
 } from "@/types/api"
 
 export type ConnectionState = "connecting" | "open" | "closed" | "no-token"
@@ -54,13 +57,18 @@ interface SessionState {
 
   llm: { state: LlmState }
 
+  // take.end 后处理状态条（diarization + Gemma）；done 清空，error 保留到下次录制。null=不显示。
+  processing: { phase: TakeProcessingPhase; detail: string | null } | null
+
   // ── actions ──
   setToken: (t: string | null) => void
   setConnection: (c: ConnectionState) => void
   applyAsr: (ch: 1 | 2, isFinal: boolean, p: AsrMsg) => void
+  applyBackfilledSegments: (takeId: number, segments: TranscriptSegmentDTO[]) => void
   applyTakeChanged: (m: TakeChangedMsg) => void
   seedTakes: (list: TakeDTO[]) => void
   setLlm: (state: LlmState) => void
+  setTakeProcessing: (m: TakeProcessingMsg) => void
   startRecordingLocal: (sceneId: number, shot: string | null) => void
   stopRecordingLocal: () => void
 }
@@ -81,6 +89,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   currentTake: { ...initialCurrentTake },
   takes: new Map(),
   llm: { state: "idle" },
+  processing: null,
 
   setToken: (t) =>
     set(() => ({
@@ -117,6 +126,30 @@ export const useSessionStore = create<SessionState>((set) => ({
           ? [...list.slice(0, -1), seg]
           : [...list, seg]
       return { segments: { ...state.segments, [key]: next } }
+    }),
+
+  // diarization 回填完成：用权威 segments（带 speaker）替换 Live 框里只有 ASR 文本的内容。
+  // 守卫：仅当回填的 take 仍是当前/最后绑定的 take 时替换；若已开新 take（take_id 不同且
+  // 在录），跳过以免覆盖新 take 的实时转录。
+  applyBackfilledSegments: (takeId, segments) =>
+    set((state) => {
+      const cur = state.currentTake.take_id
+      if (cur != null && cur !== takeId && state.currentTake.recording) {
+        return {}
+      }
+      const toSeg = (d: TranscriptSegmentDTO): LiveSeg => ({
+        text: d.text,
+        speaker: d.speaker,
+        start_frame: d.start_frame,
+        end_frame: d.end_frame,
+        isPartial: false,
+      })
+      return {
+        segments: {
+          ch1: segments.filter((s) => s.ch === 1).map(toSeg),
+          ch2: segments.filter((s) => s.ch === 2).map(toSeg),
+        },
+      }
     }),
 
   applyTakeChanged: (m) =>
@@ -189,9 +222,16 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setLlm: (state) => set(() => ({ llm: { state } })),
 
+  // take.end 后处理状态条：done 清空；diarizing/summarizing/error 显示。
+  setTakeProcessing: (m) =>
+    set(() => ({
+      processing: m.phase === "done" ? null : { phase: m.phase, detail: m.detail },
+    })),
+
   startRecordingLocal: (sceneId, shot) =>
     set(() => ({
       segments: { ch1: [], ch2: [] },
+      processing: null, // 新录制开始，清掉上一条 take 的处理状态/错误
       currentTake: {
         take_id: null,
         scene_id: sceneId,

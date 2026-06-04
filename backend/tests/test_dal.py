@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from backend.db.dal import DAL
-from backend.db.migrations.runner import apply_migrations
+from backend.db.migrations.runner import MIGRATION_FILES, apply_migrations
 
 
 # ── 辅助：打开裸 sqlite3 连接读取元数据 ──────────────────────────────────────
@@ -64,12 +64,12 @@ def test_apply_migrations_idempotent(tmp_path: Path) -> None:
 
 
 def test_apply_migrations_user_version(tmp_path: Path) -> None:
-    """迁移后 PRAGMA user_version 等于当前最高版本（v2 后为 2）。"""
+    """迁移后 PRAGMA user_version 等于当前最高已注册版本。"""
     db_path = tmp_path / "test.db"
     apply_migrations(db_path)
     conn = _raw_conn(db_path)
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert version == 2
+    assert version == max(MIGRATION_FILES)
     conn.close()
 
 

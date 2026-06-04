@@ -17,6 +17,7 @@ import {
 import { STATUS_DOT, STATUS_LABEL } from "@/lib/constants"
 import { cn, formatElapsed } from "@/lib/utils"
 import type { Status } from "@/types/take"
+import TakeSpeakerSelect from "@/components/admin/TakeSpeakerSelect"
 
 interface BottomControlBarProps {
   isRecording: boolean
@@ -26,6 +27,8 @@ interface BottomControlBarProps {
   elapsed: number
   recDisabled?: boolean
   recHint?: string | null
+  speakerIds: number[]
+  onSpeakerIdsChange: (ids: number[]) => void
 }
 
 export default function BottomControlBar({
@@ -36,6 +39,8 @@ export default function BottomControlBar({
   elapsed,
   recDisabled = false,
   recHint = null,
+  speakerIds,
+  onSpeakerIdsChange,
 }: BottomControlBarProps) {
   return (
     <div className="flex-shrink-0 border-t bg-background">
@@ -76,8 +81,13 @@ export default function BottomControlBar({
             </Button>
           </div>
 
-          {/* Row 2: Next take + Delete */}
+          {/* Row 2: 本 take 在场演员 + Next take + Delete */}
           <div className="flex items-center gap-3">
+            <TakeSpeakerSelect
+              value={speakerIds}
+              onChange={onSpeakerIdsChange}
+              disabled={isRecording}
+            />
             <Button
               variant="ghost"
               className="gap-1.5 h-10 px-5 rounded-full bg-muted/60 hover:bg-muted/80 active:bg-muted/80 active:scale-95 transition-all text-foreground text-sm font-medium"

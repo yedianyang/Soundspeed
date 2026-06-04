@@ -67,6 +67,21 @@ export interface TakeDTO {
   notes: string | null
   created_at: number
   updated_at: number
+  // diarization 回填后的结构化转录（ASR + speaker 整合，v4）；未回填时 null/缺省。
+  structured_transcript?: StructuredTranscript | null
+}
+
+// takes.structured_transcript JSON 形状（backend diarization.backfill.build_structured_transcript）。
+export interface StructuredTranscriptEntry {
+  speaker: string | null
+  text: string
+  start_ms: number
+  end_ms: number
+}
+
+export interface StructuredTranscript {
+  version: number
+  ch1: StructuredTranscriptEntry[]
 }
 
 // 转录片段（dal.TranscriptSegment 投影）。start_frame / end_frame 单位毫秒。
@@ -82,6 +97,17 @@ export interface TranscriptSegmentDTO {
 // GET /api/v1/takes/{id} 返回：TakeDTO + segments。
 export interface TakeDetailDTO extends TakeDTO {
   segments: TranscriptSegmentDTO[]
+}
+
+// 已注册演员(speaker) — GET/POST /api/v1/speakers（backend SpeakerOut）。
+export interface SpeakerDTO {
+  speaker_id: number
+  display_name: string
+  has_enrollment: boolean   // 是否已录入声纹
+  sample_count: number
+  scope_key: string | null
+  created_at: number
+  updated_at: number
 }
 
 // ── WS 信封 + payload（events.py）──
@@ -106,6 +132,22 @@ export type TakeChangedMsg = Pick<
   TakeDTO,
   "take_id" | "scene_id" | "take_number" | "status" | "script_diff"
 >
+
+// take.segments.updated：diarization 回填完成，通知前端 refetch GET /takes/{id}
+// 用带 speaker 的 segments 替换 Live 框里只有 ASR 文本的内容。
+export interface TakeSegmentsUpdatedMsg {
+  take_id: number
+  scene_id: number
+}
+
+// take.processing：take.end 后处理进度（Live 框状态条）。
+export type TakeProcessingPhase = "diarizing" | "summarizing" | "done" | "error"
+export interface TakeProcessingMsg {
+  take_id: number
+  scene_id: number
+  phase: TakeProcessingPhase
+  detail: string | null
+}
 
 export type LlmState = "idle" | "loading" | "running" | "downloading"
 
