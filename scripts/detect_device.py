@@ -207,6 +207,30 @@ def detect_apple_metal() -> dict:
         return result
 
 
+def detect_xcode_clt() -> dict:
+    """Xcode Command Line Tools（仅 Darwin 有意义，spec §8 编译前提门控）。
+
+    llama-cpp-python / pywhispercpp 的 mac 源码编译（Metal）需要 Xcode CLT。
+    `xcode-select -p` 返回安装路径且退出码 0 即视为已装；非零退出码或命令
+    不存在（_run 返 None）视为未装。非 Darwin 平台标注不适用。
+    """
+    result = {"installed": False, "path": None, "error": None}
+    try:
+        if platform.system() != "Darwin":
+            result["error"] = "非 Darwin 平台，Xcode CLT 不适用"
+            return result
+        out = _run(["xcode-select", "-p"])
+        if out and out.strip():
+            result["installed"] = True
+            result["path"] = out.strip()
+        else:
+            result["error"] = "xcode-select -p 失败（未装 Xcode CLT 或不在 PATH）"
+        return result
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
+
+
 def detect_llama_cpp() -> dict:
     """llama-cpp-python 安装与 GPU 卸载支持情况。
 
@@ -232,7 +256,7 @@ def detect_llama_cpp() -> dict:
             return result
 
         try:
-            import llama_cpp  # type: ignore[import]  # noqa: PLC0415
+            import llama_cpp  # type: ignore[import]  # noqa: F401,PLC0415
 
             result["import_ok"] = True
             try:
@@ -315,6 +339,7 @@ def collect() -> dict:
         "nvidia_gpu": detect_nvidia(),
         "cuda_toolkit": detect_cuda_toolkit(),
         "apple_metal": detect_apple_metal(),
+        "xcode_clt": detect_xcode_clt(),
         "llama_cpp_python": detect_llama_cpp(),
         "model": detect_model(),
     }
@@ -333,6 +358,7 @@ def print_summary(data: dict, out_path: Path) -> None:
     gpu = data.get("nvidia_gpu", {})
     cuda = data.get("cuda_toolkit", {})
     metal = data.get("apple_metal", {})
+    clt = data.get("xcode_clt", {})
     llama = data.get("llama_cpp_python", {})
     model = data.get("model", {})
 
@@ -368,6 +394,13 @@ def print_summary(data: dict, out_path: Path) -> None:
         lines.append(f"Apple Metal：可用（{metal.get('chip')}）")
     else:
         lines.append(f"Apple Metal：不可用（{metal.get('error')}）")
+
+    if clt.get("installed"):
+        lines.append(f"Xcode CLT ：已装（{clt.get('path')}）")
+    elif osd.get("system") != "Darwin":
+        lines.append(f"Xcode CLT ：不适用（{clt.get('error')}）")
+    else:
+        lines.append(f"Xcode CLT ：未装（{clt.get('error')}）")
 
     if llama.get("installed"):
         offload = llama.get("gpu_offload_supported")
