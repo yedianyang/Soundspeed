@@ -7,18 +7,24 @@
   --mode ocr     图片 → 纯文本（Gemma4 当 OCR，输出可再喂 sp_material_probe 走 3.B）
   --mode struct  图片 → 直接结构化 JSON（图片一步到 ParsedScene，跳过中间文本）
 
-关键修复（2026-06-04，见下 Gemma3ChatHandler）：
-  llama-cpp-python 0.3.23 无 gemma 专用 vision handler。直接用 Llava15ChatHandler 会套
-  llava/vicuna 模板（"USER: <image> ... ASSISTANT:"）→ gemma4 收到畸形上下文 → 整段幻觉
-  + 重复循环（非图像问题：mmproj 已成功编码图像）。根因只在 CHAT_FORMAT 模板，image
-  marker 那层是对的（libmtmd 的 mtmd_default_marker 统一处理）。故只需 override 模板为
-  gemma 格式（<start_of_turn>user/model），其余 mtmd 图像处理全复用 Llava15ChatHandler。
+两个关键修复（2026-06-04，真模型实测）：
+  1) 模板：llama-cpp-python 0.3.23 无 gemma vision handler，直接用 Llava15ChatHandler
+     套 vicuna 模板 → gemma4 幻觉。Gemma4ChatHandler 只 override CHAT_FORMAT 为 gemma
+     模板（<start_of_turn>user/model），mtmd 图像处理全复用（libmtmd 原生支持 gemma4
+     vision，image marker 由 mtmd_default_marker 统一处理）。
+  2) 分辨率：gemma4 vision 有 5 档 token 预算——70/140(分类)、280/560(通用聊天)、
+     1120(OCR/文档/小字)。默认 image_min/max_tokens=-1 走 280 档(~266 token)，密集
+     中文小字读不清(磨→静)。OCR 必须 override _init_mtmd_context 设 image_max_tokens
+     =1120(4 倍分辨率)。gemma4 vision 用 non-causal attention，1120 token 要在单个
+     ubatch 内，故 Llama 需 n_batch=n_ubatch=2048。llama.cpp **无 pan&scan**，token 档
+     是唯一 scaling 机制（不必应用层切块）。
 
 评估：转录/结构质量 + 图像 token 用量（vision token 占 n_ctx 多少）。
 
 用法（worktree 根目录）：
   GEMMA_MODEL_PATH=/Users/yedianyang/Documents/GitHub/Soundspeed/models/gemma-4-E4B-it-Q4_K_M.gguf \\
   GEMMA_MMPROJ_PATH=/Users/yedianyang/.cache/huggingface/hub/models--unsloth--gemma-4-E4B-it-GGUF/snapshots/653803f092503c04a65164346f3208a36e707693/mmproj-F16.gguf \\
+  [GEMMA_IMAGE_TOKENS=1120] \\
   /Users/yedianyang/Documents/GitHub/Soundspeed/.venv/bin/python \\
   scripts/sp_vision_probe.py <image> [--mode ocr|struct]
 """
@@ -40,17 +46,19 @@ from backend.pipelines.sp_script import _build_system_prompt  # noqa: E402
 N_CTX = 8192
 
 
-class Gemma3ChatHandler(Llava15ChatHandler):
-    """Gemma3/4 原生多模态 chat handler。
+class Gemma4ChatHandler(Llava15ChatHandler):
+    """Gemma4 原生多模态 chat handler（libmtmd 原生支持 gemma4 vision）。
 
     复用 Llava15ChatHandler 的 mtmd 图像处理（bitmap / media_marker / chunk eval），
-    只 override CHAT_FORMAT 为 gemma 模板。Llava 的 vicuna 模板会让 gemma4 幻觉。
-    image_url 在 content 遍历里原样输出，由 __call__ 替换成 libmtmd 的 media_marker，
-    故模板只管 turn 结构。image 前置于 text（gemma vision 习惯）。
-    gemma 无 system role：DEFAULT_SYSTEM_MESSAGE=None 不注入，调用方把 system 拼进 user。
+    两处 override：
+    - CHAT_FORMAT → gemma 模板（Llava 的 vicuna 模板会让 gemma4 幻觉）。
+    - _init_mtmd_context → 设 image_min/max_tokens=IMAGE_TOKENS（默认 1120=OCR 档）。
+      gemma4 vision 默认走 280 档(~266 token)，密集小字读不清；OCR 要 1120 档。
     """
 
-    DEFAULT_SYSTEM_MESSAGE = None
+    DEFAULT_SYSTEM_MESSAGE = None  # gemma 无 system role，调用方把 system 拼进 user
+
+    IMAGE_TOKENS = 1120  # gemma4 OCR 档（vs 默认 280；70/140/280/560/1120 五档）
 
     CHAT_FORMAT = (
         "{% for message in messages %}"
@@ -75,6 +83,31 @@ class Gemma3ChatHandler(Llava15ChatHandler):
         "{% if add_generation_prompt %}<start_of_turn>model\n{% endif %}"
     )
 
+    def _init_mtmd_context(self, llama_model) -> None:  # noqa: ANN001
+        """复制父类逻辑，额外设 image token 预算档（OCR 需要 1120）。"""
+        if self.mtmd_ctx is not None:
+            return
+        ctx_params = self._mtmd_cpp.mtmd_context_params_default()
+        ctx_params.use_gpu = True
+        ctx_params.print_timings = self.verbose
+        ctx_params.n_threads = llama_model.n_threads
+        ctx_params.image_min_tokens = self.IMAGE_TOKENS
+        ctx_params.image_max_tokens = self.IMAGE_TOKENS
+        self.mtmd_ctx = self._mtmd_cpp.mtmd_init_from_file(
+            self.clip_model_path.encode(), llama_model.model, ctx_params
+        )
+        if self.mtmd_ctx is None:
+            raise ValueError(f"Failed to load mtmd context from: {self.clip_model_path}")
+        if not self._mtmd_cpp.mtmd_support_vision(self.mtmd_ctx):
+            raise ValueError("Vision is not supported by this model")
+
+        def mtmd_free() -> None:
+            if self.mtmd_ctx is not None:
+                self._mtmd_cpp.mtmd_free(self.mtmd_ctx)
+                self.mtmd_ctx = None
+
+        self._exit_stack.callback(mtmd_free)
+
 
 _OCR_PROMPT = (
     "这是一页剧本的照片。请把照片里的剧本内容逐字转成纯文本，"
@@ -94,6 +127,7 @@ def _data_uri(path: str) -> str:
 def main() -> None:
     model = os.environ.get("GEMMA_MODEL_PATH")
     mmproj = os.environ.get("GEMMA_MMPROJ_PATH")
+    img_tokens = int(os.environ.get("GEMMA_IMAGE_TOKENS", "1120"))
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     mode = "ocr"
     if "--mode" in sys.argv:
@@ -108,12 +142,18 @@ def main() -> None:
 
     from llama_cpp import Llama
 
-    print(f">>> 新 session：text={Path(model).name}  mmproj={Path(mmproj).name}  mode={mode}")
-    handler = Gemma3ChatHandler(clip_model_path=mmproj, verbose=False)
+    print(
+        f">>> 新 session：text={Path(model).name}  mmproj={Path(mmproj).name}  "
+        f"mode={mode}  image_tokens={img_tokens}"
+    )
+    handler = Gemma4ChatHandler(clip_model_path=mmproj, verbose=False)
+    handler.IMAGE_TOKENS = img_tokens
     llm = Llama(
         model_path=model,
         chat_handler=handler,
         n_ctx=N_CTX,
+        n_batch=2048,    # gemma4 vision non-causal：image token 要在单 ubatch 内
+        n_ubatch=2048,
         n_gpu_layers=-1,
         seed=42,
         verbose=False,
@@ -137,19 +177,20 @@ def main() -> None:
         ]},
     ]
 
-    resp = llm.create_chat_completion(messages=messages, max_tokens=max_tokens, temperature=0.1)
+    resp = llm.create_chat_completion(
+        messages=messages, max_tokens=max_tokens, temperature=0.1, repeat_penalty=1.3
+    )
     content = resp["choices"][0]["message"]["content"]
     u = resp.get("usage") or {}
     pin, pout = int(u.get("prompt_tokens", 0)), int(u.get("completion_tokens", 0))
 
     print(f"\n{'=' * 72}\n图片: {image}  ({Path(image).stat().st_size // 1024} KB)")
-    print(f"模式: {mode}")
+    print(f"模式: {mode}  image_tokens 档={img_tokens}")
     print(f"\n--- Gemma4 输出 ---\n{content}\n--- /输出 ---")
     flag = "  ⚠ 撞顶" if pin + pout >= N_CTX else ""
     print(
         f"\nTOKEN: in={pin}（含图像 vision token）  out={pout}  total={pin + pout}{flag}"
-        f"\n  注：纯文本 prompt 只有几十 token，in 的绝大部分=图像编码的 vision token，"
-        f"即「一张照片占多少 n_ctx」的答案。"
+        f"\n  注：in 的绝大部分=图像编码的 vision token（档={img_tokens}），即一张照片占 n_ctx 的量。"
     )
 
 
