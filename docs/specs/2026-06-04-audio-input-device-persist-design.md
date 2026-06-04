@@ -57,13 +57,13 @@ DAL 新增两个纯操作：`get_setting(key) -> str | None` 和 `set_setting(ke
 - 设备列表（含解析后的实际 index，去重后）
 - `selected_name`：当前持久化存储的名字（可能为 null）
 - `selected_available`：该名字在当前枚举中是否匹配到
-- `active_index`：本次真正会用的 index（含 fallback 结果）
+- `selected`：本次真正会用的 index（含 fallback 结果）
 
 前端高亮「真正在用的」，而不是单纯回显存储值。避免重现「下拉显示设备 A、实际采集设备 B」的历史问题。
 
 ### 7. 前端行为
 
-下拉选项高亮 `active_index` 对应的设备名。若 `selected_available = false`，下拉上方显示「已保存的设备未连接，当前使用 XXX」提示，不静默。
+下拉选项高亮 `selected` 对应的设备名。若 `selected_available = false`，下拉上方显示「已保存的设备未连接，当前使用 XXX」提示，不静默。
 
 ---
 
@@ -85,5 +85,5 @@ DAL 新增两个纯操作：`get_setting(key) -> str | None` 和 `set_setting(ke
 - 解析纯函数：四条优先级全路径（持久化命中、env 命中、系统默认、第一个可用）+ 持久化设备不在场时 fallback 行为。
 - `POST /devices/select`：写入持久化 + 响应正确。
 - 重启恢复：set_setting 后模拟进程重启（新 DB 连接），resolve 返回同一设备 index。
-- `GET /devices`：`selected_available = true` / `false` 两种情况下 `active_index` 正确。
+- `GET /devices`：`selected_available = true` / `false` 两种情况下 `selected` 正确。
 - v8 migration：从 v7 库升级后 `app_settings` 表存在、可读写。
