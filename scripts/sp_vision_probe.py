@@ -109,11 +109,18 @@ class Gemma4ChatHandler(Llava15ChatHandler):
         self._exit_stack.callback(mtmd_free)
 
 
-_OCR_PROMPT = (
-    "这是一页剧本的照片。请把照片里的剧本内容逐字转成纯文本，"
-    "保留场次号、角色名、对白与舞台指示的原始换行格式，每句对白单独成行。"
-    "只输出剧本正文，忽略屏幕上的系统通知/水印/界面文字，不要任何解释。"
-)
+def _ocr_prompt() -> str:
+    """OCR prompt。可选注入 cast-list（GEMMA_OCR_CAST），帮模型认准剧本专有名词
+    （生僻人名 4B 会拉向常见字，如 枯禅→桔神；提供已知角色名是高天花板纠正）。"""
+    base = (
+        "这是一页剧本的照片。请把照片里的剧本内容逐字转成纯文本，"
+        "保留场次号、角色名、对白与舞台指示的原始换行格式，每句对白单独成行。"
+        "只输出剧本正文，忽略屏幕上的系统通知/水印/界面文字，不要任何解释。"
+    )
+    cast = os.environ.get("GEMMA_OCR_CAST", "").strip()
+    if cast:
+        base = f"本剧角色与专有名词（遇到时以此为准）：{cast}。\n" + base
+    return base
 
 
 def _data_uri(path: str) -> str:
@@ -167,7 +174,7 @@ def main() -> None:
         )
         max_tokens = 4096
     else:
-        user_text = _OCR_PROMPT
+        user_text = _ocr_prompt()
         max_tokens = 2048
 
     messages = [
