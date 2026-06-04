@@ -868,6 +868,41 @@ def test_entrypoint_build_app_healthz(tmp_path, monkeypatch) -> None:
     assert app.state.llm_service is get_service()
 
 
+def test_default_db_path_is_repo_data_dir(monkeypatch) -> None:
+    """不设 SOUNDSPEED_DB → 默认 DB 路径 = 仓库根下 data/soundspeed.db（绝对、持久）。"""
+    from pathlib import Path  # noqa: PLC0415
+
+    monkeypatch.delenv("SOUNDSPEED_DB", raising=False)
+    from backend.api.entrypoint import _resolve_db_path  # noqa: PLC0415
+
+    p = _resolve_db_path()
+    repo_root = Path(__file__).resolve().parents[2]
+    assert p == repo_root / "data" / "soundspeed.db"
+    assert p.is_absolute()
+
+
+def test_db_path_env_override_wins(monkeypatch, tmp_path) -> None:
+    """显式 SOUNDSPEED_DB 优先于默认路径。"""
+    custom = tmp_path / "custom.db"
+    monkeypatch.setenv("SOUNDSPEED_DB", str(custom))
+    from backend.api.entrypoint import _resolve_db_path  # noqa: PLC0415
+
+    assert _resolve_db_path() == custom
+
+
+def test_build_app_creates_db_when_missing(monkeypatch, tmp_path) -> None:
+    """DB 路径不存在（连父目录都缺）→ build_app 自动创建新库。"""
+    db_file = tmp_path / "fresh" / "soundspeed.db"  # 父目录 fresh/ 故意不存在
+    monkeypatch.setenv("SOUNDSPEED_DB", str(db_file))
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    assert not db_file.exists()
+
+    from backend.api.entrypoint import build_app  # noqa: PLC0415
+
+    build_app()
+    assert db_file.exists()
+
+
 # ── DEV 固定 admin token ────────────────────────────────────────────────────
 #
 # resolve_admin_token 在函数体内 import（RED 阶段行为未改，顶层 import 会假绿），

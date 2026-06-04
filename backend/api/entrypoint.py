@@ -22,19 +22,33 @@ from backend.core.orchestrator import create_orchestrator
 from backend.db.dal import DAL
 from backend.llm.service import get_service
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_DB_PATH = _REPO_ROOT / "data" / "soundspeed.db"
+
+
+def _resolve_db_path() -> Path:
+    """解析 DB 文件路径。
+
+    SOUNDSPEED_DB 显式设置时优先；否则用仓库根下的持久路径 data/soundspeed.db
+    （绝对路径，不依赖启动 cwd）。路径不存在时由 build_app 负责创建（含父目录）。
+    """
+    env = os.environ.get("SOUNDSPEED_DB")
+    return Path(env) if env else _DEFAULT_DB_PATH
+
 
 def build_app() -> FastAPI:
     """装配完整 FastAPI app 并返回（不启动 uvicorn）。
 
     读取 env：
-      SOUNDSPEED_DB  数据库文件路径（默认 ./soundspeed.db）
+      SOUNDSPEED_DB  数据库文件路径（默认 <repo>/data/soundspeed.db，持久；不存在则自动创建）
       ADMIN_TOKEN    管理员 token（缺失则 resolve_admin_token 随机生成）
       SOUNDSPEED_DEV dev 模式（=1 时挂载 /api/v1/debug/asr + 自动播种 active scene）
 
     llm_service 使用 get_service() 单例（codex P6），lazy 不触发模型加载。
     create_orchestrator 自动绑定 run_l2_take（llm_service 非 None 时）。
     """
-    db_path = Path(os.environ.get("SOUNDSPEED_DB", "./soundspeed.db"))
+    db_path = _resolve_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)  # 无库/无目录则自动创建持久库
     dal = DAL(db_path)
 
     # DEV 自动播种：保证 dev server 启动后即有 active scene，1.K 可直接 take/start。
