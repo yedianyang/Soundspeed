@@ -313,6 +313,30 @@ def test_take_status_check_constraint(tmp_path: Path) -> None:
         dal.end_take(tid, 1060.0, "invalid_status")
 
 
+def test_end_take_preserves_omitted_fields(tmp_path: Path) -> None:
+    """end_take 省略 status/notes 时走 preserve-on-None：保留库中原值，只更新 end_ts。
+
+    回归：end_take 曾无条件把未给字段覆盖（status 写死、notes 置 NULL），停录会冲掉
+    用户录音中的 Mark 与 memo notes。COALESCE 后 None 即保留。
+    """
+    dal = DAL(tmp_path / "test.db")
+    sid = dal.create_scene("Scene_1")
+    tid, _ = dal.start_take(sid, "1", 1000.0)
+    # 录音中标 keeper；借一次 end_take 写 notes（status 省略 → 保留 keeper）
+    dal.set_take_status(tid, "keeper")
+    dal.end_take(tid, 1010.0, notes="第三条最好")
+    mid = dal.get_take(tid)
+    assert mid is not None and mid.status == "keeper" and mid.notes == "第三条最好"
+
+    # 再 end_take 只更新 end_ts（status/notes 全省略）→ 两者都不被冲掉
+    dal.end_take(tid, 1060.0)
+    take = dal.get_take(tid)
+    assert take is not None
+    assert take.end_ts == pytest.approx(1060.0)
+    assert take.status == "keeper"  # 不回退 tbd
+    assert take.notes == "第三条最好"  # 不清成 NULL
+
+
 def test_takes_unique_scene_take_number_same_suffix(tmp_path: Path) -> None:
     """同场次同 shot 同 take_number 同 take_suffix（均为默认 ''）重复插入触发 UNIQUE 约束异常。
 

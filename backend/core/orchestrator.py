@@ -205,11 +205,11 @@ class Orchestrator:
             return
 
         self.session.take_end()
-        # 读用户录音中 Mark 的 status，end_take 保留它（写死 'tbd' 会把 Mark 冲回 → 停录后回退 bug）。
-        # 注：end_take 仍把 script_diff/notes 置 NULL —— script_diff 由 L2 随后重填 + 前端 null 防御兜底；
-        # notes 目前 memo Input 未接线（latent），将来接线后需在此一并 read-preserve。
+        # end_take 只标记结束，不碰 status/script_diff/notes（preserve-on-None）：用户录音中 Mark 的
+        # status 与（将来接线的）memo notes 都原样保留，不会被停录冲掉。status 单独读出来只为下方
+        # take.changed 广播给前端。
+        self.dal.end_take(take_id=take_id, end_ts=payload.end_ts)
         status = self._take_status(take_id)
-        self.dal.end_take(take_id=take_id, end_ts=payload.end_ts, status=status)
 
         # 第一次 publish（同步，script_diff=None）：带真实 status，不写死 tbd
         self.publish(

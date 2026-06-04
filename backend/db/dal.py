@@ -25,6 +25,10 @@ _NOW_TS_SQL = "CAST(strftime('%s', 'now') AS REAL)"
 # 测试可 monkeypatch 成低值以验证超限异常
 _MAX_SUFFIX_ITER = 1000
 
+# _resolve_base_slot 的 exclude_take_id 哨兵：新 take 尚未 INSERT、无既有 take_id 可排除时传它。
+# 任何真实 take_id ≥ 1（AUTOINCREMENT），故 -1 不会误排除任何行。
+_NO_EXCLUDE_TAKE_ID = -1
+
 
 # ── 数据类（read 方法的返回类型）────────────────────────────────────────────
 
@@ -414,9 +418,9 @@ class DAL:
             # 步骤 1：定号（自动 MAX+1 或用显式传入号）
             if take_number is None:
                 take_number = _next_take_number(conn, scene_id, shot)
-            # 步骤 2：解析号位冲突（exclude_take_id=-1：新行尚未插入，不排除任何已有行）
+            # 步骤 2：解析号位冲突（新行尚未插入，不排除任何已有行）
             suffix, _resolution = self._resolve_base_slot(
-                conn, scene_id, shot, take_number, exclude_take_id=-1
+                conn, scene_id, shot, take_number, exclude_take_id=_NO_EXCLUDE_TAKE_ID
             )
             # 步骤 3：插入新 take
             cur = conn.execute(
@@ -430,18 +434,25 @@ class DAL:
         self,
         take_id: int,
         end_ts: float,
-        status: str,
+        status: str | None = None,
         script_diff: dict | None = None,
         notes: str | None = None,
     ) -> None:
-        """
-        更新 take 结束时间、状态、L2 输出。
+        """更新 take 结束时间，可选更新 status / L2 输出。
+
+        status / script_diff / notes 走 preserve-on-None（COALESCE）：传 None 即保留库中原值，
+        不清零。故 end_take 只负责标记结束 + 写入显式给的字段，不覆盖它没被给的列
+        （status 是用户 Mark、script_diff 由 L2 单独写、notes 由 memo 写，各有其主，end_take 不碰）。
         script_diff 传 dict，DAL 内部 json.dumps 后存库；读取时 json.loads 还原。
+        与 update_take_np_output 同构的 COALESCE 写法。
         """
         script_diff_json = json.dumps(script_diff) if script_diff is not None else None
         with self._write_tx() as conn:
             conn.execute(
-                f"UPDATE takes SET end_ts = ?, status = ?, script_diff = ?, notes = ?, "
+                f"UPDATE takes SET end_ts = ?, "
+                f"status = COALESCE(?, status), "
+                f"script_diff = COALESCE(?, script_diff), "
+                f"notes = COALESCE(?, notes), "
                 f"updated_at = {_NOW_TS_SQL} "
                 f"WHERE take_id = ?;",
                 (end_ts, status, script_diff_json, notes, take_id),
