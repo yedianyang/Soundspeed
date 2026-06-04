@@ -54,7 +54,7 @@ interface SessionState {
   // take 列表：Map<take_id, TakeDTO>。getTakes 全量覆盖（权威），take.changed patch-merge 5 字段。
   takes: Map<number, TakeDTO>
 
-  llm: { state: LlmState }
+  llm: { state: LlmState; taskType: string | null }
 
   // pending notes: 已提交、等待 NP Pipeline 归置
   pendingNotes: PendingNote[]
@@ -70,7 +70,7 @@ interface SessionState {
   applyTakeChanged: (m: TakeChangedMsg) => void
   seedTakes: (list: TakeDTO[]) => void
   removeTake: (takeId: number) => void
-  setLlm: (state: LlmState) => void
+  setLlm: (state: LlmState, taskType: string | null) => void
   setTakeProcessing: (m: TakeProcessingMsg) => void
   setCurrentTakeId: (id: number | null) => void
   setRecording: (recording: boolean) => void
@@ -87,7 +87,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   currentTakeId: null,
   isRecording: false,
   takes: new Map(),
-  llm: { state: "idle" },
+  llm: { state: "idle", taskType: null },
   pendingNotes: [],
   processing: null,
 
@@ -229,7 +229,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       return unbind ? { takes, currentTakeId: null } : { takes }
     }),
 
-  setLlm: (state) => set(() => ({ llm: { state } })),
+  setLlm: (state, taskType) => set(() => ({ llm: { state, taskType } })),
 
   // take.end 后处理状态条：done 清空；diarizing/summarizing/error 显示。
   setTakeProcessing: (m) =>

@@ -97,12 +97,19 @@ function latestLiveTakeGlobal(takes: Iterable<TakeDTO>): TakeDTO | undefined {
   return best
 }
 
-// llm.status → header LLM chip 展示（spec §3.5）。
+// llm.status → header LLM chip 展示（spec §3.5）。running 的 detail 由 task_type 覆盖（见 llmDetail）。
 const LLM_CHIP: Record<LlmState, { tone: "ok" | "warn"; detail: string }> = {
   idle: { tone: "ok", detail: "Idle" },
   loading: { tone: "warn", detail: "Loading…" },
-  running: { tone: "warn", detail: "L2" },
+  running: { tone: "warn", detail: "Running" },
   downloading: { tone: "warn", detail: "Downloading…" },
+}
+
+// running 时 chip 显示在跑哪个 LLM pipeline（task_type → 简称）。后端目前只发这两类；未知值兜底显示原文，
+// 不再像旧版把 running 硬编码成「L2」（NP 任务被误显示成 L2 就是这么来的）。
+const LLM_TASK_LABEL: Record<string, string> = {
+  l2_take: "L2",
+  note_struct: "NP",
 }
 
 export default function AdminHome() {
@@ -148,6 +155,14 @@ export default function AdminHome() {
   const setCurrentTakeId = useSessionStore((s) => s.setCurrentTakeId)
   const resetSegments = useSessionStore((s) => s.resetSegments)
   const llmState = useSessionStore((s) => s.llm.state)
+  const llmTask = useSessionStore((s) => s.llm.taskType)
+  // running 时 chip 显示具体 pipeline（NP/L2，按 task_type）；其余态用通用文案。
+  const llmDetail =
+    llmState === "running"
+      ? llmTask
+        ? LLM_TASK_LABEL[llmTask] ?? llmTask
+        : "Running"
+      : LLM_CHIP[llmState].detail
 
   // REC 开关：纯前端，与「建 take」解耦。store 单一来源，LiveTranscript 等共享读。
   const isRecording = useSessionStore((s) => s.isRecording)
@@ -530,7 +545,7 @@ export default function AdminHome() {
             <StatusChip
               label="LLM"
               tone={LLM_CHIP[llmState].tone}
-              detail={LLM_CHIP[llmState].detail}
+              detail={llmDetail}
               className="flex-shrink-0"
             />
             {/* ---- 状态栏：当前场次 / take / 录制态（真实数据）---- */}

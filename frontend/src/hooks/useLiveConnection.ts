@@ -91,7 +91,8 @@ export function useLiveConnection(): void {
           return
         }
         if (topic === "llm.status") {
-          s.setLlm((payload as LlmStatusMsg).state)
+          const m = payload as LlmStatusMsg
+          s.setLlm(m.state, m.task_type)
           return
         }
         if (topic === "note.processed") {
