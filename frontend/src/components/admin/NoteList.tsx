@@ -39,9 +39,10 @@ export default function NoteList({ takeId, refreshKey }: NoteListProps) {
     return () => { cancelled = true }
   }, [takeId, refreshKey])
 
-  const hasNotes = takeId != null && (notes.length > 0 || pendingNotes.length > 0)
-
-  // 浮层模式：无 note（pending + resolved 都空）时不渲染，避免空浮层永久遮住 main 一条。
+  // pending 是乐观本地态，独立于 take——没建 take（takeId==null）也要让场记看到「处理中」，否则
+  // 提交后零反馈。resolved notes 已由上面 effect 在 takeId==null 时清空成 []，故只看两个数组长度：
+  // 都空才不渲染（避免空浮层永久遮住 main 一条）。
+  const hasNotes = pendingNotes.length > 0 || notes.length > 0
   if (!hasNotes) {
     return null
   }
