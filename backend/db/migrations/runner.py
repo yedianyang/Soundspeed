@@ -24,6 +24,7 @@ MIGRATION_FILES: dict[int, str] = {
     5: "v5_speakers.sql",
     6: "v6_take_transcript.sql",
     7: "v7_take_speakers.sql",
+    8: "v8_app_settings.sql",
 }
 
 

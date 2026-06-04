@@ -46,17 +46,18 @@ import ActorManagementPanel from "@/components/admin/ActorManagementPanel"
 
 const DEV = import.meta.env.DEV
 
-// 真实音频输入设备下拉：读 GET /api/v1/devices，默认选 selected ?? 系统默认 ?? 首个；
-// 切换时 POST /devices/select（未启用实时 ASR 时后端 409，这里 catch 不崩）。
+// 真实音频输入设备下拉：读 GET /api/v1/devices，下拉值直接用后端权威的 selected（实际会采集的 index，
+// 持久化设备不在场时已是 fallback 设备的 index）。切换时 POST /devices/select（未启用实时 ASR 时后端 409，
+// 这里 catch 不崩）。持久化设备掉线（selected_available===false）时下方提示当前实际使用的设备。
 function AudioInputSelect() {
   const { data, isLoading, error } = useDevices()
   const qc = useQueryClient()
   const devices = data?.devices ?? []
-  const current =
-    data?.selected ??
-    devices.find((d) => d.is_default)?.index ??
-    devices[0]?.index
-  const value = current != null ? String(current) : undefined
+  const value = data?.selected != null ? String(data.selected) : undefined
+  // 保存的设备当前不在场：提示当前实际使用的设备（selected 是后端权威 fallback index）。
+  const fellBack = data?.selected_available === false && !!data?.selected_name
+  const fallbackName =
+    devices.find((d) => d.index === data?.selected)?.name ?? "默认输入"
 
   const onChange = async (v: string) => {
     try {
@@ -74,19 +75,26 @@ function AudioInputSelect() {
     return <div className="text-xs text-destructive">未检测到输入设备</div>
   }
   return (
-    <Select value={value} onValueChange={onChange}>
-      <SelectTrigger className="w-full">
-        <SelectValue placeholder="选择输入设备" />
-      </SelectTrigger>
-      <SelectContent>
-        {devices.map((d) => (
-          <SelectItem key={d.index} value={String(d.index)}>
-            {d.name}
-            {d.is_default ? "（默认）" : ""} · {d.max_input_channels}ch
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <div className="grid gap-1.5">
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger className="w-full">
+          <SelectValue placeholder="选择输入设备" />
+        </SelectTrigger>
+        <SelectContent>
+          {devices.map((d) => (
+            <SelectItem key={d.index} value={String(d.index)}>
+              {d.name}
+              {d.is_default ? "（默认）" : ""} · {d.max_input_channels}ch
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {fellBack && (
+        <span className="text-xs text-amber-600">
+          保存的设备「{data?.selected_name}」未连接，当前使用「{fallbackName}」
+        </span>
+      )}
+    </div>
   )
 }
 
