@@ -491,11 +491,19 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                     const bound = getBoundSpeakers(actor)
                     const isSelected = selectedActor === actor
                     return (
-                      <button
+                      <div
                         key={actor}
+                        role="button"
+                        tabIndex={0}
                         onClick={() => setSelectedActor(actor)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault()
+                            setSelectedActor(actor)
+                          }
+                        }}
                         className={`
-                          flex flex-col gap-1 rounded-2xl px-3 py-2 text-left transition-colors
+                          flex flex-col gap-1 rounded-2xl px-3 py-2 text-left transition-colors cursor-pointer
                           ${isSelected
                             ? "bg-primary/10 ring-1 ring-primary/30"
                             : "bg-muted/50 hover:bg-muted"
@@ -529,7 +537,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                             ))}
                           </div>
                         )}
-                      </button>
+                      </div>
                     )
                   })}
                 </div>
