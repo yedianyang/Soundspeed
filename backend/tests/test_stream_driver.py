@@ -88,11 +88,17 @@ def _drive(chunks, runner=None, detector_factory=None, vad_config=None, process_
 # ── 测试 ──────────────────────────────────────────────────────────────────────
 
 
+def _asr_events(published: list[tuple[str, object]]) -> list[tuple[str, object]]:
+    """过滤出 ASR 相关事件（排除 audio.level）。"""
+    return [(t, p) for t, p in published if t.startswith("asr.")]
+
+
 def test_ch1_segment_publishes_asr_final_ch1():
     audio = np.concatenate([_silence(4000), _speech(8000), _silence(8000)])
     published, _ = _drive([_chunk(0, 0, [audio])])
-    assert len(published) == 1
-    topic, payload = published[0]
+    asr = _asr_events(published)
+    assert len(asr) == 1
+    topic, payload = asr[0]
     assert topic == ASR_FINAL_CH1
     assert isinstance(payload, AsrFinalPayload)
     assert payload.text == "转录文本"
@@ -114,7 +120,9 @@ def test_frames_converted_to_ms():
     # start_frame(16k 帧) → payload.start_frame(ms) = round(frame/16)
     audio = np.concatenate([_silence(4000), _speech(8000), _silence(8000)])
     published, _ = _drive([_chunk(0, 32000, [audio])])
-    _, payload = published[0]
+    asr = _asr_events(published)
+    assert len(asr) == 1
+    _, payload = asr[0]
     assert isinstance(payload, AsrFinalPayload)
     # 段起点绝对帧 ≥ 32000，转 ms 应 ≈ frame/16
     assert payload.end_frame > payload.start_frame
@@ -124,15 +132,16 @@ def test_frames_converted_to_ms():
 def test_empty_transcription_skipped():
     audio = np.concatenate([_silence(4000), _speech(8000), _silence(8000)])
     published, _ = _drive([_chunk(0, 0, [audio])], runner=_FakeRunner(text="  "))
-    assert published == []  # 空文本不 publish
+    # 空文本不推 ASR 事件（audio.level 仍会推，不计入此断言）
+    assert _asr_events(published) == []
 
 
 def test_two_channels_independent_topics():
     ch1 = np.concatenate([_silence(4000), _speech(8000), _silence(8000)])
     ch2 = np.concatenate([_silence(4000), _speech(8000), _silence(8000)])
     published, _ = _drive([_chunk(0, 0, [ch1, ch2])])
-    topics = sorted(t for t, _ in published)
-    assert topics == sorted([ASR_FINAL_CH1, ASR_FINAL_CH2])
+    asr_topics = sorted(t for t, _ in _asr_events(published))
+    assert asr_topics == sorted([ASR_FINAL_CH1, ASR_FINAL_CH2])
 
 
 def test_process_channels_ch1_only_skips_ch2():
@@ -140,9 +149,9 @@ def test_process_channels_ch1_only_skips_ch2():
     ch1 = np.concatenate([_silence(4000), _speech(8000), _silence(8000)])
     ch2 = np.concatenate([_silence(4000), _speech(8000), _silence(8000)])
     published, _ = _drive([_chunk(0, 0, [ch1, ch2])], process_channels=(0,))
-    topics = [t for t, _ in published]
-    assert topics == [ASR_FINAL_CH1]
-    assert ASR_FINAL_CH2 not in topics
+    asr_topics = [t for t, _ in _asr_events(published)]
+    assert asr_topics == [ASR_FINAL_CH1]
+    assert ASR_FINAL_CH2 not in asr_topics
 
 
 def test_stop_breaks_loop_before_next_chunk():
@@ -173,7 +182,8 @@ def test_stop_breaks_loop_before_next_chunk():
             return _gen()
 
     driver.run(_Src())
-    assert len(published) == 1  # 仅第一个 chunk 的段
+    # 第一个 chunk 出 1 条 ASR + 1 条 audio.level；第二个 chunk 被 stop 截断，不处理
+    assert len(_asr_events(published)) == 1
 
 
 def test_flush_emits_trailing_segment_across_chunks():
@@ -181,5 +191,73 @@ def test_flush_emits_trailing_segment_across_chunks():
     c0 = _chunk(0, 0, [np.concatenate([_silence(4000), _speech(4000)])])
     c1 = _chunk(1, 8000, [_speech(4000)])
     published, _ = _drive([c0, c1])
-    assert len(published) == 1
-    assert published[0][0] == ASR_FINAL_CH1
+    asr = _asr_events(published)
+    assert len(asr) == 1
+    assert asr[0][0] == ASR_FINAL_CH1
+
+
+# ── AUDIO_LEVEL 测试 ───────────────────────────────────────────────────────────
+
+
+def test_audio_level_published_per_chunk():
+    """每个 chunk 对 ch1 算 RMS 并 publish AUDIO_LEVEL。"""
+    from backend.core.events import AUDIO_LEVEL, AudioLevelPayload  # noqa: PLC0415
+
+    chunk = _chunk(0, 0, [_speech(3200, amp=8000)])
+    published, _ = _drive([chunk])
+    level_events = [(t, p) for t, p in published if t == AUDIO_LEVEL]
+    assert len(level_events) == 1
+    _, payload = level_events[0]
+    assert isinstance(payload, AudioLevelPayload)
+    assert 0.0 <= payload.rms <= 1.0
+
+
+def test_audio_level_silence_chunk_rms_near_zero():
+    """静音 chunk → rms 约为 0。"""
+    from backend.core.events import AUDIO_LEVEL, AudioLevelPayload  # noqa: PLC0415
+
+    chunk = _chunk(0, 0, [_silence(3200)])
+    published, _ = _drive([chunk])
+    level_events = [(t, p) for t, p in published if t == AUDIO_LEVEL]
+    assert len(level_events) == 1
+    _, payload = level_events[0]
+    assert isinstance(payload, AudioLevelPayload)
+    assert payload.rms == 0.0
+
+
+def test_audio_level_loud_chunk_rms_positive():
+    """响的 chunk → rms > 0。"""
+    from backend.core.events import AUDIO_LEVEL, AudioLevelPayload  # noqa: PLC0415
+
+    chunk = _chunk(0, 0, [_speech(3200, amp=16000)])
+    published, _ = _drive([chunk])
+    level_events = [(t, p) for t, p in published if t == AUDIO_LEVEL]
+    assert len(level_events) == 1
+    _, payload = level_events[0]
+    assert isinstance(payload, AudioLevelPayload)
+    assert payload.rms > 0.0
+
+
+def test_audio_level_rms_clamped_to_one():
+    """超大振幅（int16 满幅 32767）→ rms 不超过 1.0。"""
+    from backend.core.events import AUDIO_LEVEL, AudioLevelPayload  # noqa: PLC0415
+
+    # 全满幅正弦替代：直接填 32767
+    loud = np.full(3200, 32767, dtype=np.int16)
+    chunk = _chunk(0, 0, [loud])
+    published, _ = _drive([chunk])
+    level_events = [(t, p) for t, p in published if t == AUDIO_LEVEL]
+    assert len(level_events) == 1
+    _, payload = level_events[0]
+    assert isinstance(payload, AudioLevelPayload)
+    assert payload.rms <= 1.0
+
+
+def test_audio_level_one_per_chunk_multiple_chunks():
+    """多个 chunk → AUDIO_LEVEL 每 chunk 一条（数量与 chunk 数相同）。"""
+    from backend.core.events import AUDIO_LEVEL  # noqa: PLC0415
+
+    chunks = [_chunk(i, i * 3200, [_speech(3200)]) for i in range(3)]
+    published, _ = _drive(chunks)
+    level_events = [t for t, _ in published if t == AUDIO_LEVEL]
+    assert len(level_events) == 3
