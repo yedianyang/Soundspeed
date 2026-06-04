@@ -3,21 +3,18 @@
 
 用户要求：OCR 用 Gemma4 原生视觉能力，每次调用新上下文 session。
 
-机制：text gguf + mmproj（vision projector）经 llama-cpp 的 mtmd 接口（Llava15ChatHandler
-封装），图片直喂模型。两种模式：
+机制：text gguf + mmproj（vision projector）经 llama-cpp 的 mtmd 接口，图片直喂模型。
   --mode ocr     图片 → 纯文本（Gemma4 当 OCR，输出可再喂 sp_material_probe 走 3.B）
   --mode struct  图片 → 直接结构化 JSON（图片一步到 ParsedScene，跳过中间文本）
 
-评估：转录/结构质量 + 图像 token 用量（vision token 占 n_ctx 多少）。
+关键修复（2026-06-04，见下 Gemma3ChatHandler）：
+  llama-cpp-python 0.3.23 无 gemma 专用 vision handler。直接用 Llava15ChatHandler 会套
+  llava/vicuna 模板（"USER: <image> ... ASSISTANT:"）→ gemma4 收到畸形上下文 → 整段幻觉
+  + 重复循环（非图像问题：mmproj 已成功编码图像）。根因只在 CHAT_FORMAT 模板，image
+  marker 那层是对的（libmtmd 的 mtmd_default_marker 统一处理）。故只需 override 模板为
+  gemma 格式（<start_of_turn>user/model），其余 mtmd 图像处理全复用 Llava15ChatHandler。
 
-⚠ 已知阻塞（3.G 待解，2026-06-04 实测）：
-  llama-cpp-python 0.3.23 无 gemma 专用 vision ChatHandler。本脚本用的 Llava15ChatHandler
-  套的是 llava/vicuna 模板（"USER: <image> ... ASSISTANT:"）+ llava 的 <|image|> marker，
-  而 gemma4 需要 gemma 模板（<start_of_turn>）+ <start_of_image> marker。模板错配 → 模型
-  收到畸形多模态上下文 → 整段幻觉 + 重复循环（非图像问题：mmproj 已成功把图编码成 ~266
-  vision token，vision 链路本身通）。要正确跑 gemma4 视觉需：① 自定义 gemma vision handler
-  或换工具（llama.cpp 自带 llama-mtmd-cli）或升级到带 gemma handler 的版本；
-  ② 测试图物理旋转 90°（EXIF orientation=nil，非 viewer 可纠正），需先 de-rotate。
+评估：转录/结构质量 + 图像 token 用量（vision token 占 n_ctx 多少）。
 
 用法（worktree 根目录）：
   GEMMA_MODEL_PATH=/Users/yedianyang/Documents/GitHub/Soundspeed/models/gemma-4-E4B-it-Q4_K_M.gguf \\
@@ -36,16 +33,54 @@ _ROOT = Path(__file__).parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from llama_cpp.llama_chat_format import Llava15ChatHandler  # noqa: E402
+
+from backend.pipelines.sp_script import _build_system_prompt  # noqa: E402
+
 N_CTX = 8192
+
+
+class Gemma3ChatHandler(Llava15ChatHandler):
+    """Gemma3/4 原生多模态 chat handler。
+
+    复用 Llava15ChatHandler 的 mtmd 图像处理（bitmap / media_marker / chunk eval），
+    只 override CHAT_FORMAT 为 gemma 模板。Llava 的 vicuna 模板会让 gemma4 幻觉。
+    image_url 在 content 遍历里原样输出，由 __call__ 替换成 libmtmd 的 media_marker，
+    故模板只管 turn 结构。image 前置于 text（gemma vision 习惯）。
+    gemma 无 system role：DEFAULT_SYSTEM_MESSAGE=None 不注入，调用方把 system 拼进 user。
+    """
+
+    DEFAULT_SYSTEM_MESSAGE = None
+
+    CHAT_FORMAT = (
+        "{% for message in messages %}"
+        "{% if message.role == 'system' or message.role == 'user' %}"
+        "<start_of_turn>user\n"
+        "{% if message.content is string %}{{ message.content }}"
+        "{% else %}"
+        "{% for content in message.content %}"
+        "{% if content.type == 'image_url' and content.image_url is string %}{{ content.image_url }}{% endif %}"
+        "{% if content.type == 'image_url' and content.image_url is mapping %}{{ content.image_url.url }}{% endif %}"
+        "{% endfor %}"
+        "{% for content in message.content %}"
+        "{% if content.type == 'text' %}{{ content.text }}{% endif %}"
+        "{% endfor %}"
+        "{% endif %}"
+        "<end_of_turn>\n"
+        "{% endif %}"
+        "{% if message.role == 'assistant' and message.content is not none %}"
+        "<start_of_turn>model\n{{ message.content }}<end_of_turn>\n"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}<start_of_turn>model\n{% endif %}"
+    )
+
 
 _OCR_PROMPT = (
     "这是一页剧本的照片。请把照片里的剧本内容逐字转成纯文本，"
     "保留场次号、角色名、对白与舞台指示的原始换行格式，每句对白单独成行。"
     "只输出剧本正文，忽略屏幕上的系统通知/水印/界面文字，不要任何解释。"
 )
-
-# struct 模式复用 3.B 的 system prompt（schema + few-shot），图片当输入
-from backend.pipelines.sp_script import _build_system_prompt  # noqa: E402
 
 
 def _data_uri(path: str) -> str:
@@ -72,10 +107,9 @@ def main() -> None:
     image = args[0]
 
     from llama_cpp import Llama
-    from llama_cpp.llama_chat_format import Llava15ChatHandler
 
     print(f">>> 新 session：text={Path(model).name}  mmproj={Path(mmproj).name}  mode={mode}")
-    handler = Llava15ChatHandler(clip_model_path=mmproj, verbose=False)
+    handler = Gemma3ChatHandler(clip_model_path=mmproj, verbose=False)
     llm = Llama(
         model_path=model,
         chat_handler=handler,
@@ -86,24 +120,22 @@ def main() -> None:
     )
 
     if mode == "struct":
-        system = _build_system_prompt()
-        user_text = "解析这页剧本照片，按上述 JSON 格式输出，忽略屏幕系统通知/界面文字。"
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": [
-                {"type": "text", "text": user_text},
-                {"type": "image_url", "image_url": {"url": _data_uri(image)}},
-            ]},
-        ]
+        # gemma 无 system role：把 3.B 的 schema prompt 拼进 user text
+        user_text = (
+            _build_system_prompt()
+            + "\n\n解析这页剧本照片，按上述 JSON 格式输出，忽略屏幕系统通知/界面文字。"
+        )
         max_tokens = 4096
     else:
-        messages = [
-            {"role": "user", "content": [
-                {"type": "text", "text": _OCR_PROMPT},
-                {"type": "image_url", "image_url": {"url": _data_uri(image)}},
-            ]},
-        ]
+        user_text = _OCR_PROMPT
         max_tokens = 2048
+
+    messages = [
+        {"role": "user", "content": [
+            {"type": "text", "text": user_text},
+            {"type": "image_url", "image_url": {"url": _data_uri(image)}},
+        ]},
+    ]
 
     resp = llm.create_chat_completion(messages=messages, max_tokens=max_tokens, temperature=0.1)
     content = resp["choices"][0]["message"]["content"]
