@@ -24,6 +24,8 @@ interface NoteListProps {
 export default function NoteList({ takeId, refreshKey }: NoteListProps) {
   const [notes, setNotes] = useState<NoteDTO[]>([])
   const pendingNotes = useSessionStore((s) => s.pendingNotes)
+  // note.processed 落库后 store bump notesVersion → 触发 resolved refetch（衔接 pending 移除与 resolved 显示）。
+  const notesVersion = useSessionStore((s) => s.notesVersion)
 
   useEffect(() => {
     if (takeId == null) {
@@ -37,7 +39,7 @@ export default function NoteList({ takeId, refreshKey }: NoteListProps) {
       if (!cancelled) setNotes([])
     })
     return () => { cancelled = true }
-  }, [takeId, refreshKey])
+  }, [takeId, refreshKey, notesVersion])
 
   // pending 是乐观本地态，独立于 take——没建 take（takeId==null）也要让场记看到「处理中」，否则
   // 提交后零反馈。resolved notes 已由上面 effect 在 takeId==null 时清空成 []，故只看两个数组长度：

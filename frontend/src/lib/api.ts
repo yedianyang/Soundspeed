@@ -314,10 +314,14 @@ export function injectDebugScript(
 
 // ── Note API ──
 
-export function postNote(text: string, ts?: number): Promise<NoteCreateResponse> {
+export function postNote(
+  text: string,
+  ts?: number,
+  clientId?: string,
+): Promise<NoteCreateResponse> {
   return request<NoteCreateResponse>(`/api/v1/notes`, {
     method: "POST",
-    body: JSON.stringify({ text, ts: ts ?? undefined }),
+    body: JSON.stringify({ text, ts: ts ?? undefined, client_id: clientId }),
   })
 }
 

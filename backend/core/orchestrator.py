@@ -486,20 +486,25 @@ class Orchestrator:
             ),
         )
 
-    def run_np_async(self, raw_text: str, parsed_category: str, ts: float) -> None:
+    def run_np_async(
+        self, raw_text: str, parsed_category: str, ts: float, client_id: str | None = None
+    ) -> None:
         """fire-and-forget NP Pipeline：归置 note 到正确的 take。
 
         在 event loop 内调用，创建后台 Task + done callback。
         与 L2 流程对齐：runner 由 create_orchestrator 注入，callback 处理错误与 idle。
+        client_id：前端乐观 pending 的去重键，透传到 note.processed 供精确移除。
         """
         loop = asyncio.get_running_loop()
-        task = loop.create_task(self._run_np_async(raw_text, parsed_category, ts))
+        task = loop.create_task(self._run_np_async(raw_text, parsed_category, ts, client_id))
         task.add_done_callback(
             lambda t: self._np_done_callback(t, raw_text=raw_text, parsed_category=parsed_category, ts=ts)
         )
         self._np_task = task
 
-    async def _run_np_async(self, raw_text: str, parsed_category: str, ts: float) -> None:
+    async def _run_np_async(
+        self, raw_text: str, parsed_category: str, ts: float, client_id: str | None = None
+    ) -> None:
         """后台异步 NP Pipeline：构建上下文 → LLM 归置 → 写库 → WS 推送。
 
         llm.status 发射顺序（前端 chip 状态，与 L2 对齐）：
@@ -588,6 +593,7 @@ class Orchestrator:
                 category=output.category,
                 content=output.content,
                 ts=ts,
+                client_id=client_id,
             ),
         )
 

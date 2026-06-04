@@ -59,6 +59,10 @@ interface SessionState {
   // pending notes: 已提交、等待 NP Pipeline 归置
   pendingNotes: PendingNote[]
 
+  // note 队列版本号：note.processed 落库后递增，NoteList 据此 refetch resolved（让落定的 note 及时显示，
+  // 不只移除 pending）。提交时不 bump——那时 note 未落库，refetch 拿不到，pending 已由 store 直接显示。
+  notesVersion: number
+
   // take.end 后处理状态条（diarization + Gemma）；done 清空，error 保留到下次录制。null=不显示。
   processing: { phase: TakeProcessingPhase; detail: string | null } | null
 
@@ -89,6 +93,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   takes: new Map(),
   llm: { state: "idle", taskType: null },
   pendingNotes: [],
+  notesVersion: 0,
   processing: null,
 
   setToken: (t) =>
@@ -244,11 +249,14 @@ export const useSessionStore = create<SessionState>((set) => ({
   addPendingNote: (n) =>
     set((s) => ({ pendingNotes: [...s.pendingNotes, n] })),
 
+  // client_id 精确移除对应 pending（content 被 LLM 改写、ts 前后端不同源，旧的三元匹配必失败 → 永久卡
+  // 「处理中」）。client_id 缺失（异常/旧后端）时不误删，仅 bump version。notesVersion 递增触发 refetch。
   noteProcessed: (m) =>
     set((s) => ({
-      pendingNotes: s.pendingNotes.filter(
-        (p) => !(p.ts === m.ts && p.category === m.category && p.content === m.content)
-      ),
+      pendingNotes: m.client_id
+        ? s.pendingNotes.filter((p) => p.client_id !== m.client_id)
+        : s.pendingNotes,
+      notesVersion: s.notesVersion + 1,
     })),
 
   setRecording: (recording) =>

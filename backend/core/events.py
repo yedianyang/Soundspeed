@@ -193,6 +193,8 @@ class NoteProcessedPayload:
     category: str
     content: str
     ts: float
+    # 前端乐观 pending 的去重键：原样回传，content 被 LLM 改写、ts 不同源也能精确移除对应 pending。
+    client_id: str | None = None
 
 
 @dataclass(frozen=True)

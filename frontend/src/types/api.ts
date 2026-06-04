@@ -235,6 +235,7 @@ export interface NoteCreateResponse {
 
 // 前端 pending note（已提交、等待 LLM 归置）
 export interface PendingNote {
+  client_id: string // 乐观去重键（crypto.randomUUID），note.processed 原样回传后据此精确移除
   ts: number
   category: string
   content: string
@@ -247,4 +248,5 @@ export interface NoteProcessedMsg {
   category: string
   content: string
   ts: number
+  client_id: string | null // 后端原样回传前端提交时的去重键；null=异常/旧链路
 }

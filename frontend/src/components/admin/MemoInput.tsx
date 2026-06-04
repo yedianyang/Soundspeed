@@ -22,9 +22,11 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
     const trimmed = text.trim()
     if (!trimmed || sending) return
     setSending(true)
+    const clientId = crypto.randomUUID()
     try {
-      const resp: NoteCreateResponse = await postNote(trimmed)
+      const resp: NoteCreateResponse = await postNote(trimmed, undefined, clientId)
       addPendingNote({
+        client_id: clientId,
         ts: Date.now() / 1000,
         category: resp.category,
         content: resp.content,

@@ -294,6 +294,8 @@ class NoteCreateBody(BaseModel):
 
     text: str
     ts: float | None = None
+    # 前端生成的乐观 pending 去重键（crypto.randomUUID），原样回传到 note.processed。
+    client_id: str | None = None
 
 
 class NoteOut(BaseModel):
@@ -342,6 +344,7 @@ async def create_note(
             raw_text=note.raw_text,
             parsed_category=note.category,
             ts=note.ts,
+            client_id=body.client_id,
         )
     except RuntimeError:
         # 不在 event loop 中（如测试环境），fallback 到当前活跃 take
