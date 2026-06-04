@@ -30,6 +30,7 @@ import { stageButton, recordingDisabled } from "@/lib/styles"
 import { cn, formatElapsed } from "@/lib/utils"
 import type { Status } from "@/types/take"
 import type { SceneDTO } from "@/types/api"
+import TakeSpeakerSelect from "@/components/admin/TakeSpeakerSelect"
 
 interface BottomControlBarProps {
   isRecording: boolean
@@ -39,6 +40,9 @@ interface BottomControlBarProps {
   elapsed: number
   recDisabled?: boolean
   recHint?: string | null
+  // ── 1.x：本 take 在场演员选择 ──
+  speakerIds: number[]
+  onSpeakerIdsChange: (ids: number[]) => void
 
   // ── scene / take 接线（2.C / 2.D / §16 工作槽）──
   scenes: SceneDTO[]
@@ -77,6 +81,8 @@ export default function BottomControlBar({
   elapsed,
   recDisabled = false,
   recHint = null,
+  speakerIds,
+  onSpeakerIdsChange,
   scenes,
   activeScene,
   slotShot,
@@ -330,8 +336,13 @@ export default function BottomControlBar({
             </Button>
           </div>
 
-          {/* Row 2: Next take + Delete + Undo。Next Take 不自动开录（建空块）。录制中三者全禁。 */}
+          {/* Row 2: 本 take 在场演员 + Next take + Delete + Undo。Next Take 不自动开录（建空块）。录制中全禁。 */}
           <div className="flex items-center gap-3">
+            <TakeSpeakerSelect
+              value={speakerIds}
+              onChange={onSpeakerIdsChange}
+              disabled={isRecording}
+            />
             <Button
               variant="ghost"
               onClick={onNextTake}

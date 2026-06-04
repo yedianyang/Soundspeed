@@ -23,6 +23,12 @@ TAKE_CHANGED = "take.changed"
 # LLM 状态事件（1.J-1.L：驱动前端 LLM chip 黄点 Loading）
 LLM_STATUS = "llm.status"
 
+# Diarization 回填完成（通知前端刷新 segments 的说话人标签）
+TAKE_SEGMENTS_UPDATED = "take.segments.updated"
+
+# take.end 后处理进度（前端 Live 框状态条：分离说话人 / 生成摘要 / 完成 / 出错）
+TAKE_PROCESSING = "take.processing"
+
 # 其他事件（本 ticket 只定义常量，不注册 handler）
 MANUAL_MARK = "manual.mark"
 QUERY_REQUEST = "query.request"
@@ -68,11 +74,16 @@ class AsrFinalPayload:
 
 @dataclass(frozen=True)
 class TakeStartPayload:
-    """take.start 的 payload（contract C3）。"""
+    """take.start 的 payload（contract C3）。
+
+    speaker_ids：本 take 在场的已注册演员 id 列表（diarization 回填只在这些演员里匹配；
+    空 → 全部出匿名说话人N）。
+    """
 
     scene_id: int
     shot: str | None
     start_ts: float
+    speaker_ids: tuple[int, ...] = ()
     # 待录 take 的显式号（用户在底部 Take 弹窗手动指定）。None → 后端按 (scene,shot) 自动 MAX+1。
     take_number: int | None = None
 
@@ -122,6 +133,35 @@ class TakeChangedPayload:
     take_number: int
     status: str
     script_diff: dict | None
+
+
+@dataclass(frozen=True)
+class TakeSegmentsUpdatedPayload:
+    """take.segments.updated 的 payload。
+
+    diarization 回填完成后 publish，通知前端 refetch GET /takes/{take_id}。
+    """
+
+    take_id: int
+    scene_id: int
+
+
+@dataclass(frozen=True)
+class TakeProcessingPayload:
+    """take.processing 的 payload（take.end 后处理进度，驱动前端 Live 框状态条）。
+
+    phase 取值：
+      'diarizing'    正在分离说话人（pyannote 跑批，较慢）
+      'summarizing'  正在生成场记摘要（Gemma L2）
+      'done'         后处理完成（前端清除状态条）
+      'error'        出错，detail 含原因
+    detail：错误信息或附加说明（非 error 时通常 None）。
+    """
+
+    take_id: int
+    scene_id: int
+    phase: str
+    detail: str | None = None
 
 
 @dataclass(frozen=True)

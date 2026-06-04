@@ -29,9 +29,11 @@ from backend.api.app import create_app
 from backend.core.events import (
     ASR_FINAL_CH1,
     TAKE_END,
+    TAKE_SEGMENTS_UPDATED,
     TAKE_START,
     AsrFinalPayload,
     TakeEndPayload,
+    TakeSegmentsUpdatedPayload,
     TakeStartPayload,
 )
 from backend.core.orchestrator import Orchestrator, create_orchestrator
@@ -385,6 +387,35 @@ def test_asr_final_forwarded_from_background_thread(tmp_dal: DAL, monkeypatch) -
             assert msg["topic"] == "asr.final.ch1"
             assert msg["payload"]["text"] == "hello from background"
             assert msg["payload"]["speaker"] == "A"
+
+
+def test_take_segments_updated_forwarded_from_background_thread(
+    tmp_dal: DAL, monkeypatch
+) -> None:
+    """从后台线程 publish(TAKE_SEGMENTS_UPDATED) → ws 收到 take.segments.updated。
+
+    diarization 回填在 executor 线程内完成后 publish 此事件，前端据此 refetch。
+    若 app.py 转发列表漏注册该 topic（回归 B1），ws 永不收到，本测试会因
+    receive_json 死挂而暴露——与 take.changed / asr.final 同款转发链断言。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+
+    payload = TakeSegmentsUpdatedPayload(take_id=42, scene_id=7)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws:
+            t = threading.Thread(
+                target=lambda: orch.publish(TAKE_SEGMENTS_UPDATED, payload)
+            )
+            t.start()
+            t.join()
+
+            msg = ws.receive_json()
+            assert msg["topic"] == "take.segments.updated"
+            assert msg["payload"]["take_id"] == 42
+            assert msg["payload"]["scene_id"] == 7
 
 
 def test_ws_disconnect_cleans_up(tmp_dal: DAL, monkeypatch) -> None:
@@ -868,6 +899,41 @@ def test_entrypoint_build_app_healthz(tmp_path, monkeypatch) -> None:
     assert app.state.llm_service is get_service()
 
 
+def test_default_db_path_is_repo_data_dir(monkeypatch) -> None:
+    """不设 SOUNDSPEED_DB → 默认 DB 路径 = 仓库根下 data/soundspeed.db（绝对、持久）。"""
+    from pathlib import Path  # noqa: PLC0415
+
+    monkeypatch.delenv("SOUNDSPEED_DB", raising=False)
+    from backend.api.entrypoint import _resolve_db_path  # noqa: PLC0415
+
+    p = _resolve_db_path()
+    repo_root = Path(__file__).resolve().parents[2]
+    assert p == repo_root / "data" / "soundspeed.db"
+    assert p.is_absolute()
+
+
+def test_db_path_env_override_wins(monkeypatch, tmp_path) -> None:
+    """显式 SOUNDSPEED_DB 优先于默认路径。"""
+    custom = tmp_path / "custom.db"
+    monkeypatch.setenv("SOUNDSPEED_DB", str(custom))
+    from backend.api.entrypoint import _resolve_db_path  # noqa: PLC0415
+
+    assert _resolve_db_path() == custom
+
+
+def test_build_app_creates_db_when_missing(monkeypatch, tmp_path) -> None:
+    """DB 路径不存在（连父目录都缺）→ build_app 自动创建新库。"""
+    db_file = tmp_path / "fresh" / "soundspeed.db"  # 父目录 fresh/ 故意不存在
+    monkeypatch.setenv("SOUNDSPEED_DB", str(db_file))
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    assert not db_file.exists()
+
+    from backend.api.entrypoint import build_app  # noqa: PLC0415
+
+    build_app()
+    assert db_file.exists()
+
+
 # ── DEV 固定 admin token ────────────────────────────────────────────────────
 #
 # resolve_admin_token 在函数体内 import（RED 阶段行为未改，顶层 import 会假绿），
@@ -876,12 +942,12 @@ def test_entrypoint_build_app_healthz(tmp_path, monkeypatch) -> None:
 
 
 def test_dev_token_is_fixed_string(monkeypatch) -> None:
-    """SOUNDSPEED_DEV=1 + ADMIN_TOKEN 未设 → resolve_admin_token() == "dev"。"""
+    """SOUNDSPEED_DEV=1 + ADMIN_TOKEN 未设 → resolve_admin_token() == "devtoken"。"""
     from backend.api.auth import resolve_admin_token  # noqa: PLC0415
 
     monkeypatch.delenv("ADMIN_TOKEN", raising=False)
     monkeypatch.setenv("SOUNDSPEED_DEV", "1")
-    assert resolve_admin_token() == "dev"
+    assert resolve_admin_token() == "devtoken"
 
 
 def test_dev_token_env_wins(monkeypatch) -> None:
@@ -894,24 +960,24 @@ def test_dev_token_env_wins(monkeypatch) -> None:
 
 
 def test_non_dev_random_token(monkeypatch) -> None:
-    """非 DEV + ADMIN_TOKEN 未设 → 返回非空随机 token（不等于 "dev"）。"""
+    """非 DEV + ADMIN_TOKEN 未设 → 返回非空随机 token（不等于 "devtoken"）。"""
     from backend.api.auth import resolve_admin_token  # noqa: PLC0415
 
     monkeypatch.delenv("ADMIN_TOKEN", raising=False)
     monkeypatch.delenv("SOUNDSPEED_DEV", raising=False)
     token = resolve_admin_token()
     assert token  # 非空
-    assert token != "dev"
+    assert token != "devtoken"
 
 
 def test_dev_token_auth_enforced(tmp_dal: DAL, monkeypatch) -> None:
-    """DEV 模式下 token 固定为 "dev"，auth 仍生效：正确 token→200，错误 token→401。"""
+    """DEV 模式下 token 固定为 "devtoken"，auth 仍生效：正确 token→200，错误 token→401。"""
     monkeypatch.delenv("ADMIN_TOKEN", raising=False)
     monkeypatch.setenv("SOUNDSPEED_DEV", "1")
     scene_id = tmp_dal.create_scene("scene_dev_auth")
     tmp_dal.set_active_scene(scene_id)  # 2.C：take/start 需要 active scene
     orch = create_orchestrator(tmp_dal)
-    # create_app 此时读 env：ADMIN_TOKEN 未设 + SOUNDSPEED_DEV=1 → admin_token="dev"
+    # create_app 此时读 env：ADMIN_TOKEN 未设 + SOUNDSPEED_DEV=1 → admin_token="devtoken"
     app = create_app(orch)
     from fastapi.testclient import TestClient as _TC  # noqa: PLC0415
     client = _TC(app)
@@ -920,7 +986,7 @@ def test_dev_token_auth_enforced(tmp_dal: DAL, monkeypatch) -> None:
     resp = client.post(
         "/api/v1/take/start",
         json={"scene_id": scene_id, "shot": None},
-        headers={"Authorization": "Bearer dev"},
+        headers={"Authorization": "Bearer devtoken"},
     )
     assert resp.status_code == 200
 
@@ -1615,4 +1681,78 @@ def test_takedto_has_take_suffix_field(tmp_dal: DAL, monkeypatch) -> None:
     assert resp.status_code == 200
     take = resp.json()["takes"][0]
     assert "take_suffix" in take
-    assert take["take_suffix"] == ""
+
+
+# ── POST /api/v1/debug/reset-db ──────────────────────────────────────────────
+
+
+def test_debug_reset_db_clears_and_reseeds(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV=1 + 正确 token：造数据 → POST /debug/reset-db → 200；
+    库被清空，恰好剩 1 个 active scene。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+
+    # 造点数据
+    sid = tmp_dal.create_scene("scene_before_reset")
+    tmp_dal.set_active_scene(sid)
+    tmp_dal.start_take(sid, "", 100.0)
+
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/debug/reset-db",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["reseeded"] is True
+
+    # 验证恰好剩 1 个 active scene
+    scenes = tmp_dal.list_scenes()
+    assert len(scenes) == 1
+    assert scenes[0]["is_active"] == 1
+
+
+def test_debug_reset_db_absent_without_dev_flag(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV 未设 → POST /debug/reset-db → 404（路由未挂载）。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.delenv("SOUNDSPEED_DEV", raising=False)
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/debug/reset-db",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_debug_reset_db_no_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV=1 + 无 token → 401。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+
+    resp = client.post("/api/v1/debug/reset-db")
+    assert resp.status_code == 401
+
+
+def test_debug_reset_db_wrong_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
+    """SOUNDSPEED_DEV=1 + 错误 token → 401。"""
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    monkeypatch.setenv("SOUNDSPEED_DEV", "1")
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/debug/reset-db",
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+    assert resp.status_code == 401

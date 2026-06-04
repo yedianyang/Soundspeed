@@ -19,6 +19,11 @@ MIGRATION_FILES: dict[int, str] = {
     2: "v2_scene_heading.sql",
     3: "v3_scene_take_soft_delete.sql",
     4: "v4_takes_shot_unique.sql",
+    # 1.x（实时 ASR / speaker / diarization）的 schema 接在 2.x 的 v4 之后，
+    # 避免与 2.x 的 v3/v4 版本号冲突。注意 take_transcript 必须排在 v4 重建 takes 之后。
+    5: "v5_speakers.sql",
+    6: "v6_take_transcript.sql",
+    7: "v7_take_speakers.sql",
 }
 
 

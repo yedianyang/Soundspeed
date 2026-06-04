@@ -10,6 +10,7 @@ import type {
   PatchTakeBody,
   SceneDTO,
   ScriptDTO,
+  SpeakerDTO,
   TakeDTO,
   TakeDetailDTO,
   TranscriptSegmentDTO,
@@ -73,10 +74,12 @@ export function getTake(id: number): Promise<TakeDetailDTO> {
   return request<TakeDetailDTO>(`/api/v1/takes/${id}`)
 }
 
+// speakerIds：本 take 在场的已注册演员 id（diarization 回填只在这些演员里匹配；空 → 全匿名说话人N）。
 // takeNumber：用户在底部 Take 弹窗手动指定的待录号。省略/undefined → 后端按 (scene,shot) 自动 MAX+1。
 export function startTake(
   sceneId: number,
   shot?: string | null,
+  speakerIds?: number[],
   takeNumber?: number | null,
 ): Promise<void> {
   return request<void>(`/api/v1/take/start`, {
@@ -84,9 +87,49 @@ export function startTake(
     body: JSON.stringify({
       scene_id: sceneId,
       shot: shot ?? null,
+      speaker_ids: speakerIds ?? [],
       take_number: takeNumber ?? null,
     }),
   })
+}
+
+// ── 已注册演员(speaker) CRUD + enroll ──
+
+export function listSpeakers(): Promise<SpeakerDTO[]> {
+  return request<SpeakerDTO[]>(`/api/v1/speakers`)
+}
+
+export function createSpeaker(displayName: string): Promise<SpeakerDTO> {
+  return request<SpeakerDTO>(`/api/v1/speakers`, {
+    method: "POST",
+    body: JSON.stringify({ display_name: displayName }),
+  })
+}
+
+export function deleteSpeaker(speakerId: number): Promise<void> {
+  return request<void>(`/api/v1/speakers/${speakerId}`, { method: "DELETE" })
+}
+
+// enroll 走 multipart/form-data（不能用 request 的 JSON Content-Type）。
+// file 建议 WAV 16kHz 单声道；后端自动重采样、≥2s。返回更新后的 SpeakerDTO。
+export async function enrollSpeaker(speakerId: number, file: File): Promise<SpeakerDTO> {
+  const token = useSessionStore.getState().token
+  const fd = new FormData()
+  fd.append("file", file)
+  const res = await fetch(`${API_BASE}/api/v1/speakers/${speakerId}/enroll`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: fd,
+  })
+  if (!res.ok) {
+    let detail = `enroll → ${res.status}`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = String(j.detail)
+    } catch { /* 忽略非 JSON 错误体 */ }
+    throw new ApiError(res.status, detail)
+  }
+  return res.json()
 }
 
 export function endTake(): Promise<void> {
@@ -154,6 +197,51 @@ export function correctSegmentSpeaker(
   )
 }
 
+// ── 音频输入设备（真实枚举 + 选择）──
+export interface InputDeviceDTO {
+  index: number
+  name: string
+  max_input_channels: number
+  is_default: boolean
+}
+
+export interface DevicesResponse {
+  devices: InputDeviceDTO[]
+  selected: number | null
+}
+
+export function getDevices(): Promise<DevicesResponse> {
+  return request<DevicesResponse>(`/api/v1/devices`)
+}
+
+// 选择下次 take 用的输入设备。未启用实时 ASR 时后端返回 409（这里由调用方 catch）。
+export function selectDevice(index: number): Promise<void> {
+  return request<void>(`/api/v1/devices/select`, {
+    method: "POST",
+    body: JSON.stringify({ index }),
+  })
+}
+
+// ── ASR 运行配置（转录语言 + 当前模型）──
+export interface AsrConfigResponse {
+  enabled: boolean
+  language: string | null
+  model: string | null
+  languages: string[]
+}
+
+export function getAsrConfig(): Promise<AsrConfigResponse> {
+  return request<AsrConfigResponse>(`/api/v1/asr`)
+}
+
+// 切换转录语言（即时生效）。未启用实时 ASR → 后端 409（调用方 catch）。
+export function setAsrLanguage(language: string): Promise<void> {
+  return request<void>(`/api/v1/asr/language`, {
+    method: "POST",
+    body: JSON.stringify({ language }),
+  })
+}
+
 // dev-only 合成 ASR 注入（后端仅 SOUNDSPEED_DEV=1 挂载 /api/v1/debug/asr）。
 // 服务端补 start/end_frame，前端只发 ch/text/speaker/is_partial。
 export interface DebugAsrSeg {
@@ -188,6 +276,20 @@ export interface DebugScriptHeading {
   int_ext?: string
   time_of_day?: string
   location?: string
+}
+
+// dev-only 全量清库（后端仅 SOUNDSPEED_DEV=1 挂载 /api/v1/debug/reset-db）。
+// 清空所有业务表，后端用 seed_dev_scene 重播种一个 active 空场，返回 {status, reseeded}。
+// 危险操作不可恢复，调用处需二次确认。成功后建议整页 reload 派生干净状态。
+export interface ResetDbResult {
+  status: string
+  reseeded: boolean
+}
+
+export function resetDb(): Promise<ResetDbResult> {
+  return request<ResetDbResult>(`/api/v1/debug/reset-db`, {
+    method: "POST",
+  })
 }
 
 export function injectDebugScript(
@@ -234,6 +336,33 @@ export const takeQueryKey = (id: number) => ["take", id] as const
 
 export const sceneScriptQueryKey = (sceneId: number | null | undefined) =>
   ["scene-script", sceneId ?? null] as const
+
+export const devicesQueryKey = () => ["devices"] as const
+
+export function useDevices() {
+  return useQuery({
+    queryKey: devicesQueryKey(),
+    queryFn: getDevices,
+  })
+}
+
+export const asrConfigQueryKey = () => ["asr-config"] as const
+
+export function useAsrConfig() {
+  return useQuery({
+    queryKey: asrConfigQueryKey(),
+    queryFn: getAsrConfig,
+  })
+}
+
+export const speakersQueryKey = () => ["speakers"] as const
+
+export function useSpeakers() {
+  return useQuery({
+    queryKey: speakersQueryKey(),
+    queryFn: listSpeakers,
+  })
+}
 
 export function useScenes() {
   return useQuery({
@@ -336,12 +465,14 @@ export function useStartTake() {
     mutationFn: ({
       sceneId,
       shot,
+      speakerIds,
       takeNumber,
     }: {
       sceneId: number
       shot?: string | null
+      speakerIds?: number[]
       takeNumber?: number | null
-    }) => startTake(sceneId, shot, takeNumber),
+    }) => startTake(sceneId, shot, speakerIds, takeNumber),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["takes"] }),
   })

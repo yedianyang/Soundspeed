@@ -51,6 +51,8 @@ class Take:
     deleted_at: float | None  # 软删时间戳，NULL 表示未删除（v3）
     created_at: float
     updated_at: float
+    # diarization 回填后的结构化转录（ASR + speaker 整合，v4），DAL 负责 json.loads
+    structured_transcript: dict | None = None
 
 
 @dataclass
@@ -149,6 +151,8 @@ def _alloc_free_suffix(
 def _row_to_take(row: sqlite3.Row) -> Take:
     performer_issues = row["performer_issues"]
     script_diff = row["script_diff"]
+    keys = row.keys()
+    structured = row["structured_transcript"] if "structured_transcript" in keys else None
     return Take(
         take_id=row["take_id"],
         scene_id=row["scene_id"],
@@ -165,6 +169,7 @@ def _row_to_take(row: sqlite3.Row) -> Take:
         deleted_at=row["deleted_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        structured_transcript=json.loads(structured) if structured else None,
     )
 
 
@@ -481,6 +486,28 @@ class DAL:
                 f"updated_at = {_NOW_TS_SQL} "
                 f"WHERE take_id = ?;",
                 (performer_issues_json, audio_quality, status, take_id),
+            )
+
+    def update_take_structured_transcript(
+        self,
+        take_id: int,
+        structured_transcript: dict | None,
+    ) -> None:
+        """写入 diarization 回填后的结构化转录（ASR + speaker 整合，v4）。
+
+        传 dict，DAL 内部 json.dumps（ensure_ascii=False 保中文可读）后存库；
+        读取时 _row_to_take 会 json.loads 还原。
+        """
+        payload = (
+            json.dumps(structured_transcript, ensure_ascii=False)
+            if structured_transcript is not None
+            else None
+        )
+        with self._write_tx() as conn:
+            conn.execute(
+                f"UPDATE takes SET structured_transcript = ?, updated_at = {_NOW_TS_SQL} "
+                f"WHERE take_id = ?;",
+                (payload, take_id),
             )
 
     def get_take(self, take_id: int) -> Take | None:
@@ -911,6 +938,152 @@ class DAL:
                 (take_id,),
             ).fetchall()
         return [_row_to_event(r) for r in rows]
+    # ── speakers 台账（v5 migration）────────────────────────────────────────────
+
+    def insert_speaker(
+        self,
+        display_name: str,
+        embedding_blob: bytes | None = None,
+        sample_count: int = 1,
+        scope_key: str | None = None,
+    ) -> int:
+        """新增说话人记录，返回 speaker_id。"""
+        with self._write_tx() as conn:
+            cur = conn.execute(
+                "INSERT INTO speakers (display_name, embedding, sample_count, scope_key) "
+                "VALUES (?, ?, ?, ?);",
+                (display_name, embedding_blob, sample_count, scope_key),
+            )
+        return cur.lastrowid  # type: ignore[return-value]
+
+    def list_speakers(self, scope_key: str | None = None) -> list[dict]:
+        """返回台账中所有说话人。embedding 字段反序列化为 numpy 数组（可 None）。"""
+        import numpy as np
+
+        if scope_key is not None:
+            rows = self._conn.execute(
+                "SELECT speaker_id, display_name, embedding, sample_count, scope_key, "
+                "created_at, updated_at "
+                "FROM speakers WHERE scope_key = ? OR scope_key IS NULL ORDER BY speaker_id ASC;",
+                (scope_key,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT speaker_id, display_name, embedding, sample_count, scope_key, "
+                "created_at, updated_at "
+                "FROM speakers ORDER BY speaker_id ASC;"
+            ).fetchall()
+
+        result = []
+        for r in rows:
+            d = dict(r)
+            blob = d.get("embedding")
+            if blob is not None:
+                try:
+                    d["embedding"] = np.frombuffer(blob, dtype=np.float32)
+                except Exception:
+                    d["embedding"] = None
+            result.append(d)
+        return result
+
+    def get_speaker(self, speaker_id: int) -> dict | None:
+        """按 speaker_id 获取单条说话人记录（embedding 反序列化为 numpy 数组）。"""
+        import numpy as np
+
+        row = self._conn.execute(
+            "SELECT speaker_id, display_name, embedding, sample_count, scope_key, "
+            "created_at, updated_at FROM speakers WHERE speaker_id = ?;",
+            (speaker_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        blob = d.get("embedding")
+        if blob is not None:
+            try:
+                d["embedding"] = np.frombuffer(blob, dtype=np.float32)
+            except Exception:
+                d["embedding"] = None
+        return d
+
+    def update_speaker_name(self, speaker_id: int, display_name: str) -> None:
+        """更新说话人显示名（演员姓名绑定）。"""
+        with self._write_tx() as conn:
+            conn.execute(
+                f"UPDATE speakers SET display_name = ?, updated_at = {_NOW_TS_SQL} "
+                f"WHERE speaker_id = ?;",
+                (display_name, speaker_id),
+            )
+
+    def update_speaker_embedding(
+        self,
+        speaker_id: int,
+        embedding_blob: bytes,
+        sample_count: int = 1,
+    ) -> None:
+        """更新说话人声纹 embedding（enrollment 后调用）。"""
+        with self._write_tx() as conn:
+            conn.execute(
+                f"UPDATE speakers SET embedding = ?, sample_count = ?, "
+                f"updated_at = {_NOW_TS_SQL} WHERE speaker_id = ?;",
+                (embedding_blob, sample_count, speaker_id),
+            )
+
+    def delete_speaker(self, speaker_id: int) -> None:
+        """删除说话人记录。"""
+        with self._write_tx() as conn:
+            conn.execute("DELETE FROM speakers WHERE speaker_id = ?;", (speaker_id,))
+
+    # ── take ↔ 演员关联（v7）─────────────────────────────────────────────────────
+
+    def set_take_speakers(self, take_id: int, speaker_ids: list[int]) -> None:
+        """覆盖式设置某 take 的在场演员列表（先清后插）。空列表 = 清空。"""
+        with self._write_tx() as conn:
+            conn.execute("DELETE FROM take_speakers WHERE take_id = ?;", (take_id,))
+            conn.executemany(
+                "INSERT OR IGNORE INTO take_speakers (take_id, speaker_id) VALUES (?, ?);",
+                [(take_id, sid) for sid in speaker_ids],
+            )
+
+    def list_take_speakers(self, take_id: int) -> list[dict]:
+        """返回某 take 挂的已注册演员（join speakers，embedding 反序列化为 numpy）。"""
+        import numpy as np
+
+        rows = self._conn.execute(
+            "SELECT s.speaker_id, s.display_name, s.embedding, s.sample_count, "
+            "s.scope_key, s.created_at, s.updated_at "
+            "FROM take_speakers ts JOIN speakers s ON s.speaker_id = ts.speaker_id "
+            "WHERE ts.take_id = ? ORDER BY s.speaker_id ASC;",
+            (take_id,),
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            blob = d.get("embedding")
+            if blob is not None:
+                try:
+                    d["embedding"] = np.frombuffer(blob, dtype=np.float32)
+                except Exception:
+                    d["embedding"] = None
+            result.append(d)
+        return result
+
+    # ── diarization 回填 ────────────────────────────────────────────────────────
+
+    def bulk_update_segment_speaker(self, seg_speaker_map: dict[int, str]) -> None:
+        """批量更新 transcript_segments.speaker 字段。
+
+        seg_speaker_map: {segment_id: global_display_name}
+        """
+        if not seg_speaker_map:
+            return
+        with self._write_tx() as conn:
+            for segment_id, speaker_name in seg_speaker_map.items():
+                conn.execute(
+                    "UPDATE transcript_segments SET speaker = ? WHERE segment_id = ?;",
+                    (speaker_name, segment_id),
+                )
+
     # ── 2.B 新增方法 ─────────────────────────────────────────────────────────
 
     def set_take_status(self, take_id: int, status: str) -> None:
@@ -1174,6 +1347,29 @@ class DAL:
                 f"UPDATE takes SET deleted_at = {_NOW_TS_SQL} WHERE take_id = ?;",
                 (take_id,),
             )
+
+    def reset_all(self) -> None:
+        """单事务内清空全部业务表（dev 专用）。
+
+        按「子表先于父表」顺序 DELETE，遵循外键约束（PRAGMA foreign_keys ON）：
+          take_line_matches / take_events / transcript_segments
+            → takes → script_lines → scripts → scenes
+            → audit_log → active_observers（无 FK，顺序任意）
+
+        FTS5 影子表（script_lines_fts*）靠 script_lines 上的 BEFORE DELETE 触发器同步，
+        DELETE FROM script_lines 会逐行触发 FTS 删除，影子表随之清空。
+        方法只做清空，不负责重新播种（播种在端点层）。
+        """
+        with self._write_tx() as conn:
+            conn.execute("DELETE FROM take_line_matches;")
+            conn.execute("DELETE FROM take_events;")
+            conn.execute("DELETE FROM transcript_segments;")
+            conn.execute("DELETE FROM takes;")
+            conn.execute("DELETE FROM script_lines;")
+            conn.execute("DELETE FROM scripts;")
+            conn.execute("DELETE FROM scenes;")
+            conn.execute("DELETE FROM audit_log;")
+            conn.execute("DELETE FROM active_observers;")
 
     def restore_take(self, take_id: int) -> None:
         """撤销软删：清除 deleted_at，在 audit_log 写 take.restore。

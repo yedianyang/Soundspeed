@@ -22,12 +22,14 @@ from backend.core.events import (
     NOTE_PROCESSED,
     TAKE_CHANGED,
     TAKE_END,
+    TAKE_PROCESSING,
     TAKE_START,
     AsrFinalPayload,
     LlmStatusPayload,
     NoteProcessedPayload,
     TakeChangedPayload,
     TakeEndPayload,
+    TakeProcessingPayload,
     TakeStartPayload,
 )
 from backend.core.session import SessionState
@@ -45,11 +47,13 @@ class Dependencies:
     llm_service: LLMService 实例，注入到 l2_runner / np_runner。
     l2_runner: 异步可调用，签名 (L2Input, LLMService) -> Awaitable[L2Output]。
     np_runner: 异步可调用，签名 (NPInput, LLMService) -> Awaitable[NPOutput]。
+    diarization_backfill: DiarizationBackfill 实例（可选）；提供时 L2 gate 到回填完成后。
     """
 
     llm_service: Any = field(default=None)
     l2_runner: Any = field(default=None)
     np_runner: Any = field(default=None)
+    diarization_backfill: Any = field(default=None)
 
 
 class Orchestrator:
@@ -63,10 +67,16 @@ class Orchestrator:
         llm_service: Any = None,
         l2_runner: Any = None,
         np_runner: Any = None,
+        diarization_backfill: Any = None,
     ) -> None:
         self.dal = dal
         self.session: SessionState = session if session is not None else SessionState()
-        self._deps = Dependencies(llm_service=llm_service, l2_runner=l2_runner, np_runner=np_runner)
+        self._deps = Dependencies(
+            llm_service=llm_service,
+            l2_runner=l2_runner,
+            np_runner=np_runner,
+            diarization_backfill=diarization_backfill,
+        )
         self._handlers: dict[str, list[Handler]] = {}
         self._l2_task: asyncio.Task[None] | None = None  # 最近一次 L2 后台 task，供测试 await
         self._np_task: asyncio.Task[None] | None = None  # 最近一次 NP 后台 task，供测试 await
@@ -178,7 +188,9 @@ class Orchestrator:
             start_ts=payload.start_ts,
             take_number=payload.take_number,
         )
-
+        # 挂本 take 在场演员（diarization 回填匹配范围）；无则空关联（全匿名说话人N）
+        if payload.speaker_ids:
+            self.dal.set_take_speakers(take_id, list(payload.speaker_ids))
         self.session.take_start(
             take_id=take_id,
             take_number=take_number,
@@ -229,22 +241,38 @@ class Orchestrator:
             ),
         )
 
-        # P1 #1：deps 检查在 get_running_loop 之前——无 LLM 依赖时降级跳过 L2
-        if self._deps.llm_service is None or self._deps.l2_runner is None:
+        # P1 #1：deps 检查在 get_running_loop 之前——无 LLM 依赖且无 diarization 时降级跳过
+        has_l2 = self._deps.llm_service is not None and self._deps.l2_runner is not None
+        has_backfill = self._deps.diarization_backfill is not None
+        if not has_l2 and not has_backfill:
             return
 
-        # fire-and-forget L2（需要 event loop）
+        # fire-and-forget（需要 event loop）
         loop = asyncio.get_running_loop()  # 无 loop 时抛 RuntimeError，不降级
 
         # P2 #1：闭包绑定 scene_id/take_number，避免 session 被后续 take 覆盖
-        # session 在此处仍是当前 take 的值（同步执行，take.start 尚未触发）
         scene_id = self.session.scene_id or 0
         take_number = self.session.take_number
 
-        self._l2_task = loop.create_task(self._run_l2_async(take_id, scene_id, take_number))
-        self._l2_task.add_done_callback(
-            lambda t: self._l2_done_callback(t, take_id=take_id, scene_id=scene_id, take_number=take_number)
-        )
+        if has_backfill:
+            # Diarization 回填链：buffer→engine→registry→align→DAL→L2
+            # L2 gate 在回填完成后触发（DiarizationBackfill.run 内部调用 l2_trigger）
+            backfill = self._deps.diarization_backfill
+            backfill._l2_trigger = (
+                self._run_l2_async if has_l2 else None
+            )
+            self._l2_task = loop.create_task(
+                backfill.run(take_id, scene_id, take_number)
+            )
+            self._l2_task.add_done_callback(
+                lambda t: self._l2_done_callback(t, take_id=take_id, scene_id=scene_id, take_number=take_number)
+            )
+        else:
+            # 无 diarization，直接触发 L2（原有逻辑）
+            self._l2_task = loop.create_task(self._run_l2_async(take_id, scene_id, take_number))
+            self._l2_task.add_done_callback(
+                lambda t: self._l2_done_callback(t, take_id=take_id, scene_id=scene_id, take_number=take_number)
+            )
 
     @staticmethod
     def _truncate_script_lines(lines: list[dict], max_chars: int = 1000) -> list[dict]:
@@ -303,6 +331,12 @@ class Orchestrator:
           模型已在本地 →                                              loading/running → idle
         """
         from backend.pipelines.l2_take import L2Input
+
+        # 前端 Live 框状态条：正在生成场记摘要（Gemma L2）
+        self.publish(
+            TAKE_PROCESSING,
+            TakeProcessingPayload(take_id=take_id, scene_id=scene_id, phase="summarizing"),
+        )
 
         svc = self._deps.llm_service
 
@@ -426,9 +460,21 @@ class Orchestrator:
             return  # 取消路径：idle 已发，不取 exception（会抛 CancelledError）
         exc = task.exception()
         if exc is None:
-            return  # 成功路径，_run_l2_async 已处理 take.changed
+            # 成功路径，_run_l2_async 已处理 take.changed；通知前端状态条收尾
+            self.publish(
+                TAKE_PROCESSING,
+                TakeProcessingPayload(take_id=take_id, scene_id=scene_id, phase="done"),
+            )
+            return
         logger.warning("L2 pipeline failed for task, publishing degraded take.changed: %r", exc)
         # 降级 publish 也带真实 status，保留用户 Mark（不写死 tbd）
+        self.publish(
+            TAKE_PROCESSING,
+            TakeProcessingPayload(
+                take_id=take_id, scene_id=scene_id, phase="error",
+                detail=f"摘要生成失败：{exc}",
+            ),
+        )
         self.publish(
             TAKE_CHANGED,
             TakeChangedPayload(
@@ -574,6 +620,7 @@ def create_orchestrator(
     llm_service: Any = None,
     l2_runner: Any = None,
     np_runner: Any = None,
+    diarization_backfill: Any = None,
 ) -> Orchestrator:
     """模块级工厂函数，供生产代码与测试注入依赖。
 
@@ -581,6 +628,7 @@ def create_orchestrator(
     llm_service 不为 None 时自动绑定默认 runner：
       - l2_runner 未显式传 → 绑定 run_l2_take
       - np_runner 未显式传 → 绑定 run_np_note
+    diarization_backfill 不为 None 时，take.end 后先跑回填链，L2 gate 到回填完成后。
     """
     if llm_service is not None:
         if l2_runner is None:
@@ -589,4 +637,10 @@ def create_orchestrator(
         if np_runner is None:
             from backend.pipelines.np_note import run_np_note
             np_runner = run_np_note
-    return Orchestrator(dal, session, llm_service=llm_service, l2_runner=l2_runner, np_runner=np_runner)
+    return Orchestrator(
+        dal, session,
+        llm_service=llm_service,
+        l2_runner=l2_runner,
+        np_runner=np_runner,
+        diarization_backfill=diarization_backfill,
+    )

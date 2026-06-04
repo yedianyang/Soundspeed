@@ -1,5 +1,6 @@
 import { useEffect } from "react"
 import { useQueryClient } from "@tanstack/react-query"
+import { getTake, takeQueryKey } from "@/lib/api"
 import { LiveSocket } from "@/lib/ws"
 import { useSessionStore } from "@/store/session"
 import type {
@@ -9,6 +10,8 @@ import type {
   SceneChangedMsg,
   TakeChangedMsg,
   TakeDeletedMsg,
+  TakeProcessingMsg,
+  TakeSegmentsUpdatedMsg,
 } from "@/types/api"
 
 // ch 编码在 topic 后缀（asr.partial.ch1 / asr.final.ch2），不在 payload 里。
@@ -49,6 +52,28 @@ export function useLiveConnection(): void {
         }
         if (topic === "take.changed") {
           s.applyTakeChanged(payload as TakeChangedMsg)
+          return
+        }
+        if (topic === "take.segments.updated") {
+          // diarization 回填完成：refetch 带 speaker 的 segments，替换 Live 框纯 ASR 文本。
+          const m = payload as TakeSegmentsUpdatedMsg
+          getTake(m.take_id)
+            .then((detail) =>
+              useSessionStore
+                .getState()
+                .applyBackfilledSegments(m.take_id, detail.segments),
+            )
+            .catch(() => {
+              /* 网络/鉴权失败：忽略，下次 invalidate 重取 */
+            })
+          // take 详情 / 列表 query 失效（HistoryTakes 等据此重渲染结构化转录）。
+          queryClient.invalidateQueries({ queryKey: takeQueryKey(m.take_id) })
+          queryClient.invalidateQueries({ queryKey: ["takes"] })
+          return
+        }
+        if (topic === "take.processing") {
+          // take.end 后处理进度（分离说话人 / 生成摘要 / 完成 / 出错）→ Live 框状态条
+          s.setTakeProcessing(payload as TakeProcessingMsg)
           return
         }
         if (topic === "take.deleted") {

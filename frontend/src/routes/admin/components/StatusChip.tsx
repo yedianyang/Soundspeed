@@ -45,6 +45,36 @@ export function StatusChip({
   return <div className={cls}>{content}</div>
 }
 
+// 真实电平表：由 [0,1] 的 level 驱动，亮起的 bar 数 = level×count（升序高度）。
+// 替代 LevelMeter 的假随机动画，用于 header 实时麦克风监看。
+export function LiveLevelMeter({
+  level,
+  count = 7,
+  color = "bg-green-500",
+  className,
+}: {
+  level: number
+  count?: number
+  color?: string
+  className?: string
+}) {
+  const lit = Math.round(Math.min(1, Math.max(0, level)) * count)
+  return (
+    <div className={cn("flex items-center gap-[1.5px] h-4 flex-shrink-0", className)}>
+      {Array.from({ length: count }, (_, i) => (
+        <span
+          key={i}
+          className={cn(
+            "w-[2px] rounded-full transition-all duration-75",
+            i < lit ? color : "bg-muted-foreground/20"
+          )}
+          style={{ height: `${3 + (i / Math.max(1, count - 1)) * 11}px` }}
+        />
+      ))}
+    </div>
+  )
+}
+
 export function LevelMeter({
   count = 5,
   color = "bg-green-500",

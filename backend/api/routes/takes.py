@@ -88,6 +88,8 @@ class TakeDTO(BaseModel):
     deleted_at: float | None
     created_at: float
     updated_at: float
+    # diarization 回填后的结构化转录（ASR + speaker 整合，v4）；未回填时为 None
+    structured_transcript: dict | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -106,6 +108,8 @@ class TakeStartBody(BaseModel):
 
     scene_id: int
     shot: str | None = None
+    # 本 take 在场的已注册演员 id（diarization 回填只在这些演员里匹配；空 → 全匿名说话人N）
+    speaker_ids: list[int] = []
     # 用户手动指定的待录 take 号（底部 Take 弹窗）。None → 后端按 (scene,shot) 自动 MAX+1。
     # ge=1：take 号从 1 起，挡掉 0/负数。
     take_number: int | None = Field(default=None, ge=1)
@@ -134,6 +138,7 @@ async def take_start(
         scene_id=body.scene_id,
         shot=body.shot,
         start_ts=time.time(),
+        speaker_ids=tuple(body.speaker_ids),
         take_number=body.take_number,
     )
     orchestrator.publish(TAKE_START, payload)

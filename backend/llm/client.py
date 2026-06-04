@@ -60,6 +60,14 @@ class GemmaClient:
 
         resolved_path = model_path or os.environ.get("GEMMA_MODEL_PATH", _DEFAULT_MODEL_PATH)
         params = {**_LLAMA_DEFAULTS, **llama_kwargs}
+        # 显存吃紧时用 SOUNDSPEED_LLM_GPU_LAYERS 覆盖：0=纯 CPU（释放显存给 whisper/pyannote，
+        # L2 非实时可接受）；-1=全 GPU。8GB 卡上三模型同跑会 OOM，本机建议设 0。
+        gpu_env = os.environ.get("SOUNDSPEED_LLM_GPU_LAYERS")
+        if gpu_env is not None and "n_gpu_layers" not in llama_kwargs:
+            try:
+                params["n_gpu_layers"] = int(gpu_env)
+            except ValueError:
+                pass
         self._llm = Llama(model_path=resolved_path, **params)  # type: ignore[arg-type]
 
     def create_chat_completion(

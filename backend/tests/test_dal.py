@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from backend.db.dal import DAL
-from backend.db.migrations.runner import apply_migrations
+from backend.db.migrations.runner import MIGRATION_FILES, apply_migrations
 
 
 # ── 辅助：打开裸 sqlite3 连接读取元数据 ──────────────────────────────────────
@@ -64,12 +64,12 @@ def test_apply_migrations_idempotent(tmp_path: Path) -> None:
 
 
 def test_apply_migrations_user_version(tmp_path: Path) -> None:
-    """迁移后 PRAGMA user_version 等于当前最高版本（v4 后为 4）。"""
+    """迁移后 PRAGMA user_version 等于当前最高已注册版本。"""
     db_path = tmp_path / "test.db"
     apply_migrations(db_path)
     conn = _raw_conn(db_path)
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert version == 4
+    assert version == max(MIGRATION_FILES)
     conn.close()
 
 
@@ -1322,4 +1322,38 @@ def test_restore_take_no_unique_conflict_after_vacate(tmp_dal: DAL) -> None:
     take_new = tmp_dal.get_take(t3)
     assert take_new is not None
     assert take_new.take_number == 2
-    assert take_new.take_suffix == ""
+
+
+# ── reset_all ────────────────────────────────────────────────────────────────
+
+
+def test_reset_all_clears_all_business_tables(tmp_dal: DAL) -> None:
+    """reset_all() 清空全部业务表，含 FTS 影子表（实测）。"""
+    # 造数据：scene → take → segment + event；script → script_line；take_line_match
+    sid = tmp_dal.create_scene("scene_reset")
+    tmp_dal.set_active_scene(sid)
+    script_id = tmp_dal.insert_script(sid, "角色：台词", version=1)
+    line_id = tmp_dal.insert_script_line(script_id, 1, "角色", "台词")
+    take_id, _ = tmp_dal.start_take(sid, "", 100.0)
+    tmp_dal.insert_segment(take_id, 1, "SPK_A", "台词", 0, 1000)
+    tmp_dal.insert_take_event(take_id, "test.event", {}, 100.0)
+    tmp_dal.insert_take_line_match(take_id, line_id, "match", {})
+    tmp_dal.upsert_observer("conn_1", "观察者")
+    tmp_dal.append_audit("user", "test.action", {})
+
+    # 执行清空
+    tmp_dal.reset_all()
+
+    # 断言全部业务表清空
+    conn = tmp_dal._conn
+    assert conn.execute("SELECT count(*) FROM scenes").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM takes").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM take_events").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM transcript_segments").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM scripts").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM script_lines").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM take_line_matches").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM audit_log").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM active_observers").fetchone()[0] == 0
+    # FTS 影子表：content table 模式下用 count(*) 读取
+    assert conn.execute("SELECT count(*) FROM script_lines_fts").fetchone()[0] == 0

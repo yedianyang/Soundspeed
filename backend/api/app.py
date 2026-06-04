@@ -43,6 +43,8 @@ from backend.core.events import (
     SCENE_CHANGED,
     TAKE_CHANGED,
     TAKE_DELETED,
+    TAKE_PROCESSING,
+    TAKE_SEGMENTS_UPDATED,
 )
 from backend.core.orchestrator import Orchestrator
 
@@ -72,6 +74,8 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
             ASR_FINAL_CH2,
             NOTE_PROCESSED,
             TAKE_CHANGED,
+            TAKE_SEGMENTS_UPDATED,
+            TAKE_PROCESSING,
             LLM_STATUS,
             TAKE_DELETED,
             SCENE_CHANGED,
@@ -83,6 +87,12 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
                 cm.broadcast(t, p)
 
             orch.subscribe(topic, _forward)
+
+        # diarization 预热：若 entrypoint 注册了 _warmup_coro，在此启动后台 task
+        warmup_coro = getattr(orch, "_warmup_coro", None)
+        if warmup_coro is not None:
+            asyncio.ensure_future(warmup_coro())
+
         yield
         # shutdown：清 loop 引用。loop 停后若仍有同步 handler 触发 broadcast
         # （后台线程尚未收束），_loop is None 守卫使其安全 no-op，防 coroutine 泄漏。
