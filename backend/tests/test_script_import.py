@@ -698,3 +698,101 @@ def test_clean_lines_blank_character_to_none() -> None:
         ("罗湘", "台词"),
         (None, "另一指示"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# R4  真 DAL apply multi_scene（rebase 2.x→main 后解锁，main 才有 get_or_create_scene）
+# 价值在跨连接 read-after-write：DAL 读/写分连接（fixture 用文件不用 :memory:），
+# 故断言一律经 DAL 读连接 read-back（list_scenes / get_latest_script），不信 apply 返回值。
+# ---------------------------------------------------------------------------
+
+
+def test_real_dal_apply_multi_scene_creates_new_scenes(tmp_dal: DAL) -> None:
+    """真 DAL，multi_scene 多新场：apply 经 get_or_create_scene 建场，
+    read-back 经 DAL 读连接确认 INSERT 已 commit 且对读连接可见。"""
+    scenes = [
+        _scene(scene_code="10", lines=[("张三", "十场台词")], int_ext="INT"),
+        _scene(scene_code="11", lines=[("李四", "十一场台词")]),
+    ]
+    plan = plan_import(scenes, target="multi_scene", batch_id="b1", dal=tmp_dal)
+    assert len(plan.conflicts) == 0
+    assert len(plan.new_scenes) == 2
+
+    results = apply_import(plan, decisions=None, dal=tmp_dal)  # type: ignore[arg-type]
+    assert len(results) == 2
+
+    # read-back：经 DAL 读连接（非 apply 返回值）确认建场已 commit 可见
+    codes = {s["scene_code"] for s in tmp_dal.list_scenes()}
+    assert {"10", "11"} <= codes
+
+    for scene_id, _script_id in results:
+        script = tmp_dal.get_latest_script(scene_id)
+        assert script is not None
+        assert script["version"] == 1
+        assert len(tmp_dal.list_script_lines(script["script_id"])) == 1
+
+
+def test_real_dal_apply_multi_scene_conflict_replace(tmp_dal: DAL) -> None:
+    """真 DAL，multi_scene：命中有脚本场 conflict + replace → 版本自增；同批新场照建。"""
+    existing_id = tmp_dal.create_scene("20")
+    tmp_dal.insert_script(existing_id, "张三：旧版本")
+
+    scenes = [
+        _scene(scene_code="20", lines=[("张三", "新版本")]),   # conflict
+        _scene(scene_code="21", lines=[("王五", "新场")]),      # new
+    ]
+    plan = plan_import(scenes, target="multi_scene", batch_id="b1", dal=tmp_dal)
+    assert len(plan.conflicts) == 1
+    assert len(plan.new_scenes) == 1
+
+    conflict_id = plan.conflicts[0]["scene_id"]
+    results = apply_import(
+        plan, decisions={conflict_id: "replace"}, dal=tmp_dal  # type: ignore[arg-type]
+    )
+    assert len(results) == 2
+
+    # conflict 场版本自增到 2，内容为新版本（read-back）
+    script20 = tmp_dal.get_latest_script(existing_id)
+    assert script20 is not None
+    assert script20["version"] == 2
+    assert "新版本" in script20["raw_text"]
+
+    # 新场 21 建好，版本 1
+    code_to_id = {s["scene_code"]: s["scene_id"] for s in tmp_dal.list_scenes()}
+    assert "21" in code_to_id
+    script21 = tmp_dal.get_latest_script(code_to_id["21"])
+    assert script21 is not None
+    assert script21["version"] == 1
+
+
+def test_real_dal_apply_multi_scene_duplicate_code_within_batch(tmp_dal: DAL) -> None:
+    """真 DAL，同批两个相同 scene_code（=3.B 跨块孤儿：一场被切成两 ParsedScene）。
+    apply 调 get_or_create_scene 两次——第二次须 SELECT 命中写连接刚 INSERT 的行
+    （跨连接 read-after-write）；若 DAL 双连接隔离，第二次会另建一场，此测试即报警。
+
+    当前行为（§5.1 best-effort）：归并到同一场，产生两个 script 版本，
+    get_latest_script 返回后者。multi_scene target 不像 current_scene 那样合并同 code，
+    跨块孤儿前半段会被后半段顶成旧版本——合并留待 plan 层（见 memory 待办）。
+    """
+    scenes = [
+        _scene(scene_code="30", lines=[("张三", "前半段")]),
+        _scene(scene_code="30", lines=[("张三", "后半段")]),
+    ]
+    plan = plan_import(scenes, target="multi_scene", batch_id="b1", dal=tmp_dal)
+    # plan 阶段不合并：库里无 "30"，scene_map 循环内不更新，两条都进 new_scenes
+    assert len(plan.new_scenes) == 2
+
+    results = apply_import(plan, decisions=None, dal=tmp_dal)  # type: ignore[arg-type]
+    assert len(results) == 2
+
+    # 跨连接 read-after-write：同一 scene_code 只建一个场
+    matching = [s for s in tmp_dal.list_scenes() if s["scene_code"] == "30"]
+    assert len(matching) == 1
+    scene_id = matching[0]["scene_id"]
+    assert results[0][0] == results[1][0] == scene_id
+
+    # 两次 apply 落到同场 → 两个版本，latest=后半段
+    script = tmp_dal.get_latest_script(scene_id)
+    assert script is not None
+    assert script["version"] == 2
+    assert "后半段" in script["raw_text"]
