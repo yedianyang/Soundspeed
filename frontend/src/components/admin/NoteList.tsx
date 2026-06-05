@@ -17,6 +17,7 @@ const FAIL_REASON_TEXT: Record<string, string> = {
   parse_error: "理解失败",
   timeout: "处理超时",
   asr_unclear: "没听清",
+  model_unavailable: "模型未就绪", // mmproj 缺失/下载失败，语音模型未挂载（4.J）
 }
 
 function formatTime(ts: number): string {

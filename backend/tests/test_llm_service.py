@@ -661,6 +661,107 @@ def test_resolve_model_path_download_true(tmp_path, monkeypatch) -> None:
     assert result == dl_path
 
 
+# ---------------------------------------------------------------------------
+# resolve_mmproj_path（4.J-1）：多模态投影器路径解析，仿 resolve_model_path。
+# env GEMMA_MMPROJ_PATH > HF cache（unsloth/gemma-4-E4B-it-GGUF 的 mmproj-F16.gguf）> 下载。
+# 函数体内 import，RED 阶段符号不存在不炸 collection。
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_mmproj_path_env_set_exists(tmp_path, monkeypatch) -> None:
+    """GEMMA_MMPROJ_PATH 设置且文件存在 → 直接返回，不调用任何 HF 函数。"""
+    import huggingface_hub  # noqa: PLC0415
+    from backend.llm.service import resolve_mmproj_path  # noqa: PLC0415
+
+    fake_mmproj = tmp_path / "mmproj-F16.gguf"
+    fake_mmproj.write_bytes(b"fake")
+    monkeypatch.setenv("GEMMA_MMPROJ_PATH", str(fake_mmproj))
+
+    hf_called: list[int] = []
+
+    def _spy_cache(*a: object, **kw: object) -> str:
+        hf_called.append(1)
+        return "/fake"
+
+    def _spy_download(*a: object, **kw: object) -> str:
+        hf_called.append(2)
+        return "/fake"
+
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", _spy_cache)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _spy_download)
+
+    result = resolve_mmproj_path(download=False)
+    assert result == str(fake_mmproj)
+    assert hf_called == [], "GEMMA_MMPROJ_PATH 存在时不应调用任何 HF 函数"
+
+
+def test_resolve_mmproj_path_cache_hit_asks_mmproj_file(tmp_path, monkeypatch) -> None:
+    """env 未设 + HF cache 命中 → 返回缓存路径；且查询的 filename 必须是 mmproj-F16.gguf
+    （而非 base gguf），repo_id 与模型同仓。"""
+    import huggingface_hub  # noqa: PLC0415
+    from backend.llm.service import resolve_mmproj_path  # noqa: PLC0415
+
+    monkeypatch.delenv("GEMMA_MMPROJ_PATH", raising=False)
+    cache_path = str(tmp_path / "cached-mmproj.gguf")
+    seen = {}
+
+    def _spy_cache(*a: object, **kw: object) -> str:
+        seen.update(kw)
+        return cache_path
+
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", _spy_cache)
+
+    result = resolve_mmproj_path(download=False)
+    assert result == cache_path
+    assert seen.get("filename") == "mmproj-F16.gguf"
+    assert seen.get("repo_id") == "unsloth/gemma-4-E4B-it-GGUF"
+
+
+def test_resolve_mmproj_path_cache_sentinel(monkeypatch) -> None:
+    """try_to_load_from_cache 返回哨兵对象（truthy 非 str）→ 视为未命中，返回 None。"""
+    import huggingface_hub  # noqa: PLC0415
+    from backend.llm.service import resolve_mmproj_path  # noqa: PLC0415
+
+    monkeypatch.delenv("GEMMA_MMPROJ_PATH", raising=False)
+    sentinel = object()
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: sentinel)
+
+    assert resolve_mmproj_path(download=False) is None
+
+
+def test_resolve_mmproj_path_cache_miss_no_download(monkeypatch) -> None:
+    """env 未设 + cache miss + download=False → None。"""
+    import huggingface_hub  # noqa: PLC0415
+    from backend.llm.service import resolve_mmproj_path  # noqa: PLC0415
+
+    monkeypatch.delenv("GEMMA_MMPROJ_PATH", raising=False)
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: None)
+
+    assert resolve_mmproj_path(download=False) is None
+
+
+def test_resolve_mmproj_path_download_true(tmp_path, monkeypatch) -> None:
+    """cache miss + download=True → 调 hf_hub_download（mmproj-F16.gguf），返回下载路径。"""
+    import huggingface_hub  # noqa: PLC0415
+    from backend.llm.service import resolve_mmproj_path  # noqa: PLC0415
+
+    monkeypatch.delenv("GEMMA_MMPROJ_PATH", raising=False)
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **kw: None)
+    dl_path = str(tmp_path / "downloaded-mmproj.gguf")
+    seen = {}
+
+    def _spy_download(*a: object, **kw: object) -> str:
+        seen.update(kw)
+        return dl_path
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _spy_download)
+
+    result = resolve_mmproj_path(download=True)
+    assert result == dl_path
+    assert seen.get("filename") == "mmproj-F16.gguf"
+    assert seen.get("repo_id") == "unsloth/gemma-4-E4B-it-GGUF"
+
+
 @pytest.mark.asyncio
 async def test_model_present_true_when_client_loaded(monkeypatch) -> None:
     """_client 已设（模型已加载）→ model_present=True。"""
@@ -702,6 +803,114 @@ async def test_model_present_true_when_cache_hit(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_ensure_client_multimodal_when_mmproj_available(monkeypatch) -> None:
+    """mmproj 可解析 → _ensure_client 用 mmproj_path 构造 GemmaClient（多模态单实例，方案 A）。"""
+    import backend.llm.client as client_mod  # noqa: PLC0415
+    import backend.llm.service as svc_mod  # noqa: PLC0415
+
+    captured: dict = {}
+
+    class _FakeGemmaClient:
+        def __init__(self, model_path=None, mmproj_path=None, **kw: object) -> None:  # noqa: ANN001
+            captured["model_path"] = model_path
+            captured["mmproj_path"] = mmproj_path
+
+    monkeypatch.setattr(svc_mod, "resolve_model_path", lambda download: "/fake/model.gguf")
+    monkeypatch.setattr(svc_mod, "resolve_mmproj_path", lambda download: "/fake/mmproj-F16.gguf")
+    monkeypatch.setattr(client_mod, "GemmaClient", _FakeGemmaClient)
+
+    _reset_service()
+    svc = get_service()
+    svc._ensure_client()
+    assert captured["mmproj_path"] == "/fake/mmproj-F16.gguf"
+    _reset_service()
+
+
+@pytest.mark.asyncio
+async def test_ensure_client_text_fallback_when_no_mmproj(monkeypatch) -> None:
+    """mmproj 不可用 → mmproj_path=None（退回纯文本，向后兼容；音频/图像不可用）。"""
+    import backend.llm.client as client_mod  # noqa: PLC0415
+    import backend.llm.service as svc_mod  # noqa: PLC0415
+
+    captured: dict = {}
+
+    class _FakeGemmaClient:
+        def __init__(self, model_path=None, mmproj_path=None, **kw: object) -> None:  # noqa: ANN001
+            captured["mmproj_path"] = mmproj_path
+
+    monkeypatch.setattr(svc_mod, "resolve_model_path", lambda download: "/fake/model.gguf")
+    monkeypatch.setattr(svc_mod, "resolve_mmproj_path", lambda download: None)
+    monkeypatch.setattr(client_mod, "GemmaClient", _FakeGemmaClient)
+
+    _reset_service()
+    svc = get_service()
+    svc._ensure_client()
+    assert captured["mmproj_path"] is None
+    _reset_service()
+
+
+@pytest.mark.asyncio
+async def test_ensure_client_downloads_mmproj_when_cache_miss(monkeypatch) -> None:
+    """mmproj 未缓存 → _ensure_client 自动下载（resolve_mmproj_path(True)）并建多模态。
+
+    修部署态缺口：base 缓存而 mmproj 未缓存的机器（现存安装升级路径），首条音频前自动补 mmproj，
+    单实例升多模态，而非静默退纯文本导致语音永久失败。
+    """
+    import backend.llm.client as client_mod  # noqa: PLC0415
+    import backend.llm.service as svc_mod  # noqa: PLC0415
+
+    captured: dict = {}
+
+    class _FakeGemmaClient:
+        def __init__(self, model_path=None, mmproj_path=None, **kw: object) -> None:  # noqa: ANN001
+            captured["mmproj_path"] = mmproj_path
+
+    monkeypatch.setattr(svc_mod, "resolve_model_path", lambda download: "/fake/model.gguf")
+
+    def _resolve_mmproj(download: bool) -> str | None:
+        # cache miss（download=False → None），仅下载（download=True）才得到路径。
+        return "/dl/mmproj-F16.gguf" if download else None
+
+    monkeypatch.setattr(svc_mod, "resolve_mmproj_path", _resolve_mmproj)
+    monkeypatch.setattr(client_mod, "GemmaClient", _FakeGemmaClient)
+
+    _reset_service()
+    svc = get_service()
+    svc._ensure_client()
+    assert captured["mmproj_path"] == "/dl/mmproj-F16.gguf"  # 自动下载后传入 → 多模态
+    _reset_service()
+
+
+@pytest.mark.asyncio
+async def test_ensure_client_text_fallback_when_mmproj_download_fails(monkeypatch) -> None:
+    """mmproj 下载失败（离线）→ 退纯文本 client（不崩启动）；音频路径随后由 note.failed 兜底。"""
+    import backend.llm.client as client_mod  # noqa: PLC0415
+    import backend.llm.service as svc_mod  # noqa: PLC0415
+
+    captured: dict = {}
+
+    class _FakeGemmaClient:
+        def __init__(self, model_path=None, mmproj_path=None, **kw: object) -> None:  # noqa: ANN001
+            captured["mmproj_path"] = mmproj_path
+
+    monkeypatch.setattr(svc_mod, "resolve_model_path", lambda download: "/fake/model.gguf")
+
+    def _resolve_mmproj(download: bool) -> str | None:
+        if download:
+            raise RuntimeError("offline: 下载失败")
+        return None
+
+    monkeypatch.setattr(svc_mod, "resolve_mmproj_path", _resolve_mmproj)
+    monkeypatch.setattr(client_mod, "GemmaClient", _FakeGemmaClient)
+
+    _reset_service()
+    svc = get_service()
+    svc._ensure_client()  # 不应抛
+    assert captured["mmproj_path"] is None  # 退纯文本
+    _reset_service()
+
+
+@pytest.mark.asyncio
 async def test_ensure_model_ready_resolves_path(tmp_path, monkeypatch) -> None:
     """ensure_model_ready() 调用 resolve_model_path(True) 并存 _model_path。"""
     import huggingface_hub  # noqa: PLC0415
@@ -715,6 +924,77 @@ async def test_ensure_model_ready_resolves_path(tmp_path, monkeypatch) -> None:
     await svc.ensure_model_ready()
     assert svc._model_path == fake_path
     _reset_service()
+
+
+# ---------------------------------------------------------------------------
+# infer_voice（4.J-3）：音频推理入口，共用 _client + _lock + priority 队列。
+# ---------------------------------------------------------------------------
+
+
+class _AudioCapturingClient:
+    """记录 create_chat_completion 收到的 audio + messages，供 infer_voice 测试断言。"""
+
+    def __init__(self) -> None:
+        self.seen_audio: object = "UNSET"
+        self.seen_messages: object = None
+        self.captured_kwargs: dict = {}
+
+    def create_chat_completion(self, messages, audio=None, **kwargs):  # noqa: ANN001
+        self.seen_audio = audio
+        self.seen_messages = messages
+        self.captured_kwargs.update(kwargs)
+        return {"choices": [{"message": {"content": "voice-ok"}}]}
+
+
+@pytest.mark.asyncio
+async def test_infer_voice_passes_audio_to_client() -> None:
+    """infer_voice 把 audio 字节透传给 client.create_chat_completion，返回生成文本。"""
+    _reset_service()
+    svc = get_service()
+    client = _AudioCapturingClient()
+    svc._client = client
+    try:
+        result = await svc.infer_voice(
+            messages=[{"role": "user", "content": "ctx"}],
+            audio=b"WAVBYTES",
+            task_type="note_struct",
+        )
+        assert result == "voice-ok"
+        assert client.seen_audio == b"WAVBYTES"
+        assert client.seen_messages == [{"role": "user", "content": "ctx"}]
+    finally:
+        await svc.aclose()
+        _reset_service()
+
+
+@pytest.mark.asyncio
+async def test_infer_voice_unknown_task_type_raises() -> None:
+    """infer_voice 复用入参校验：未知 task_type 抛 ValueError（不入队）。"""
+    _reset_service()
+    svc = get_service()
+    svc._client = _AudioCapturingClient()
+    try:
+        with pytest.raises(ValueError):
+            await svc.infer_voice(
+                messages=[{"role": "user", "content": "x"}],
+                audio=b"x",
+                task_type="__nope__",
+            )
+    finally:
+        await svc.aclose()
+        _reset_service()
+
+
+@pytest.mark.asyncio
+async def test_text_infer_does_not_pass_audio_kwarg(service: LLMService) -> None:
+    """回归守卫：纯文本 infer 不给 client 传 audio kwarg（不污染文本路径 gen_kwargs）。"""
+    capturing = _CapturingClient()
+    service._client = capturing
+    await service.infer(
+        messages=[{"role": "user", "content": "hi"}],
+        task_type="query_session",
+    )
+    assert "audio" not in capturing.captured_kwargs
 
 
 @pytest.mark.smoke

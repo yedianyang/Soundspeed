@@ -1,4 +1,6 @@
 """NP Pipeline 单元测试。"""
+import pytest
+
 from backend.pipelines.np_note import (
     NPInput,
     NPParseError,
@@ -119,3 +121,142 @@ def test_system_prompt_per_shot_semantics():
     prompt = _build_system_prompt()
     assert "当前镜" in prompt
     assert "跨镜" in prompt or "跨场" in prompt
+
+
+# ---------------------------------------------------------------------------
+# 语音 NP runner（4.J-4）：run_np_voice —— 场镜次上下文 + 音频哨兵 → infer_voice → 解析。
+# ---------------------------------------------------------------------------
+
+
+class _FakeVoiceLLM:
+    """记录 infer_voice 收到的 messages/audio/task_type，并回固定文本。"""
+
+    def __init__(self, response: str) -> None:
+        self._response = response
+        self.seen: dict = {}
+
+    async def infer_voice(
+        self, messages, audio, task_type, priority=None, timeout=None  # noqa: ANN001
+    ) -> str:
+        self.seen.update(
+            messages=messages, audio=audio, task_type=task_type, priority=priority
+        )
+        return self._response
+
+
+def _voice_input() -> NPInput:
+    return NPInput(
+        raw_text="",  # 语音路径无文字，正文由模型从音频听
+        parsed_category="note",
+        current_scene_id=5,
+        current_take_id=None,
+        take_context=[
+            {"take_id": 103, "scene_code": "Scene_1", "shot": "Shot1", "take_number": 3, "summary": ""}
+        ],
+        ts=123.0,
+        current_scene_code="Scene_1",
+        current_shot="Shot1",
+        current_take_number=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_np_voice_parses_output_and_threads_audio() -> None:
+    """run_np_voice：组装场镜次 + 音频哨兵 → infer_voice（透传 audio + note_struct）→ 解析 NPOutput。"""
+    from backend.llm.multimodal import AUDIO_SENTINEL  # noqa: PLC0415
+    from backend.pipelines.np_note import NPOutput, run_np_voice  # noqa: PLC0415
+
+    fake = _FakeVoiceLLM('{"take_id": 103, "category": "keeper", "content": "结尾好"}')
+    out = await run_np_voice(_voice_input(), b"WAVBYTES", fake)  # type: ignore[arg-type]
+
+    assert out == NPOutput(take_id=103, category="keeper", content="结尾好")
+    assert fake.seen["audio"] == b"WAVBYTES"
+    assert fake.seen["task_type"] == "note_struct"
+
+    # user content 为 list，含音频哨兵（multimodal 通道）+ 场镜次文本
+    user_msg = fake.seen["messages"][-1]
+    assert user_msg["role"] == "user"
+    assert isinstance(user_msg["content"], list)
+    sentinels = [
+        c.get("image_url", {}).get("url")
+        for c in user_msg["content"]
+        if c.get("type") == "image_url"
+    ]
+    assert AUDIO_SENTINEL in sentinels
+    text_blocks = " ".join(
+        c.get("text", "") for c in user_msg["content"] if c.get("type") == "text"
+    )
+    assert "Scene_1" in text_blocks and "Shot1" in text_blocks
+
+
+@pytest.mark.asyncio
+async def test_run_np_voice_parse_error_propagates() -> None:
+    """模型吐非法 JSON → NPParseError 上抛（复用文本解析器 → 4.I 失败分类对语音同样生效）。"""
+    from backend.pipelines.np_note import run_np_voice  # noqa: PLC0415
+
+    fake = _FakeVoiceLLM("这不是 JSON")
+    with pytest.raises(NPParseError):
+        await run_np_voice(_voice_input(), b"x", fake)  # type: ignore[arg-type]
+
+
+def test_voice_system_prompt_mentions_listening() -> None:
+    """语音 system prompt 须提示模型「听音频」——否则模型不知道要转写语音。"""
+    from backend.pipelines.np_note import _build_voice_system_prompt  # noqa: PLC0415
+
+    prompt = _build_voice_system_prompt()
+    assert "音频" in prompt or "语音" in prompt
+    assert "take_id" in prompt
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_real_voice_np_smoke() -> None:
+    """4.J-5 真模型语音 NP smoke（默认 skip）。
+
+    走产品化路径：run_np_voice → LLMService.infer_voice → 多模态 GemmaClient → 真 Gemma 4 + mmproj。
+    需 SOUNDSPEED_SMOKE_VOICE_WAV 指向一段中文语音 WAV，且 mmproj 可解析（本地/cache）。
+    手测实证（2026-06-05）：「第三条结尾很好可以用」+ Scene_1/Shot1/take101-103 →
+    {take_id:103, keeper, '结尾很好，可以用'}，16k/48k 一致，RSS ~6.7GB。
+    """
+    import os  # noqa: PLC0415
+
+    wav_path = os.environ.get("SOUNDSPEED_SMOKE_VOICE_WAV")
+    if not wav_path or not os.path.exists(wav_path):
+        pytest.skip("SOUNDSPEED_SMOKE_VOICE_WAV 未设置或文件不存在，跳过语音 smoke")
+
+    from backend.llm.service import (  # noqa: PLC0415
+        _reset_service,
+        get_service,
+        resolve_mmproj_path,
+    )
+    from backend.pipelines.np_note import run_np_voice  # noqa: PLC0415
+
+    if resolve_mmproj_path(download=False) is None:
+        pytest.skip("mmproj 未缓存，跳过语音 smoke")
+
+    inp = NPInput(
+        raw_text="",
+        parsed_category="note",
+        current_scene_id=5,
+        current_take_id=None,
+        take_context=[
+            {"take_id": 103, "scene_code": "Scene_1", "shot": "Shot1", "take_number": 3, "summary": ""}
+        ],
+        ts=1.0,
+        current_scene_code="Scene_1",
+        current_shot="Shot1",
+        current_take_number=None,
+    )
+
+    _reset_service()
+    svc = get_service()
+    try:
+        with open(wav_path, "rb") as f:
+            audio = f.read()
+        out = await run_np_voice(inp, audio, svc, timeout=120.0)  # type: ignore[arg-type]
+        assert isinstance(out.take_id, int)
+        assert out.category in ("note", "issue", "keeper", "ng", "hold")
+        assert isinstance(out.content, str) and out.content.strip()
+    finally:
+        await svc.aclose()
+        _reset_service()

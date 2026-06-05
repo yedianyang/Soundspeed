@@ -197,3 +197,126 @@ async def test_run_np_async_timeout_emits_note_failed(tmp_dal: DAL) -> None:
     assert len(failed) == 1
     assert failed[0].reason == "timeout"
     assert failed[0].client_id is None
+
+
+# ---------------------------------------------------------------------------
+# 语音 NP orchestrator 链路（4.J-4）：run_np_voice_async —— 透传 audio + 转写正文存 raw_text +
+# 共用 4.I 失败兜底。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_np_voice_async_processed_threads_audio_and_stores_transcript(
+    tmp_dal: DAL,
+) -> None:
+    """run_np_voice_async：audio 透传给 voice_runner，note.processed 带 client_id，
+    raw_text 存模型转写正文（§8，语音无原始文字）。"""
+    scene_id = tmp_dal.create_scene("scene_voice1")
+    session = SessionState()
+    session.activate_scene(scene_id)
+
+    stub_voice = AsyncMock()
+    orch = create_orchestrator(
+        tmp_dal, session, llm_service=MagicMock(), voice_runner=stub_voice
+    )
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
+    assert session.take_id is not None
+    stub_voice.return_value = NPOutput(
+        take_id=session.take_id, category="keeper", content="结尾好可以用"
+    )
+
+    captured: list[NoteProcessedPayload] = []
+    orch.subscribe(NOTE_PROCESSED, lambda p: captured.append(p))  # type: ignore[arg-type]
+
+    orch.run_np_voice_async(audio=b"WAVBYTES", ts=222.0, client_id="cid-voice")
+    assert orch._np_task is not None  # type: ignore[attr-defined]
+    await orch._np_task  # type: ignore[attr-defined]
+
+    assert len(captured) == 1
+    assert captured[0].client_id == "cid-voice"
+    assert captured[0].take_id == session.take_id
+    assert captured[0].content == "结尾好可以用"
+    # voice_runner 第二位参数是 audio 字节
+    assert stub_voice.call_args.args[1] == b"WAVBYTES"
+    # raw_text 存模型转写正文（语音路径无原始文字，§8）
+    notes = tmp_dal.list_notes(session.take_id)
+    assert notes[-1].payload["raw_text"] == "结尾好可以用"
+
+
+@pytest.mark.asyncio
+async def test_run_np_voice_async_parse_error_emits_note_failed(tmp_dal: DAL) -> None:
+    """voice_runner 抛 NPParseError → note.failed(parse_error)，复用文本失败分类。"""
+    scene_id = tmp_dal.create_scene("scene_voice2")
+    session = SessionState()
+    session.activate_scene(scene_id)
+
+    stub_voice = AsyncMock(side_effect=NPParseError("bad json from audio"))
+    orch = create_orchestrator(
+        tmp_dal, session, llm_service=MagicMock(), voice_runner=stub_voice
+    )
+    failed: list[NoteFailedPayload] = []
+    orch.subscribe(NOTE_FAILED, lambda p: failed.append(p))  # type: ignore[arg-type]
+
+    orch.run_np_voice_async(audio=b"x", ts=3.0, client_id="cid-vpe")
+    assert orch._np_task is not None  # type: ignore[attr-defined]
+    await orch._np_task  # type: ignore[attr-defined]
+
+    assert len(failed) == 1
+    assert failed[0].reason == "parse_error"
+    assert failed[0].client_id == "cid-vpe"
+
+
+@pytest.mark.asyncio
+async def test_run_np_voice_async_take_not_found_emits_note_failed(tmp_dal: DAL) -> None:
+    """模型归到不存在 take_id → insert_note 撞 FK → note.failed(take_not_found)。"""
+    scene_id = tmp_dal.create_scene("scene_voice3")
+    session = SessionState()
+    session.activate_scene(scene_id)
+
+    stub_voice = AsyncMock(
+        return_value=NPOutput(take_id=999999, category="note", content="听到的内容")
+    )
+    orch = create_orchestrator(
+        tmp_dal, session, llm_service=MagicMock(), voice_runner=stub_voice
+    )
+    failed: list[NoteFailedPayload] = []
+    processed: list[NoteProcessedPayload] = []
+    orch.subscribe(NOTE_FAILED, lambda p: failed.append(p))  # type: ignore[arg-type]
+    orch.subscribe(NOTE_PROCESSED, lambda p: processed.append(p))  # type: ignore[arg-type]
+
+    orch.run_np_voice_async(audio=b"x", ts=4.0, client_id="cid-vnf")
+    assert orch._np_task is not None  # type: ignore[attr-defined]
+    await orch._np_task  # type: ignore[attr-defined]
+
+    assert len(failed) == 1
+    assert failed[0].reason == "take_not_found"
+    assert len(processed) == 0
+
+
+@pytest.mark.asyncio
+async def test_run_np_voice_async_model_unavailable_emits_note_failed(tmp_dal: DAL) -> None:
+    """mmproj 不可用 → 纯文本 client → 音频推理 RuntimeError → note.failed(model_unavailable)。
+
+    安全网：setup 失败（无 handler 的 RuntimeError / mtmd 初始化 ValueError / bytes TypeError）
+    不能命中 _finalize_np 的 `else: raise` 静默退出（否则前端 pending 永久卡，复活 4.I 的 bug）。
+    """
+    scene_id = tmp_dal.create_scene("scene_voice4")
+    session = SessionState()
+    session.activate_scene(scene_id)
+
+    stub_voice = AsyncMock(
+        side_effect=RuntimeError("纯文本 GemmaClient 不支持音频推理（未挂多模态 handler）")
+    )
+    orch = create_orchestrator(
+        tmp_dal, session, llm_service=MagicMock(), voice_runner=stub_voice
+    )
+    failed: list[NoteFailedPayload] = []
+    orch.subscribe(NOTE_FAILED, lambda p: failed.append(p))  # type: ignore[arg-type]
+
+    orch.run_np_voice_async(audio=b"x", ts=5.0, client_id="cid-mu")
+    assert orch._np_task is not None  # type: ignore[attr-defined]
+    await orch._np_task  # type: ignore[attr-defined]
+
+    assert len(failed) == 1
+    assert failed[0].reason == "model_unavailable"
+    assert failed[0].client_id == "cid-mu"

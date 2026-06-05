@@ -47,15 +47,17 @@ logger = logging.getLogger(__name__)
 class Dependencies:
     """Orchestrator 可选外部依赖，用于 1.H take handler。
 
-    llm_service: LLMService 实例，注入到 l2_runner / np_runner。
+    llm_service: LLMService 实例，注入到 l2_runner / np_runner / voice_runner。
     l2_runner: 异步可调用，签名 (L2Input, LLMService) -> Awaitable[L2Output]。
     np_runner: 异步可调用，签名 (NPInput, LLMService) -> Awaitable[NPOutput]。
+    voice_runner: 异步可调用，签名 (NPInput, bytes, LLMService) -> Awaitable[NPOutput]（语音 NP，4.J）。
     diarization_backfill: DiarizationBackfill 实例（可选）；提供时 L2 gate 到回填完成后。
     """
 
     llm_service: Any = field(default=None)
     l2_runner: Any = field(default=None)
     np_runner: Any = field(default=None)
+    voice_runner: Any = field(default=None)
     diarization_backfill: Any = field(default=None)
 
 
@@ -70,6 +72,7 @@ class Orchestrator:
         llm_service: Any = None,
         l2_runner: Any = None,
         np_runner: Any = None,
+        voice_runner: Any = None,
         diarization_backfill: Any = None,
     ) -> None:
         self.dal = dal
@@ -78,6 +81,7 @@ class Orchestrator:
             llm_service=llm_service,
             l2_runner=l2_runner,
             np_runner=np_runner,
+            voice_runner=voice_runner,
             diarization_backfill=diarization_backfill,
         )
         self._handlers: dict[str, list[Handler]] = {}
@@ -492,7 +496,7 @@ class Orchestrator:
     def run_np_async(
         self, raw_text: str, parsed_category: str, ts: float, client_id: str | None = None
     ) -> None:
-        """fire-and-forget NP Pipeline：归置 note 到正确的 take。
+        """fire-and-forget 文本 NP Pipeline：归置 note 到正确的 take。
 
         在 event loop 内调用，创建后台 Task + done callback。
         与 L2 流程对齐：runner 由 create_orchestrator 注入，callback 处理错误与 idle。
@@ -501,50 +505,56 @@ class Orchestrator:
         loop = asyncio.get_running_loop()
         task = loop.create_task(self._run_np_async(raw_text, parsed_category, ts, client_id))
         task.add_done_callback(
-            lambda t: self._np_done_callback(t, raw_text=raw_text, parsed_category=parsed_category, ts=ts)
+            lambda t: self._np_done_callback(t, label=f"text={raw_text[:80]!r}")
         )
         self._np_task = task
 
-    async def _run_np_async(
-        self, raw_text: str, parsed_category: str, ts: float, client_id: str | None = None
+    def run_np_voice_async(
+        self, audio: bytes, ts: float, client_id: str | None = None
     ) -> None:
-        """后台异步 NP Pipeline：构建上下文 → LLM 归置 → 写库 → WS 推送。
+        """fire-and-forget 语音 NP Pipeline（4.J）：浏览器麦 WAV → 多模态 Gemma 归置 → 写库 → WS。
+
+        与 run_np_async 对称：音频经 voice_runner（带 audio 字节）进同一单实例（_lock+priority 串行）。
+        client_id 透传链与文本一致。
+        """
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self._run_np_voice_async(audio, ts, client_id))
+        task.add_done_callback(
+            lambda t: self._np_done_callback(t, label=f"audio({len(audio)}B)")
+        )
+        self._np_task = task
+
+    async def _emit_np_status_preamble(self, svc: Any) -> None:
+        """NP 模型状态前导（文本/语音共用）。
 
         llm.status 发射顺序（前端 chip 状态，与 L2 对齐）：
-          模型不在本地 → downloading → ensure_model_ready → loading/running → idle
-          模型已在本地 → loading/running → idle
+          模型不在本地 → downloading → ensure_model_ready → loading/running
+          模型已在本地 → loading/running
         """
-        svc = self._deps.llm_service
-        np_runner = self._deps.np_runner
-
-        if svc is None or np_runner is None:
-            logger.warning("NP Pipeline: llm_service or np_runner is None, cannot run")
-            return
-
-        # 模型缺失时：发 downloading + await ensure_model_ready
         if not getattr(svc, "model_present", True):
             self.publish(
                 LLM_STATUS,
                 LlmStatusPayload(state="downloading", task_type="note_struct", take_id=None),
             )
             await svc.ensure_model_ready()
-
-        # 发射 llm.status：loading 或 running
-        _state = (
-            "loading"
-            if not getattr(svc, "model_loaded", True)
-            else "running"
-        )
+        _state = "loading" if not getattr(svc, "model_loaded", True) else "running"
         self.publish(
             LLM_STATUS,
             LlmStatusPayload(state=_state, task_type="note_struct", take_id=None),
         )
 
-        # 构建 take_context（4.H：带完整 场-镜-次）
+    def _build_np_input(self, raw_text: str, parsed_category: str, ts: float) -> Any:
+        """组装 NPInput（4.H 带完整 场-镜-次；文本/语音共用）。
+
+        语音路径无文字：raw_text 传 ''、parsed_category 传占位 'note'（voice runner 不读这两项，
+        正文/类别由模型从音频听+判）。
+        """
+        from backend.pipelines.np_note import NPInput  # noqa: PLC0415
+
         scene_id = self.session.scene_id
         current_take_id = self.session.take_id if self.session.take_active else None
 
-        # scene_id → scene_code 映射（一次查询，替代旧版循环内 N+1 的 list_scenes）
+        # scene_id → scene_code 映射（一次查询，替代循环内 N+1 的 list_scenes）
         scene_code_by_id = {
             s.get("scene_id"): s.get("scene_code", "") for s in self.dal.list_scenes()
         }
@@ -565,9 +575,7 @@ class Orchestrator:
                     "summary": summary,
                 })
 
-        from backend.pipelines.np_note import NPInput, NPParseError
-
-        input_data = NPInput(
+        return NPInput(
             raw_text=raw_text,
             parsed_category=parsed_category,
             current_scene_id=scene_id,
@@ -583,15 +591,30 @@ class Orchestrator:
             ),
         )
 
-        # 4.I：失败兜底。机制可检测的三类失败 → 发 note.failed（带 client_id），前端把对应
-        # pending 转失败态而非永久卡死；未知异常仍上抛交 _np_done_callback 记 WARNING + idle。
+    async def _finalize_np(
+        self,
+        run_awaitable: Any,
+        *,
+        ts: float,
+        client_id: str | None,
+        raw_text_override: str | None,
+    ) -> None:
+        """await runner → insert_note → publish（文本/语音共用，含 4.I 失败兜底）。
+
+        raw_text_override：文本路径传原始文字；语音路径传 None → 存模型转写正文（§8）。
+        机制可检测的三类失败（parse/timeout/FK）→ 发 note.failed（带 client_id），前端转失败态；
+        未知异常上抛交 _np_done_callback 记 WARNING + idle。
+        """
+        from backend.pipelines.np_note import NPParseError  # noqa: PLC0415
+
         try:
-            output = await np_runner(input_data, svc)
+            output = await run_awaitable
+            stored_raw = raw_text_override if raw_text_override is not None else output.content
             event_id = self.dal.insert_note(
                 take_id=output.take_id,
                 category=output.category,
                 content=output.content,
-                raw_text=raw_text,
+                raw_text=stored_raw,
                 ts=ts,
             )
         except Exception as exc:
@@ -600,11 +623,16 @@ class Orchestrator:
             elif isinstance(exc, asyncio.TimeoutError):
                 reason = "timeout"
             elif isinstance(exc, sqlite3.IntegrityError):
-                reason = "take_not_found"  # LLM 归到不存在的 take_id，insert_note 撞 FK
+                reason = "take_not_found"  # 归到不存在的 take_id，insert_note 撞 FK
+            elif isinstance(exc, (RuntimeError, ValueError, TypeError)):
+                # setup 失败：多模态 client 未就绪（无 handler 的 RuntimeError、mtmd 初始化 ValueError、
+                # audio 非 bytes 的 TypeError）。常见于 mmproj 缺失/下载失败的部署态——必须发 note.failed，
+                # 否则命中 else:raise 静默退出 → 前端 pending 永久卡（复活 4.I 的 bug）。
+                reason = "model_unavailable"
             else:
-                raise  # 未知失败：保留安全网，交 done_callback 处理
+                raise  # 真正未知失败：保留安全网，交 done_callback 处理
             logger.warning(
-                "NP Pipeline failed (%s) for text=%r: %s", reason, raw_text[:80], exc
+                "NP Pipeline failed (%s) [client_id=%s]: %s", reason, client_id, exc
             )
             self.publish(
                 NOTE_FAILED,
@@ -612,7 +640,6 @@ class Orchestrator:
             )
             return
 
-        # WS 推送（成功路径）
         self.publish(
             NOTE_PROCESSED,
             NoteProcessedPayload(
@@ -625,14 +652,52 @@ class Orchestrator:
             ),
         )
 
-    def _np_done_callback(
-        self, task: Any, *, raw_text: str, parsed_category: str, ts: float
+    async def _run_np_async(
+        self, raw_text: str, parsed_category: str, ts: float, client_id: str | None = None
     ) -> None:
-        """NP task done callback：发 idle + 失败时 log warning。
+        """后台异步文本 NP：构建上下文 → LLM 归置 → 写库 → WS 推送。"""
+        svc = self._deps.llm_service
+        np_runner = self._deps.np_runner
+        if svc is None or np_runner is None:
+            logger.warning("NP Pipeline: llm_service or np_runner is None, cannot run")
+            return
+
+        await self._emit_np_status_preamble(svc)
+        input_data = self._build_np_input(raw_text, parsed_category, ts)
+        await self._finalize_np(
+            np_runner(input_data, svc),
+            ts=ts,
+            client_id=client_id,
+            raw_text_override=raw_text,
+        )
+
+    async def _run_np_voice_async(
+        self, audio: bytes, ts: float, client_id: str | None = None
+    ) -> None:
+        """后台异步语音 NP（4.J）：场镜次上下文 + 音频 → 多模态 Gemma 归置 → 写库 → WS 推送。"""
+        svc = self._deps.llm_service
+        voice_runner = self._deps.voice_runner
+        if svc is None or voice_runner is None:
+            logger.warning("Voice NP Pipeline: llm_service or voice_runner is None, cannot run")
+            return
+
+        await self._emit_np_status_preamble(svc)
+        # 语音无文字：raw_text='' 占位、parsed_category='note' 占位（voice runner 不读）。
+        input_data = self._build_np_input("", "note", ts)
+        # raw_text_override=None → 存模型转写正文（§8，语音无原始文字）。
+        await self._finalize_np(
+            voice_runner(input_data, audio, svc),
+            ts=ts,
+            client_id=client_id,
+            raw_text_override=None,
+        )
+
+    def _np_done_callback(self, task: Any, *, label: str) -> None:
+        """NP task done callback（文本/语音共用）：发 idle + 未知失败时 log warning。
 
         与 _l2_done_callback 对齐：
-          - 成功：_run_np_async 已推送 NOTE_PROCESSED，callback 只发 idle。
-          - 失败：记 WARNING + 发 idle。note 丢失（无降级写），日志留痕。
+          - 成功 / 4.I 已兜底失败：_finalize_np 已推送 NOTE_PROCESSED/NOTE_FAILED，callback 只发 idle。
+          - 未知异常（_finalize_np 上抛）：记 WARNING + 发 idle。
           - 取消：只发 idle。
         """
         self.publish(
@@ -644,7 +709,7 @@ class Orchestrator:
         exc = task.exception()
         if exc is None:
             return
-        logger.warning("NP Pipeline failed for text=%r: %s", raw_text[:80], exc)
+        logger.warning("NP Pipeline failed for %s: %s", label, exc)
 
 
 def create_orchestrator(
@@ -654,6 +719,7 @@ def create_orchestrator(
     llm_service: Any = None,
     l2_runner: Any = None,
     np_runner: Any = None,
+    voice_runner: Any = None,
     diarization_backfill: Any = None,
 ) -> Orchestrator:
     """模块级工厂函数，供生产代码与测试注入依赖。
@@ -662,6 +728,7 @@ def create_orchestrator(
     llm_service 不为 None 时自动绑定默认 runner：
       - l2_runner 未显式传 → 绑定 run_l2_take
       - np_runner 未显式传 → 绑定 run_np_note
+      - voice_runner 未显式传 → 绑定 run_np_voice（语音 NP，4.J）
     diarization_backfill 不为 None 时，take.end 后先跑回填链，L2 gate 到回填完成后。
     """
     if llm_service is not None:
@@ -671,10 +738,14 @@ def create_orchestrator(
         if np_runner is None:
             from backend.pipelines.np_note import run_np_note
             np_runner = run_np_note
+        if voice_runner is None:
+            from backend.pipelines.np_note import run_np_voice
+            voice_runner = run_np_voice
     return Orchestrator(
         dal, session,
         llm_service=llm_service,
         l2_runner=l2_runner,
         np_runner=np_runner,
+        voice_runner=voice_runner,
         diarization_backfill=diarization_backfill,
     )
