@@ -29,6 +29,7 @@ import {
   takeQueryKey,
   usePatchTake,
   useScenes,
+  useSpeakers,
 } from "@/lib/api"
 import { useSessionStore } from "@/store/session"
 import { ScriptDiffView } from "./ScriptDiffView"
@@ -300,14 +301,18 @@ function TakeDetail({
   // 纠正失败的 segment（轻量错误反馈，无 toast 库）。
   const [failedSegId, setFailedSegId] = useState<number | null>(null)
 
-  // 候选 = 本 take 出现过的 distinct speaker（含当前条自身）+ null（未知）。
+  // 候选 = 全部已注册演员 ∪ 本 take 现有标签（含匿名说话人N/已纠正）+ null（未知）。
+  // 收录全部注册演员是关键：diarization 认错时（含全塌成一个人），才能改成「本 take
+  // 未出现过」的其他注册演员，而不只是已出现的那几个。
+  const { data: registeredSpeakers } = useSpeakers()
   const candidates = useMemo<(string | null)[]>(() => {
-    const ids = new Set<string>()
+    const names = new Set<string>()
+    for (const s of registeredSpeakers ?? []) names.add(s.display_name)
     for (const seg of data?.segments ?? []) {
-      if (seg.speaker) ids.add(seg.speaker)
+      if (seg.speaker) names.add(seg.speaker)
     }
-    return [...ids, null]
-  }, [data])
+    return [...names, null]
+  }, [registeredSpeakers, data])
 
   if (isLoading) {
     return <p className="text-sm text-muted-foreground">加载中…</p>
