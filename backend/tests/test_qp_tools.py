@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 
+from backend.db.dal import DAL
 from backend.llm.tools.transcript import (
     build_count_takes_tool,
     build_get_scene_info_tool,
@@ -10,6 +11,11 @@ from backend.llm.tools.transcript import (
     build_qp_tools,
     build_query_database_tool,
     build_search_script_lines_tool,
+    count_takes_executor,
+    get_scene_info_executor,
+    list_characters_executor,
+    query_database_executor,
+    search_script_lines_executor,
 )
 
 _BUILDERS = [
@@ -76,3 +82,58 @@ def test_count_takes_status_has_enum() -> None:
     props = build_count_takes_tool()["function"]["parameters"]["properties"]
     assert "enum" in props["status"], "status 参数缺少 enum 约束"
     assert set(props["status"]["enum"]) == {"keep", "ng", "pass", "tbd"}
+
+
+# ---------------------------------------------------------------------------
+# L1 executor 测试（Task 5）
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def seeded_dal(tmp_path) -> DAL:
+    d = DAL(tmp_path / "qp_exec.db")
+    sid = d.get_or_create_scene("Scene_7", int_ext="室外", time_of_day="夜", location="天台")[0]
+    d.start_take(sid, "", 1000.0)
+    d.start_take(sid, "", 1001.0)
+    script_id = d.insert_script(sid, "raw")
+    d.insert_script_line(script_id, 1, "阿强", "我们走吧。")
+    d.insert_script_line(script_id, 2, "小美", "再等等。")
+    yield d
+    d.close()
+
+
+def test_count_takes_executor(seeded_dal: DAL) -> None:
+    res = count_takes_executor({"scene_ref": "7"}, seeded_dal)
+    assert res["count"] == 2
+
+
+def test_count_takes_executor_missing_scene(seeded_dal: DAL) -> None:
+    res = count_takes_executor({"scene_ref": "999"}, seeded_dal)
+    assert "error" in res  # 找不到老实说没有（spec §7.3）
+
+
+def test_get_scene_info_executor(seeded_dal: DAL) -> None:
+    res = get_scene_info_executor({"scene_ref": "Scene_7"}, seeded_dal)
+    assert res["location"] == "天台"
+    assert res["character_count"] == 2
+
+
+def test_list_characters_executor(seeded_dal: DAL) -> None:
+    res = list_characters_executor({"scene_ref": "7"}, seeded_dal)
+    assert sorted(res["characters"]) == ["小美", "阿强"]
+
+
+def test_search_script_lines_executor(seeded_dal: DAL) -> None:
+    res = search_script_lines_executor({"query": "我们走吧"}, seeded_dal)
+    assert res["count"] >= 1
+    assert any("走吧" in m["text"] for m in res["matches"])
+
+
+def test_query_database_executor(seeded_dal: DAL) -> None:
+    res = query_database_executor({"sql": "SELECT COUNT(*) AS n FROM scenes;"}, seeded_dal)
+    assert res["rows"][0]["n"] == 1
+
+
+def test_query_database_executor_blocks_write(seeded_dal: DAL) -> None:
+    res = query_database_executor({"sql": "DELETE FROM scenes;"}, seeded_dal)
+    assert "error" in res

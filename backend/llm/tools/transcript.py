@@ -7,6 +7,11 @@ DAL 仅 TYPE_CHECKING——避开 config→tools→pipeline→config 循环（D-
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from backend.db.dal import DAL
+
 
 def build_count_takes_tool() -> dict:
     """构造 count_takes OpenAI 风格 tool dict。
@@ -157,3 +162,58 @@ def build_qp_tools() -> list[dict]:
         build_search_script_lines_tool(),
         build_query_database_tool(),
     ]
+
+
+# ---------------------------------------------------------------------------
+# executor（spec §5.3：executor(args, dal) -> dict；DAL 读全走只读连接，D-QP-12）
+# ---------------------------------------------------------------------------
+
+_SCENE_NOT_FOUND = "找不到场次 {ref!r}，数据库里没有这一场（不要用相近场次顶替）。"
+
+
+def count_takes_executor(args: dict, dal: "DAL") -> dict:
+    ref = args.get("scene_ref", "")
+    status = args.get("status")
+    scene_id = dal.resolve_scene_id(ref)
+    if scene_id is None:
+        return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
+    return {"scene_ref": ref, "status": status, "count": dal.count_takes(scene_id, status=status)}
+
+
+def get_scene_info_executor(args: dict, dal: "DAL") -> dict:
+    ref = args.get("scene_ref", "")
+    scene_id = dal.resolve_scene_id(ref)
+    if scene_id is None:
+        return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
+    info = dal.get_scene_info(scene_id)
+    if info is None:
+        return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
+    return info
+
+
+def list_characters_executor(args: dict, dal: "DAL") -> dict:
+    ref = args.get("scene_ref", "")
+    scene_id = dal.resolve_scene_id(ref)
+    if scene_id is None:
+        return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
+    chars = dal.list_characters(scene_id)
+    return {"scene_ref": ref, "characters": chars, "count": len(chars)}
+
+
+def search_script_lines_executor(args: dict, dal: "DAL") -> dict:
+    query = args.get("query", "")
+    ref = args.get("scene_ref")
+    scene_id = None
+    if ref:
+        scene_id = dal.resolve_scene_id(ref)
+        if scene_id is None:
+            return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
+    matches = dal.search_script_lines(query, scene_id=scene_id)
+    return {"query": query, "matches": matches, "count": len(matches)}
+
+
+def query_database_executor(args: dict, dal: "DAL") -> dict:
+    sql = args.get("sql", "")
+    if not sql.strip():
+        return {"error": "sql 为空"}
+    return dal.query_readonly(sql)
