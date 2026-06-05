@@ -318,7 +318,15 @@ async def enroll_start(
     dal = _dal(request)
     if dal.get_speaker(speaker_id) is None:
         raise HTTPException(status_code=404, detail="说话人不存在")
+    engine = getattr(request.app.state, "diarization_engine", None)
+    if engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail="diarization 引擎未启用（未设置 SOUNDSPEED_HF_TOKEN）",
+        )
     rec = _enroll_recorder(request)
+    # 注意：录音器是单例、不绑定 speaker_id —— start 与 stop 必须配对到同一个 speaker
+    # （前端用 per-open 的 keyed 弹窗保证），否则 stop 会把这段音频提取的声纹写到另一个演员名下。
     try:
         rec.start()
     except CaptureActiveError:

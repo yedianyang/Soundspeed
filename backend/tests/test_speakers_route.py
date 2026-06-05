@@ -238,6 +238,15 @@ def test_enroll_start_503_without_recorder(tmp_dal: DAL, monkeypatch):
         assert r.status_code == 503
 
 
+def test_enroll_start_503_without_engine(tmp_dal: DAL, monkeypatch):
+    rec = _FakeRecorder()
+    with _client(tmp_dal, monkeypatch, engine=None, recorder=rec) as c:
+        sid = c.post("/api/v1/speakers", json={"display_name": "张三"}, headers=_HEADERS).json()["speaker_id"]
+        r = c.post(f"/api/v1/speakers/{sid}/enroll/start", headers=_HEADERS)
+        assert r.status_code == 503
+        assert rec.events == []  # 无引擎不开录音（fail fast，不占设备）
+
+
 def test_enroll_start_409_when_already_running(tmp_dal: DAL, monkeypatch):
     rec = _FakeRecorder()
     with _client(tmp_dal, monkeypatch, engine=_FakeEngine(), recorder=rec) as c:
