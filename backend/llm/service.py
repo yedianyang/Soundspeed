@@ -345,13 +345,23 @@ class LLMService:
                     if not fut.done():
                         fut.set_result(tool_calls[0])
                 else:
-                    # content 路径（原有逻辑，不变）
+                    # content 路径
                     try:
-                        text: str = result_dict["choices"][0]["message"]["content"]
+                        choice = result_dict["choices"][0]
+                        # content 可能为 None（如下方护栏处理的 forced tool_choice 误用）。
+                        text: str | None = choice["message"]["content"]
                     except (KeyError, IndexError, TypeError) as e:
                         raise LookupError(
                             f"client 返回 dict 格式异常，缺少 choices[0]['message']['content']: {e}"
                         ) from e
+                    # 护栏：对配了强制 tool_choice 的 task 误走 infer（content 路径）时，
+                    # content=None 且 finish_reason="tool_calls"，旧逻辑会静默 set_result(None)
+                    # 让下游静默失败。这里明确报错，引导改用 infer_tool 取 tool_calls。
+                    if text is None and choice.get("finish_reason") == "tool_calls":
+                        raise LookupError(
+                            "content 为 None 且 finish_reason='tool_calls'：该 task 配置了"
+                            "强制 tool_choice，应调用 infer_tool 而非 infer"
+                        )
                     if not fut.done():
                         fut.set_result(text)
             except asyncio.CancelledError:

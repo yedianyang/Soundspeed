@@ -9,15 +9,25 @@ TASK_CONFIG 的 system 字段仅作参考模板，service 层不自动注入。
 tools / tool_choice 字段（Tier 1 function calling）：
   service 层会把不在 _META_KEYS 的字段透传给 client.create_chat_completion。
   tools 和 tool_choice 故意不加入 _META_KEYS，由 infer_tool 透传。
-  build_l2_tool 在函数级 lazy import，避免 config → tools → l2_take → config 循环。
+  l2_take 的 tools 取自 build_l2_tool()（backend/llm/tools/script.py），该构造器
+  只依赖中性的 l2_constants（不 import config / l2_take），无循环 import 风险，
+  故此处 module 级直接 import。
 """
 
+from backend.llm.tools.script import build_l2_tool
 
-def _build_l2_task_config() -> dict:
-    """构造 l2_take 配置，含 tools/tool_choice（函数级 lazy import 避免循环）。"""
-    from backend.llm.tools.script import build_l2_tool  # noqa: PLC0415
-
-    return {
+# task_type -> 配置字典
+# 字段：max_tokens, temperature, priority, system, _reserved（可选）；
+# l2_take 额外含 tools/tool_choice（Tier 1 forced function calling）。
+TASK_CONFIG: dict[str, dict] = {
+    "query_session": {
+        "max_tokens": 1024,
+        "temperature": 0.3,
+        "priority": 1,
+        # TODO(1.G): 接入时按实际场记查询需求细化 system prompt
+        "system": "你是一个场记查询助手，帮助导演和录音师快速查找场记信息。",
+    },
+    "l2_take": {
         # v0.2 schema 含 corrected_segments，实测短 take 输出 ~2000 token；
         # 长 take（剧本 100+ 行 / 5+ 分钟转录）需要 4096 上限保底。
         # 配合 n_ctx=8192（client.py），input ~3000 + output 4096 仍有余量。
@@ -56,21 +66,7 @@ def _build_l2_task_config() -> dict:
             "type": "function",
             "function": {"name": "report_script_analysis"},
         },
-    }
-
-
-# task_type -> 配置字典
-# 字段：max_tokens, temperature, priority, system, _reserved（可选）
-# l2_take 含 tools/tool_choice，由 _build_l2_task_config() 在首次访问时构造。
-TASK_CONFIG: dict[str, dict] = {
-    "query_session": {
-        "max_tokens": 1024,
-        "temperature": 0.3,
-        "priority": 1,
-        # TODO(1.G): 接入时按实际场记查询需求细化 system prompt
-        "system": "你是一个场记查询助手，帮助导演和录音师快速查找场记信息。",
     },
-    "l2_take": _build_l2_task_config(),
     "script_parse": {
         "max_tokens": 2048,
         "temperature": 0.1,

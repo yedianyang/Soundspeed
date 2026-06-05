@@ -2,20 +2,18 @@
 
 build_l2_tool() 构造符合 OpenAI function calling 格式的 tool dict。
 
-diff_type enum 值从 backend.pipelines.l2_take._VALID_DIFF_TYPES 函数级 lazy import，
-保证与 pipeline 校验逻辑同源（spec §4.1 约束）。
+diff_type enum 值取自 backend.pipelines.l2_constants._VALID_DIFF_TYPES（module 级 import），
+与 l2_take.py 同源，保证 schema 与 pipeline 校验逻辑一致（spec §4.1 约束）。
 
-循环 import 规避策略：
-  config.py  → module 级不 import script.py；_build_l2_task_config() 函数级 lazy import build_l2_tool
-  script.py  → build_l2_tool() 函数级 lazy import _VALID_DIFF_TYPES（不在 module 级）
-  l2_take.py → 不导入 script.py / config.py（TYPE_CHECKING 下除外）
-
-整个链路无 module 级循环，函数调用时所有模块均已初始化完毕。
+无循环 import：本模块只依赖中性的 l2_constants（不 import config / l2_take），
+config.py 反过来 module 级 import 本模块的 build_l2_tool，依赖单向无环。
+（enum 抽到 l2_constants 正是为此——若留在 l2_take，本模块 import l2_take 会与
+ config→tools、l2_take→config 形成环。）
 """
 
 from __future__ import annotations
 
-# l2_constants 是中性模块，不依赖 config，可在 module 级安全 import。
+# l2_constants 是中性叶子模块（不 import config / l2_take），可在 module 级安全 import。
 from backend.pipelines.l2_constants import _VALID_DIFF_TYPES
 
 

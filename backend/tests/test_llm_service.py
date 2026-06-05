@@ -342,6 +342,67 @@ async def test_client_exception_propagates():
 
 
 # ---------------------------------------------------------------------------
+# 护栏：forced tool_choice 的 task 误走 content 路径（infer 而非 infer_tool）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_infer_content_none_with_tool_calls_finish_raises():
+    """content=None 且 finish_reason="tool_calls" 时 infer 抛 LookupError，不静默返回 None。
+
+    模拟「配了强制 tool_choice 的 task 被误用 infer（content 路径）」：
+    旧逻辑会 set_result(None) 让下游静默失败，护栏改为明确报错引导改用 infer_tool。
+    """
+
+    class _ForcedToolStubClient:
+        def create_chat_completion(self, messages: list[dict], **kwargs: object) -> dict:
+            return {
+                "choices": [
+                    {
+                        "message": {"content": None, "tool_calls": [{"id": "x"}]},
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+
+    _reset_service()
+    svc = get_service()
+    svc._client = _ForcedToolStubClient()  # type: ignore[assignment]
+
+    with pytest.raises(LookupError, match="tool_choice"):
+        await svc.infer(
+            messages=[{"role": "user", "content": "hi"}],
+            task_type="l2_take",
+        )
+
+    _reset_service()
+
+
+@pytest.mark.asyncio
+async def test_infer_content_none_non_tool_finish_does_not_raise():
+    """护栏精确性：content=None 但 finish_reason 非 tool_calls 时不触发，保持旧行为（返回 None）。
+
+    护栏只针对 forced tool_choice 误用，不误伤其它 content=None 的边角情况。
+    """
+
+    class _NoneContentStubClient:
+        def create_chat_completion(self, messages: list[dict], **kwargs: object) -> dict:
+            return {"choices": [{"message": {"content": None}, "finish_reason": "stop"}]}
+
+    _reset_service()
+    svc = get_service()
+    svc._client = _NoneContentStubClient()  # type: ignore[assignment]
+
+    result = await svc.infer(
+        messages=[{"role": "user", "content": "hi"}],
+        task_type="query_session",
+    )
+    assert result is None
+
+    _reset_service()
+
+
+# ---------------------------------------------------------------------------
 # 用例 13：test_task_config_applied
 # ---------------------------------------------------------------------------
 
