@@ -1015,3 +1015,91 @@ async def test_l2_no_downloading_when_model_present(tmp_dal: DAL) -> None:
     states = [p.state for p in emitted]
     assert "downloading" not in states, f"model_present=True 不应发 downloading，实际: {states}"
     stub_svc.ensure_model_ready.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# smoke：orchestrator 端到端真模型（GEMMA_MODEL_PATH 环境变量控制）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_orchestrator_l2_real_model_end_to_end(tmp_dal: DAL) -> None:
+    """端到端真模型 smoke：真 LLMService + 真 run_l2_take + 预置转录 → script_diff 落库。
+
+    运行条件：需设置 GEMMA_MODEL_PATH 指向本地 GGUF 文件。
+    未设置时直接 skip，不影响 CI 全量套件。
+
+    验证：
+    - take.script_diff 是 dict，且含必需的三个顶层键
+    - line_matches 是 list，每条 diff_type 在合法值集合内
+    - TAKE_CHANGED 至少发 2 次，最后一次 script_diff 为 dict（非 None）
+    """
+    import os  # noqa: PLC0415
+
+    if not os.environ.get("GEMMA_MODEL_PATH"):
+        pytest.skip("GEMMA_MODEL_PATH 未设，跳过 smoke")
+
+    from backend.llm.service import LLMService  # noqa: PLC0415
+
+    svc = LLMService()
+
+    # 预置场次和剧本
+    scene_id = tmp_dal.create_scene("scene_e2e_smoke")
+    sid = tmp_dal.insert_script(scene_id, "测试剧本")
+    tmp_dal.insert_script_line(sid, 1, "警长", "你最好别插手这件事。")
+    tmp_dal.insert_script_line(sid, 2, "阿强", "我已经插手了。")
+
+    session = SessionState()
+    session.activate_scene(scene_id)
+
+    # 不传 l2_runner → create_orchestrator 自动绑定 run_l2_take
+    orch = create_orchestrator(tmp_dal, session, llm_service=svc)
+
+    # take.start
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
+    take_id = session.take_id
+    assert take_id is not None
+
+    # 预置 ch1 转录（含错别字「茶手」测纠错）
+    tmp_dal.insert_segment(take_id, ch=1, speaker=None, text="你最好别茶手这件事", start_frame=0, end_frame=2000)
+    tmp_dal.insert_segment(take_id, ch=1, speaker=None, text="我已经插手了", start_frame=2000, end_frame=4000)
+
+    received: list[TakeChangedPayload] = []
+    orch.subscribe(TAKE_CHANGED, lambda p: received.append(p))  # type: ignore[arg-type]
+
+    # take.end → 触发 _run_l2_async
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+
+    assert orch._l2_task is not None  # type: ignore[attr-defined]
+    try:
+        await orch._l2_task  # type: ignore[attr-defined]
+    finally:
+        await svc.aclose()
+
+    # --- 断言（结构性，不断言模型具体文本） ---
+
+    take = tmp_dal.get_take(take_id)
+    assert take is not None
+    assert isinstance(take.script_diff, dict), "script_diff 应是 dict"
+
+    required_keys = {"script_diff_summary", "line_matches", "corrected_segments"}
+    assert required_keys.issubset(take.script_diff), (
+        f"script_diff 缺少必需键，实际键: {set(take.script_diff)}"
+    )
+
+    assert isinstance(take.script_diff["line_matches"], list)
+
+    valid_diff_types = {"match", "missing", "substitution", "insertion"}
+    for lm in take.script_diff["line_matches"]:
+        assert lm["diff_type"] in valid_diff_types, (
+            f"非法 diff_type: {lm['diff_type']!r}"
+        )
+
+    # TAKE_CHANGED 至少发 2 次（take.end 同步 + L2 完成后）
+    assert len(received) >= 2, f"TAKE_CHANGED 应至少 2 次，实际: {len(received)}"
+
+    # 最后一次 script_diff 必须是 dict（非 None）
+    assert isinstance(received[-1].script_diff, dict), (
+        "最后一次 TAKE_CHANGED 的 script_diff 应是 dict"
+    )
