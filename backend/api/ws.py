@@ -32,6 +32,8 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from backend.core.events import VIEWER_COUNT, ViewerCountPayload
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -56,13 +58,28 @@ class ConnectionManager:
         self._loop = loop
 
     async def connect(self, ws: WebSocket) -> None:
-        """accept WS 并加入活跃集合。"""
+        """accept WS 并加入活跃集合，随后广播新的在线观看数。
+
+        先加入再广播：新连接此刻已在 _active 里，故它自己也会收到首帧 count，
+        解决前端初始值问题（无需额外 REST 拉取）。
+        """
         await ws.accept()
         self._active.add(ws)
+        self._broadcast_count()
 
     def disconnect(self, ws: WebSocket) -> None:
-        """从活跃集合移除（断开时调用，幂等）。"""
+        """从活跃集合移除（断开时调用，幂等），随后广播新的在线观看数。"""
         self._active.discard(ws)
+        self._broadcast_count()
+
+    def _broadcast_count(self) -> None:
+        """连接数变化后向全部活跃连接广播当前在线观看数（viewer.count）。
+
+        复用 broadcast：它按调用线程选投递路径，并在 loop 未设 / 已关 / 已停时安全
+        no-op。connect / disconnect 都在 loop 线程内调用（端点协程及其 finally），
+        故走 create_task 路径。断开时本连接已从 _active 移除，不会再向死连接投递。
+        """
+        self.broadcast(VIEWER_COUNT, ViewerCountPayload(count=len(self._active)))
 
     def broadcast(self, topic: str, payload: Any) -> None:
         """同步广播：把 frozen dataclass payload 序列化后投递给全部活跃连接。
