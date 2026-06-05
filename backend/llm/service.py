@@ -80,6 +80,7 @@ class _InferPayload:
     messages: list[dict]
     task_type: str
     gen_kwargs: dict
+    want_tool_call: bool = False
 
 
 class LLMService:
@@ -98,7 +99,7 @@ class LLMService:
 
     def __init__(self) -> None:
         self._queue: asyncio.PriorityQueue[
-            tuple[int, int, asyncio.Future[str], _InferPayload]
+            tuple[int, int, asyncio.Future, _InferPayload]
         ] = asyncio.PriorityQueue()
         self._lock: asyncio.Lock = asyncio.Lock()
         self._worker_task: asyncio.Task[None] | None = None
@@ -218,6 +219,65 @@ class LLMService:
         # worker 下一轮取出时 fut.cancelled() 为 True，直接跳过，节省推理资源。
         return await asyncio.wait_for(fut, timeout=timeout)
 
+    async def infer_tool(
+        self,
+        messages: list[dict],
+        task_type: str,
+        priority: int | None = None,
+        timeout: float | None = 30.0,
+    ) -> dict:
+        """tool-call 推理入口。
+
+        走与 infer 相同的 PriorityQueue / Lock / worker，区别在于：
+        - payload.want_tool_call=True，worker 取 tool_calls[0] 而非 content
+        - 返回 tool_calls[0] 字典，包含 type/function/id 字段
+
+        Args:
+            messages: 标准 chat 消息列表。
+            task_type: TASK_CONFIG 中的合法 key（须含 tools/tool_choice 字段）。
+            priority: 同 infer，None 时从 TASK_CONFIG 取默认值。
+            timeout: 最大等待时间（含排队 + 推理）秒数。
+
+        Returns:
+            tool_calls[0] 字典，含 type、function（name + arguments JSON 字符串）。
+
+        Raises:
+            ValueError: task_type 不在 TASK_CONFIG，或 priority/timeout 非法。
+            NotImplementedError: task_type 标 _reserved=True。
+            asyncio.TimeoutError: 超时。
+            LookupError: client 返回的 tool_calls 缺失或为空。
+        """
+        if task_type not in TASK_CONFIG:
+            raise ValueError(f"未知的 task_type: {task_type!r}，合法值: {list(TASK_CONFIG)}")
+        cfg = TASK_CONFIG[task_type]
+        if cfg.get("_reserved"):
+            raise NotImplementedError(
+                f"task_type={task_type!r} 标记为 _reserved=True，MVP 阶段不可用"
+            )
+        if priority is None:
+            priority = cfg["priority"]
+        if priority not in (1, 2, 3):
+            raise ValueError(f"priority 必须为 1/2/3，收到: {priority!r}")
+        if timeout is not None and timeout <= 0:
+            raise ValueError(f"timeout 必须为正数或 None，收到: {timeout!r}")
+
+        gen_kwargs = {k: v for k, v in cfg.items() if k not in _META_KEYS}
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[dict] = loop.create_future()
+        payload = _InferPayload(
+            messages=messages,
+            task_type=task_type,
+            gen_kwargs=gen_kwargs,
+            want_tool_call=True,
+        )
+        counter = next(self._counter)
+        await self._queue.put((priority, counter, fut, payload))
+
+        self._ensure_worker()
+
+        return await asyncio.wait_for(fut, timeout=timeout)
+
     async def aclose(self) -> None:
         """关闭 worker task，清空队列中未处理的 Future。
 
@@ -270,14 +330,34 @@ class LLMService:
                         messages=payload.messages,
                         **payload.gen_kwargs,
                     )
-                try:
-                    text: str = result_dict["choices"][0]["message"]["content"]
-                except (KeyError, IndexError, TypeError) as e:
-                    raise LookupError(
-                        f"client 返回 dict 格式异常，缺少 choices[0]['message']['content']: {e}"
-                    ) from e
-                if not fut.done():
-                    fut.set_result(text)
+                if payload.want_tool_call:
+                    # tool_call 路径：取 choices[0]["message"]["tool_calls"][0]
+                    try:
+                        msg = result_dict["choices"][0]["message"]
+                        tool_calls = msg.get("tool_calls")
+                        if not tool_calls:
+                            raise LookupError(
+                                "client 返回 dict 缺少 tool_calls 或 tool_calls 为空列表"
+                            )
+                        tool_call: dict = tool_calls[0]
+                    except LookupError:
+                        raise
+                    except (KeyError, IndexError, TypeError) as e:
+                        raise LookupError(
+                            f"client 返回 dict 格式异常，缺少 tool_calls: {e}"
+                        ) from e
+                    if not fut.done():
+                        fut.set_result(tool_call)
+                else:
+                    # content 路径（原有逻辑，不变）
+                    try:
+                        text: str = result_dict["choices"][0]["message"]["content"]
+                    except (KeyError, IndexError, TypeError) as e:
+                        raise LookupError(
+                            f"client 返回 dict 格式异常，缺少 choices[0]['message']['content']: {e}"
+                        ) from e
+                    if not fut.done():
+                        fut.set_result(text)
             except asyncio.CancelledError:
                 # worker 被取消，清理后退出
                 if not fut.done():

@@ -396,7 +396,7 @@ async def test_activate_scene_end_to_end(tmp_dal: DAL) -> None:
     script_id = tmp_dal.insert_script(scene_id, "台词剧本")
     tmp_dal.insert_script_line(script_id, line_no=1, character="演员A", text="我不走。")
 
-    # StubClient LLMService：返回合法 L2 JSON
+    # StubClient LLMService：返回合法 L2 tool_call（FC 路径）
     l2_json = json.dumps({
         "script_diff_summary": "演员台词吻合",
         "line_matches": [
@@ -405,7 +405,14 @@ async def test_activate_scene_end_to_end(tmp_dal: DAL) -> None:
         "corrected_segments": [],
     })
     stub_svc = MagicMock()
-    stub_svc.infer = AsyncMock(return_value=l2_json)
+    stub_svc.infer_tool = AsyncMock(return_value={
+        "id": "call_e2e_stub",
+        "type": "function",
+        "function": {
+            "name": "report_script_analysis",
+            "arguments": l2_json,
+        },
+    })
 
     session = SessionState()
     session.activate_scene(scene_id)

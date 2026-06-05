@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from backend.llm.config import TASK_CONFIG
+from backend.pipelines.l2_constants import _VALID_DIFF_TYPES  # noqa: F401  # re-exported
 
 if TYPE_CHECKING:
     from backend.llm.service import LLMService
@@ -112,7 +113,8 @@ class L2Output:
 # ---------------------------------------------------------------------------
 
 _TRANSCRIPT_CHAR_LIMIT = 2500
-_VALID_DIFF_TYPES = frozenset({"match", "missing", "substitution", "insertion"})
+# _VALID_DIFF_TYPES 从 l2_constants 导入（module 顶部 import 语句），此处不重复定义。
+# 测试文件 `from backend.pipelines.l2_take import _VALID_DIFF_TYPES` 仍然有效（re-export）。
 
 
 # ---------------------------------------------------------------------------
@@ -230,24 +232,15 @@ def _strip_markdown_fence(text: str) -> str:
     return stripped
 
 
-def _parse_llm_output(raw_text: str) -> L2Output:
-    """解析 LLM 输出文本为 L2Output。
+def _validate_data_dict(data: dict) -> L2Output:
+    """校验已解析的 dict，构造并返回 L2Output。
 
-    解析流程：strip_markdown_fence → json.loads → validate_fields → L2Output。
+    接受来自 json.loads 的 dict（无论是 FC 路径还是旧文本路径），
+    执行字段存在性校验、枚举值校验、类型校验，最终构造 L2Output。
 
     Raises:
-        L2ParseError: 空响应 / JSON 解析失败 / 字段缺失 / 枚举值非法 / line_no 非整数。
+        L2ParseError: 字段缺失 / 枚举值非法 / 类型错误。
     """
-    if not raw_text or not raw_text.strip():
-        raise L2ParseError("LLM returned empty response")
-
-    cleaned = _strip_markdown_fence(raw_text)
-
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise L2ParseError("LLM response is not valid JSON", cause=exc) from exc
-
     if not isinstance(data, dict):
         raise L2ParseError("LLM response JSON is not a dict object")
 
@@ -324,6 +317,27 @@ def _parse_llm_output(raw_text: str) -> L2Output:
     )
 
 
+def _parse_llm_output(raw_text: str) -> L2Output:
+    """解析 LLM 输出文本为 L2Output（旧文本路径，保留供回退/测试）。
+
+    解析流程：strip_markdown_fence → json.loads → _validate_data_dict → L2Output。
+
+    Raises:
+        L2ParseError: 空响应 / JSON 解析失败 / 字段缺失 / 枚举值非法 / line_no 非整数。
+    """
+    if not raw_text or not raw_text.strip():
+        raise L2ParseError("LLM returned empty response")
+
+    cleaned = _strip_markdown_fence(raw_text)
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise L2ParseError("LLM response is not valid JSON", cause=exc) from exc
+
+    return _validate_data_dict(data)
+
+
 # ---------------------------------------------------------------------------
 # 核心函数
 # ---------------------------------------------------------------------------
@@ -356,12 +370,22 @@ async def run_l2_take(
         {"role": "user", "content": user_message},
     ]
 
-    # asyncio.TimeoutError 从 infer 传出，pipeline 不捕获（让 caller 感知）
-    raw_text: str = await llm_service.infer(
-        messages,
-        task_type="l2_take",
-        priority=2,
-        timeout=timeout,
-    )
+    # FC 路径：调 infer_tool，取 tool_calls[0]，解析 arguments JSON
+    # asyncio.TimeoutError 从 infer_tool 传出，pipeline 不捕获（让 caller 感知）
+    try:
+        tool_call: dict = await llm_service.infer_tool(
+            messages,
+            task_type="l2_take",
+            priority=2,
+            timeout=timeout,
+        )
+    except LookupError as exc:
+        raise L2ParseError("tool_calls 缺失或为空，模型未走 function calling 路径", cause=exc) from exc
 
-    return _parse_llm_output(raw_text)
+    try:
+        args_json: str = tool_call["function"]["arguments"]
+        data = json.loads(args_json)
+    except (KeyError, json.JSONDecodeError) as exc:
+        raise L2ParseError("tool_call arguments 解析失败", cause=exc) from exc
+
+    return _validate_data_dict(data)
