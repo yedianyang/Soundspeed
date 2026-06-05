@@ -8,6 +8,7 @@ JSON 字段在 DAL 内部透明处理：写入时 json.dumps，读取时 json.lo
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -29,6 +30,24 @@ _MAX_SUFFIX_ITER = 1000
 # _resolve_base_slot 的 exclude_take_id 哨兵：新 take 尚未 INSERT、无既有 take_id 可排除时传它。
 # 任何真实 take_id ≥ 1（AUTOINCREMENT），故 -1 不会误排除任何行。
 _NO_EXCLUDE_TAKE_ID = -1
+
+# QP 场次编号归一：剥 Scene/场/Sc/S 前缀 + 分隔符，保留数字+后缀，统一大写。
+_SCENE_PREFIX_RE = re.compile(r"^(?:scene|场|sc|s)[\s_\-]*", re.IGNORECASE)
+
+
+def normalize_scene_code(raw: str) -> str:
+    """归一场次编号用于读侧匹配（spec §7.2）。
+
+    trim → 剥前缀（Scene/场/Sc/S + 分隔符）→ 大写。
+    例：'Scene_3A'→'3A'，'s72'→'72'，'场3'→'3'，'3'→'3'，''→''。
+    读、写两侧都过一遍再精确比对，覆盖「同号不同前缀」的常见变体；
+    剥不掉前缀的原样大写返回（不破坏纯中文/特殊编号）。
+    """
+    s = raw.strip()
+    if not s:
+        return ""
+    s = _SCENE_PREFIX_RE.sub("", s)
+    return s.strip().upper()
 
 
 # ── 数据类（read 方法的返回类型）────────────────────────────────────────────
@@ -227,6 +246,7 @@ class DAL:
             PRAGMA busy_timeout = 5000;
         """
         apply_migrations(db_path)
+        self._db_path = db_path  # QP 只读连接用（_readonly_conn），不复用共享 self._conn
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         _configure_connection(self._conn)
@@ -239,6 +259,49 @@ class DAL:
         with self._conn:
             self._conn.execute("BEGIN IMMEDIATE;")
             yield self._conn
+
+    # ── QP 只读路径（D-QP-12：临时 mode=ro 连接，不碰共享 self._conn）─────────────
+
+    @contextmanager
+    def _readonly_conn(self) -> Iterator[sqlite3.Connection]:
+        """每次开一个临时 mode=ro 连接，用完 finally close。
+
+        executor 在事件循环外（to_thread worker）跑，复用共享 self._conn 是跨线程
+        并发隐患（D-QP-12）。所有 QP 读（场次目录/策展工具/万能笔）一律走本 helper。
+        """
+        conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        # 只设 busy_timeout。故意不调 _configure_connection / 不设 PRAGMA journal_mode=WAL——
+        # 在 mode=ro 连接上执行 WAL 切换会抛 OperationalError: attempt to write a readonly
+        # database（WAL 要写 -wal/-shm）。ro 连接读已落盘 WAL 内容无需切 journal_mode。
+        conn.execute("PRAGMA busy_timeout = 5000;")
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def list_scenes_readonly(self) -> list[dict]:
+        """QP 场次目录用：按创建序返回全部场次（只读连接）。"""
+        with self._readonly_conn() as conn:
+            rows = conn.execute(
+                "SELECT scene_id, scene_code, location, int_ext, time_of_day, shoot_date "
+                "FROM scenes ORDER BY created_at, scene_id;"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def resolve_scene_id(self, scene_ref: str) -> int | None:
+        """口语/变体场次引用 → 真实 scene_id：两侧 normalize 后精确匹配。
+
+        找不到返回 None（调用方据此老实说没有，禁止模糊替换，spec §7.3）。
+        数字不同 = 不同场，不跨号匹配（spec §7.5）。
+        """
+        target = normalize_scene_code(scene_ref)
+        if not target:
+            return None
+        for s in self.list_scenes_readonly():
+            if normalize_scene_code(s["scene_code"]) == target:
+                return int(s["scene_id"])
+        return None
 
     # ── 资源管理 ──────────────────────────────────────────────────────────────
 
