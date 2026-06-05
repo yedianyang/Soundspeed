@@ -1,11 +1,12 @@
 # Spec: 语音 note 输入 + NP 收尾（4.x 续）
 
-版本：v0.2
+版本：v0.3
 日期：2026-06-05
 状态：草稿，待 Lead 评审
 owner：境熙
 
 修订：
+- v0.3：48kHz de-risk 实测解除（§3.2 / §5.2 / §10-1）——48kHz WAV 经 mtmd 产出与 16kHz 相同 token 数 + 逐字节相同输出，自动重采样正确；前端直传 48kHz，无需客户端降采样，相应回退方案删除。剩一个实现前置 de-risk：L2 文本 parity（§10-2）。
 - v0.2：评审后修订 —— ① L2 / 文本 NP / 语音 NP **管线平行**（独立 async 编排），但共用**单一模型实例**，进模型按 Orchestrator 序列调度（`_lock` + priority）排队——不开第二实例；单实例代价是文本也走多模态 handler，须给 L2 加文本输出 parity 回归；② 48kHz 重采样改标为**待验证假设** + de-risk；③ `asr_unclear` 改为模型自报低置信机制（否则不可检测）；④ 语音 pending 的 `category` 也占位（202 时未知）；⑤ 临时音频 NP 完成后删 + 重试仅限本次会话。
 - v0.1：初稿。
 
@@ -100,7 +101,7 @@ MemoInput 现有麦克风按钮（现 placeholder）改为按住录音：
 
 - `navigator.mediaDevices.getUserMedia({audio:true})` 取流。
 - AudioWorklet（或退化用 ScriptProcessorNode）采集 Float32 PCM。
-- 松开后编码为 **WAV（PCM 16-bit, mono, 原生采样率）**。iOS 的 AudioContext 采样率硬件定（常 48kHz）。⚠ **待验证假设**：spike 只验过 16kHz，「后端/mtmd 对 48kHz 自动重采样正确」尚未实测（§5.2、§10-2）。**实现前置 de-risk**：用 48kHz wav 重跑一遍 spike，确认输出仍正确；若 mtmd 不正确重采样，则改为前端降采样到 16kHz（AudioWorklet 内 resample，代价前移到前端）。
+- 松开后编码为 **WAV（PCM 16-bit, mono, 原生采样率）**。iOS 的 AudioContext 采样率硬件定（常 48kHz）。✅ **已实测（2026-06-05）**：48kHz WAV 喂进同一条 mtmd 通路，`audio_tokens->n_tokens` 与 16kHz 完全一致（67），模型输出逐字节相同——mtmd 读 WAV 头自动重采样到编码器所需采样率，正确。**前端直传 48kHz，无需客户端降采样。**
 - 单条语音上限（如 30s / 2MB）防误录长音频；超限提示。
 
 ### 3.3 上传
@@ -167,7 +168,7 @@ form fields:
 把 spike 的子类化 handler 收进 `backend/llm/`：
 - 子类 `Gemma4ChatHandler`，override `load_image`：当 content 是音频哨兵（约定 url 前缀，如 `soundspeed://audio/<id>`）时返回该次请求的 WAV 字节，否则走父类。
 - 音频 content 走 `messages` 的 `{"type":"image_url","image_url":{"url": <哨兵>}}`（复用 image_url 通道；mtmd 的 `media_marker` 对音频/图像通用，tokenize/eval 不区分）。
-- 采样率：**假设** mtmd 的 miniaudio + gemma4a 预处理器吃任意采样率 WAV 并内部重采样到模型所需。⚠ spike 只验过 16kHz，**48kHz 未实测**（§3.2 de-risk）。实现前先用 48kHz 跑通；若 mtmd 不正确重采样，回退前端降采样到 16kHz。
+- 采样率：✅ **已实测** mtmd 的 miniaudio + gemma4a 预处理器吃任意采样率 WAV 并内部重采样到模型所需——16kHz 与 48kHz 产出相同 token 数 + 相同输出（§3.2）。后端不做采样率转换，原样喂。
 - 启动自检：加载后断言 `mtmd_support_audio(ctx) is True`，否则 fail-fast（模型/mmproj 不匹配早暴露）。
 
 ### 5.3 NP 音频 runner
@@ -260,7 +261,7 @@ reason 取值（**只列机制上可检测的**）：
 
 ## 10. 风险与技术注意
 
-1. **48kHz 重采样未实测（实现前置）**（§3.2 / §5.2）——spike 仅验 16kHz，iOS 录 48kHz。实现前先用 48kHz 跑通 spike；不通则前端降采样到 16kHz。**此项不验等于地基没夯**（feature 整个瞄准 iPad/iPhone）。
+1. ✅ **48kHz 重采样已实测解除**（2026-06-05，§3.2 / §5.2）——48kHz WAV 经 mtmd 产出与 16kHz 完全相同的 token 数（67）+ 逐字节相同的输出，自动重采样正确。前端直传 48kHz，无需降采样，地基已夯。
 2. **L2 文本输出 parity 回归（单实例的代价）**（§5.1）——文本 NP/L2 改走多模态 handler，chat 模板可能漂移。实现期必须验证切换前后 L2 摘要一致。显存仅多 mmproj 增量（单实例，不翻倍，§5.4）。
 3. **iOS 真机麦克风需 HTTPS**（§3.5）——真机验收前置，非代码问题。
 4. **Metal teardown 崩**（§2.3）——长驻后端不触发；若做 CLI/一次性脚本需注意。
