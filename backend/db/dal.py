@@ -311,7 +311,10 @@ class DAL:
         return None
 
     def count_takes(self, scene_id: int, status: str | None = None) -> int:
-        """统计某场次的有效 take 数（软删过滤；可选 status 过滤）。"""
+        """统计某场次的有效 take 数（软删过滤；可选 status 过滤）。
+
+        scene 不存在或无 take 时返回 0（缺场由 executor 的 resolve_scene_id 先把关，Task 5）。
+        """
         sql = "SELECT COUNT(*) AS n FROM takes WHERE scene_id = ? AND deleted_at IS NULL"
         params: tuple = (scene_id,)
         if status is not None:
@@ -334,8 +337,9 @@ class DAL:
             char_row = conn.execute(
                 "SELECT COUNT(DISTINCT sl.character) AS n "
                 "FROM script_lines sl "
-                "JOIN scripts s ON s.script_id = sl.script_id "
-                "WHERE s.scene_id = ? AND sl.character IS NOT NULL;",
+                "WHERE sl.script_id = ("
+                "  SELECT script_id FROM scripts WHERE scene_id = ? ORDER BY version DESC LIMIT 1"
+                ") AND sl.character IS NOT NULL;",
                 (scene_id,),
             ).fetchone()
         info = dict(row)
@@ -343,13 +347,18 @@ class DAL:
         return info
 
     def list_characters(self, scene_id: int) -> list[str]:
-        """返回场次剧本里去重后的角色清单（舞台指示 character=NULL 不计）。"""
+        """返回场次最新版剧本里去重后的角色清单（舞台指示 character=NULL 不计）。
+
+        scene 不存在或无剧本时返回 []（缺场由 executor 的 resolve_scene_id 先把关，Task 5）。
+        多版本剧本时只取最新版（ORDER BY version DESC LIMIT 1），不 union 历史版本。
+        """
         with self._readonly_conn() as conn:
             rows = conn.execute(
                 "SELECT DISTINCT sl.character AS c "
                 "FROM script_lines sl "
-                "JOIN scripts s ON s.script_id = sl.script_id "
-                "WHERE s.scene_id = ? AND sl.character IS NOT NULL "
+                "WHERE sl.script_id = ("
+                "  SELECT script_id FROM scripts WHERE scene_id = ? ORDER BY version DESC LIMIT 1"
+                ") AND sl.character IS NOT NULL "
                 "ORDER BY sl.character;",
                 (scene_id,),
             ).fetchall()

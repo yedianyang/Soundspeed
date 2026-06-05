@@ -128,3 +128,43 @@ def test_search_script_lines_fts(dal: DAL) -> None:
     hits = dal.search_script_lines("好久不见", scene_id=sid)
     assert any("好久不见" in h["text"] for h in hits)
     assert all({"line_no", "character", "text"} <= set(h) for h in hits)
+
+
+def test_count_takes_status_no_match_returns_zero(dal: DAL) -> None:
+    """status 过滤无匹配时应返回 0（不是 None 也不报错）。"""
+    sid = dal.create_scene("Scene_6")
+    dal.start_take(sid, "", 1000.0)  # 默认 tbd
+    assert dal.count_takes(sid, status="ng") == 0
+
+
+def test_search_script_lines_no_scene_id(dal: DAL) -> None:
+    """不带 scene_id 走全剧本检索分支，能命中即可。"""
+    _seed_scene_with_script(dal)
+    hits = dal.search_script_lines("最近怎么样")
+    assert any("最近" in h["text"] for h in hits)
+
+
+def test_list_characters_no_script_returns_empty(dal: DAL) -> None:
+    """场次存在但无剧本时 list_characters 返回空列表。"""
+    sid = dal.create_scene("Scene_6")
+    assert dal.list_characters(sid) == []
+
+
+def test_get_scene_info_latest_script_version(dal: DAL) -> None:
+    """多版本剧本时 get_scene_info / list_characters 只取最新版角色，不 union 历史版本。"""
+    sid = dal.get_or_create_scene("Scene_8", int_ext="室内", time_of_day="日", location="书房")[0]
+    # v1：角色 甲、乙
+    s1 = dal.insert_script(sid, "v1 raw")
+    dal.insert_script_line(s1, 1, "甲", "v1 台词甲。")
+    dal.insert_script_line(s1, 2, "乙", "v1 台词乙。")
+    # v2：角色 甲、丙（乙 消失）—— insert_script version=None 自动 +1 → version=2
+    s2 = dal.insert_script(sid, "v2 raw")
+    dal.insert_script_line(s2, 1, "甲", "v2 台词甲。")
+    dal.insert_script_line(s2, 2, "丙", "v2 台词丙。")
+
+    # 只反映最新版（v2）：2 个角色，不是 union 的 3 个
+    info = dal.get_scene_info(sid)
+    assert info["character_count"] == 2, f"期望 2，得到 {info['character_count']}（可能 union 了历史版本）"
+
+    chars = dal.list_characters(sid)
+    assert sorted(chars) == ["丙", "甲"], f"期望 [丙,甲]，得到 {sorted(chars)}（可能 union 了历史版本）"
