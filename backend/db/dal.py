@@ -310,6 +310,74 @@ class DAL:
                 return int(s["scene_id"])
         return None
 
+    def count_takes(self, scene_id: int, status: str | None = None) -> int:
+        """统计某场次的有效 take 数（软删过滤；可选 status 过滤）。"""
+        sql = "SELECT COUNT(*) AS n FROM takes WHERE scene_id = ? AND deleted_at IS NULL"
+        params: tuple = (scene_id,)
+        if status is not None:
+            sql += " AND status = ?"
+            params = (scene_id, status)
+        with self._readonly_conn() as conn:
+            row = conn.execute(sql + ";", params).fetchone()
+        return int(row["n"])
+
+    def get_scene_info(self, scene_id: int) -> dict | None:
+        """返回场次信息 + 最新剧本的角色数。无此场次返回 None。"""
+        with self._readonly_conn() as conn:
+            row = conn.execute(
+                "SELECT scene_id, scene_code, location, int_ext, time_of_day, shoot_date "
+                "FROM scenes WHERE scene_id = ?;",
+                (scene_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            char_row = conn.execute(
+                "SELECT COUNT(DISTINCT sl.character) AS n "
+                "FROM script_lines sl "
+                "JOIN scripts s ON s.script_id = sl.script_id "
+                "WHERE s.scene_id = ? AND sl.character IS NOT NULL;",
+                (scene_id,),
+            ).fetchone()
+        info = dict(row)
+        info["character_count"] = int(char_row["n"])
+        return info
+
+    def list_characters(self, scene_id: int) -> list[str]:
+        """返回场次剧本里去重后的角色清单（舞台指示 character=NULL 不计）。"""
+        with self._readonly_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT sl.character AS c "
+                "FROM script_lines sl "
+                "JOIN scripts s ON s.script_id = sl.script_id "
+                "WHERE s.scene_id = ? AND sl.character IS NOT NULL "
+                "ORDER BY sl.character;",
+                (scene_id,),
+            ).fetchall()
+        return [r["c"] for r in rows]
+
+    def search_script_lines(self, query: str, scene_id: int | None = None) -> list[dict]:
+        """FTS5 MATCH 检索台词（BM25 排序，只读连接）。返回 line_no/character/text dict 列表。"""
+        base = (
+            "SELECT sl.line_no AS line_no, sl.character AS character, sl.text AS text "
+            "FROM script_lines_fts fts "
+            "JOIN script_lines sl ON sl.line_id = fts.rowid "
+        )
+        with self._readonly_conn() as conn:
+            if scene_id is not None:
+                rows = conn.execute(
+                    base
+                    + "JOIN scripts s ON s.script_id = sl.script_id "
+                    "WHERE fts.text MATCH ? AND s.scene_id = ? "
+                    "ORDER BY bm25(script_lines_fts);",
+                    (query, scene_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    base + "WHERE fts.text MATCH ? ORDER BY bm25(script_lines_fts);",
+                    (query,),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── 资源管理 ──────────────────────────────────────────────────────────────
 
     def close(self) -> None:
