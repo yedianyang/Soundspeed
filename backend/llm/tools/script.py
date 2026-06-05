@@ -27,7 +27,41 @@ def build_l2_no_script_tool() -> dict:
         符合 OpenAI function calling spec 的 tool 字典，
         type="function"，name="report_corrections_only"。
     """
-    raise NotImplementedError
+    return {
+        "type": "function",
+        "function": {
+            "name": "report_corrections_only",
+            "description": "报告转录文本中的错别字修正结果，只含纠错条目，不含剧本比对信息。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "corrected_segments": {
+                        "type": "array",
+                        "description": "需要纠错的转录片段（仅限错别字/口误），无需修正时输出空列表 []",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "idx": {
+                                    "type": "integer",
+                                    "description": "转录段索引（0-indexed）",
+                                },
+                                "original": {
+                                    "type": "string",
+                                    "description": "原始转录文本",
+                                },
+                                "corrected": {
+                                    "type": "string",
+                                    "description": "纠错后文本",
+                                },
+                            },
+                            "required": ["idx", "original", "corrected"],
+                        },
+                    },
+                },
+                "required": ["corrected_segments"],
+            },
+        },
+    }
 
 
 def build_l2_tool() -> dict:

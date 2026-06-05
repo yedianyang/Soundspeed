@@ -14,7 +14,7 @@ tools / tool_choice 字段（Tier 1 function calling）：
   故此处 module 级直接 import。
 """
 
-from backend.llm.tools.script import build_l2_tool
+from backend.llm.tools.script import build_l2_no_script_tool, build_l2_tool
 
 # task_type -> 配置字典
 # 字段：max_tokens, temperature, priority, system, _reserved（可选）；
@@ -65,6 +65,27 @@ TASK_CONFIG: dict[str, dict] = {
         "tool_choice": {
             "type": "function",
             "function": {"name": "report_script_analysis"},
+        },
+    },
+    "l2_take_no_script": {
+        # 无剧本只做纠错，输出更短，2048 上限足够
+        "max_tokens": 2048,
+        "temperature": 0.2,
+        "priority": 2,
+        "system": (
+            "整合 take 信息，修正转录错别字。\n\n"
+            "职责：\n"
+            "检查转录文本中的明显错别字（同音字、形近字误识别），输出修正结果。\n\n"
+            "输出格式要求（严格遵守）：\n"
+            "- 只调用工具，不额外输出文字。\n"
+            "- corrected_segments 只列出真正有修改的 segment，未改动的不出现；无需修正时输出空列表 []。\n"
+            "- corrected 必须是修正后的字符串，禁止为 null；无法确认修正时直接不输出该条。\n"
+            "- idx 是转录记录列表的下标（从 0 开始），对应 user message 中转录记录前的序号。"
+        ),
+        "tools": [build_l2_no_script_tool()],
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": "report_corrections_only"},
         },
     },
     "script_parse": {
