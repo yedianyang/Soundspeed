@@ -612,7 +612,6 @@ class Orchestrator:
         from backend.llm.errors import ModelUnavailableError  # noqa: PLC0415
         from backend.pipelines.np_note import NPParseError  # noqa: PLC0415
 
-        status_marked = False
         try:
             output = await run_awaitable
             stored_raw = raw_text_override if raw_text_override is not None else output.content
@@ -623,10 +622,6 @@ class Orchestrator:
                 raw_text=stored_raw,
                 ts=ts,
             )
-            # pass/ng/keep 类别同时把该 take 标成对应 status（= UI Mark）；note/issue 不动。
-            if output.category in _STATUS_CATEGORIES:
-                self.dal.set_take_status(output.take_id, output.category)
-                status_marked = True
         except Exception as exc:
             # 失败原因在产生地确定（typed domain error），这里只做干净映射，不靠宽泛内建异常类型反推。
             if isinstance(exc, NPParseError):
@@ -650,6 +645,8 @@ class Orchestrator:
             )
             return
 
+        # note 已 durable 落库 → 无条件发 note.processed 解除 pending：与「note 已保存」绑定，
+        # 不被后续 Mark 副作用回退（否则 Mark 抛非 typed 异常会留孤儿 pending，复活 4.I 的 bug）。
         self.publish(
             NOTE_PROCESSED,
             NoteProcessedPayload(
@@ -662,19 +659,26 @@ class Orchestrator:
             ),
         )
 
-        # 打了 Mark → 广播 take.changed，让前端状态徽章 / 底部 Mark 即时更新。
-        if status_marked:
-            take = self.dal.get_take(output.take_id)
-            if take is not None:
-                self.publish(
-                    TAKE_CHANGED,
-                    TakeChangedPayload(
-                        take_id=take.take_id,
-                        scene_id=take.scene_id,
-                        take_number=take.take_number,
-                        status=take.status,
-                        script_diff=take.script_diff,
-                    ),
+        # pass/ng/keep 类别把该 take 标成对应 status（= UI Mark）+ 广播 take.changed；note/issue 不动。
+        # Mark 是 note 落库后的独立副作用——失败只记日志，绝不回退已发的 note.processed。
+        if output.category in _STATUS_CATEGORIES:
+            try:
+                self.dal.set_take_status(output.take_id, output.category)
+                take = self.dal.get_take(output.take_id)
+                if take is not None:
+                    self.publish(
+                        TAKE_CHANGED,
+                        TakeChangedPayload(
+                            take_id=take.take_id,
+                            scene_id=take.scene_id,
+                            take_number=take.take_number,
+                            status=take.status,
+                            script_diff=take.script_diff,
+                        ),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "NP take Mark failed after note stored [client_id=%s]: %s", client_id, exc
                 )
 
     async def _run_np_async(
