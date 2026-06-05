@@ -31,6 +31,7 @@ from pydantic import BaseModel
 
 from backend.api.auth import require_admin
 from backend.db.dal import DAL
+from backend.diarization.enroll_recorder import CaptureActiveError, EnrollBusyError
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,13 @@ class UpdateSpeakerIn(BaseModel):
 
 def _dal(request: Request) -> DAL:
     return request.app.state.orchestrator.dal
+
+
+def _enroll_recorder(request: Request):
+    rec = getattr(request.app.state, "enroll_recorder", None)
+    if rec is None:
+        raise HTTPException(status_code=503, detail="实时采集未启用，无法用现场麦录声纹")
+    return rec
 
 
 def _spk_to_out(d: dict) -> SpeakerOut:
@@ -294,3 +302,56 @@ async def enroll_speaker(
         raise HTTPException(status_code=400, detail=str(e))
 
     return await _finalize_enrollment(dal, engine, speaker_id, pcm)
+
+
+@router.post("/{speaker_id}/enroll/start", status_code=202)
+async def enroll_start(
+    speaker_id: int,
+    request: Request,
+    _: str = Depends(require_admin),
+):
+    """开始用后端现场麦录声纹（与 Capture 同设备）。"""
+    dal = _dal(request)
+    if dal.get_speaker(speaker_id) is None:
+        raise HTTPException(status_code=404, detail="说话人不存在")
+    rec = _enroll_recorder(request)
+    try:
+        rec.start()
+    except CaptureActiveError:
+        raise HTTPException(status_code=409, detail="正在 Capture，无法同时用现场麦录声纹")
+    except EnrollBusyError:
+        raise HTTPException(status_code=409, detail="已有一段声纹录音在进行")
+    return {"status": "recording", "speaker_id": speaker_id}
+
+
+@router.post("/{speaker_id}/enroll/stop", response_model=SpeakerOut)
+async def enroll_stop(
+    speaker_id: int,
+    request: Request,
+    _: str = Depends(require_admin),
+):
+    """停止现场麦录音，提声纹存库。无论成败都先 stop 释放设备。"""
+    rec = _enroll_recorder(request)
+    pcm = rec.stop()  # 总是先释放设备
+    dal = _dal(request)
+    if dal.get_speaker(speaker_id) is None:
+        raise HTTPException(status_code=404, detail="说话人不存在")
+    engine = getattr(request.app.state, "diarization_engine", None)
+    if engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail="diarization 引擎未启用（未设置 SOUNDSPEED_HF_TOKEN）",
+        )
+    return await _finalize_enrollment(dal, engine, speaker_id, pcm)
+
+
+@router.post("/{speaker_id}/enroll/cancel", status_code=204)
+async def enroll_cancel(
+    speaker_id: int,
+    request: Request,
+    _: str = Depends(require_admin),
+):
+    """放弃现场麦录音并释放设备（弹窗关闭 / 出错时）。"""
+    rec = getattr(request.app.state, "enroll_recorder", None)
+    if rec is not None:
+        rec.abort()

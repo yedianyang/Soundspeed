@@ -12,6 +12,7 @@ from backend.api.app import create_app
 from backend.api.routes.speakers import router as speakers_router
 from backend.core.orchestrator import create_orchestrator
 from backend.db.dal import DAL
+from backend.diarization.enroll_recorder import CaptureActiveError, EnrollBusyError
 
 _TOKEN = "test-admin-token"
 _HEADERS = {"Authorization": f"Bearer {_TOKEN}"}
@@ -29,11 +30,39 @@ class _FakeEngine:
         return np.ones(self._dim, dtype=np.float32)
 
 
-def _client(tmp_dal: DAL, monkeypatch, engine=None) -> TestClient:
+class _FakeRecorder:
+    """假录音器：start/stop/abort 记账；stop 返回预置 pcm。"""
+
+    def __init__(self, pcm: np.ndarray | None = None, capture_active: bool = False):
+        self._pcm = pcm if pcm is not None else np.full(16000 * 3, 2000, dtype=np.int16)
+        self._capture_active = capture_active
+        self.running = False
+        self.events: list[str] = []
+
+    def start(self):
+        if self._capture_active:
+            raise CaptureActiveError("capture active")
+        if self.running:
+            raise EnrollBusyError("busy")
+        self.running = True
+        self.events.append("start")
+
+    def stop(self):
+        self.running = False
+        self.events.append("stop")
+        return self._pcm
+
+    def abort(self):
+        self.running = False
+        self.events.append("abort")
+
+
+def _client(tmp_dal: DAL, monkeypatch, engine=None, recorder=None) -> TestClient:
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
     app = create_app(create_orchestrator(tmp_dal))
     app.include_router(speakers_router)
     app.state.diarization_engine = engine
+    app.state.enroll_recorder = recorder
     return TestClient(app)
 
 
@@ -173,3 +202,64 @@ def test_enroll_missing_speaker_404(tmp_dal: DAL, monkeypatch):
             headers=_HEADERS,
         )
         assert r.status_code == 404
+
+
+# ── 现场麦录音端点 ────────────────────────────────────────────────────────────────
+
+
+def test_enroll_start_then_stop_success(tmp_dal: DAL, monkeypatch):
+    engine = _FakeEngine()
+    rec = _FakeRecorder()
+    with _client(tmp_dal, monkeypatch, engine=engine, recorder=rec) as c:
+        sid = c.post("/api/v1/speakers", json={"display_name": "张三"}, headers=_HEADERS).json()["speaker_id"]
+        r = c.post(f"/api/v1/speakers/{sid}/enroll/start", headers=_HEADERS)
+        assert r.status_code == 202
+        assert rec.events == ["start"]
+        r = c.post(f"/api/v1/speakers/{sid}/enroll/stop", headers=_HEADERS)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["has_enrollment"] is True
+        assert rec.events == ["start", "stop"]
+        assert engine.calls == [16000 * 3]
+
+
+def test_enroll_start_409_when_capture_active(tmp_dal: DAL, monkeypatch):
+    rec = _FakeRecorder(capture_active=True)
+    with _client(tmp_dal, monkeypatch, engine=_FakeEngine(), recorder=rec) as c:
+        sid = c.post("/api/v1/speakers", json={"display_name": "张三"}, headers=_HEADERS).json()["speaker_id"]
+        r = c.post(f"/api/v1/speakers/{sid}/enroll/start", headers=_HEADERS)
+        assert r.status_code == 409
+
+
+def test_enroll_start_503_without_recorder(tmp_dal: DAL, monkeypatch):
+    with _client(tmp_dal, monkeypatch, engine=_FakeEngine(), recorder=None) as c:
+        sid = c.post("/api/v1/speakers", json={"display_name": "张三"}, headers=_HEADERS).json()["speaker_id"]
+        r = c.post(f"/api/v1/speakers/{sid}/enroll/start", headers=_HEADERS)
+        assert r.status_code == 503
+
+
+def test_enroll_stop_silent_400_releases_device(tmp_dal: DAL, monkeypatch):
+    rec = _FakeRecorder(pcm=np.zeros(16000 * 3, dtype=np.int16))  # 静音
+    with _client(tmp_dal, monkeypatch, engine=_FakeEngine(), recorder=rec) as c:
+        sid = c.post("/api/v1/speakers", json={"display_name": "张三"}, headers=_HEADERS).json()["speaker_id"]
+        r = c.post(f"/api/v1/speakers/{sid}/enroll/stop", headers=_HEADERS)
+        assert r.status_code == 400
+        assert "stop" in rec.events  # 即使 400 也已 stop 释放设备
+
+
+def test_enroll_start_missing_speaker_404(tmp_dal: DAL, monkeypatch):
+    rec = _FakeRecorder()
+    with _client(tmp_dal, monkeypatch, engine=_FakeEngine(), recorder=rec) as c:
+        r = c.post("/api/v1/speakers/999/enroll/start", headers=_HEADERS)
+        assert r.status_code == 404
+        assert rec.events == []  # 不存在的 speaker 不开录音
+
+
+def test_enroll_cancel_aborts(tmp_dal: DAL, monkeypatch):
+    rec = _FakeRecorder()
+    with _client(tmp_dal, monkeypatch, engine=_FakeEngine(), recorder=rec) as c:
+        sid = c.post("/api/v1/speakers", json={"display_name": "张三"}, headers=_HEADERS).json()["speaker_id"]
+        c.post(f"/api/v1/speakers/{sid}/enroll/start", headers=_HEADERS)
+        r = c.post(f"/api/v1/speakers/{sid}/enroll/cancel", headers=_HEADERS)
+        assert r.status_code == 204
+        assert rec.events == ["start", "abort"]
