@@ -11,6 +11,13 @@ interface MemoInputProps {
   onNoteAdded?: () => void
 }
 
+// client_id 只需全局唯一（pending 乐观去重/精确移除/标失败的键），不要求密码学强度。
+// crypto.randomUUID 仅在安全源（HTTPS / localhost）可用，局域网 HTTP（iPad/手机经 LAN IP 访问，
+// 见 spec §3.5）下为 undefined，直接调用会抛 TypeError 让 note 提交失败，故加回退。
+function newClientId(): string {
+  return crypto?.randomUUID?.() ?? `nid-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
 // 底部栏的打字 memo 输入（场记真实输入口）。接 POST /notes；类别走 @语法（如「@keep 第三条好」），
 // 不打前缀默认 note。提交后乐观插入 pending note（队列由上方 NoteList 显示「处理中」），
 // WS note.processed 落定后转实。麦克风按钮按住录音（4.L）→ 16k WAV → POST /notes/voice → Gemma 原生音频归置。
@@ -26,7 +33,7 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
     const trimmed = text.trim()
     if (!trimmed || sending) return
     setSending(true)
-    const clientId = crypto.randomUUID()
+    const clientId = newClientId()
     try {
       const resp: NoteCreateResponse = await postNote(trimmed, undefined, clientId)
       addPendingNote({
@@ -57,7 +64,7 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
   // ── 语音 note：按住麦克风录音（对讲机式）──
 
   const uploadVoice = async (wav: Blob) => {
-    const clientId = crypto.randomUUID()
+    const clientId = newClientId()
     const ts = Date.now() / 1000
     // 乐观 pending：语音的类别/正文 202 时未知（由模型从音频判）。kind=voice → 渲染只显 🎤 不显
     // @category（避免伪造类别）；voiceBlob 供失败重试重传。
