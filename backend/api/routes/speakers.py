@@ -31,7 +31,11 @@ from pydantic import BaseModel
 
 from backend.api.auth import require_admin
 from backend.db.dal import DAL
-from backend.diarization.enroll_recorder import CaptureActiveError, EnrollBusyError
+from backend.diarization.enroll_recorder import (
+    CaptureActiveError,
+    EnrollBusyError,
+    EnrollRecorder,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +75,7 @@ def _dal(request: Request) -> DAL:
     return request.app.state.orchestrator.dal
 
 
-def _enroll_recorder(request: Request):
+def _enroll_recorder(request: Request) -> EnrollRecorder:
     rec = getattr(request.app.state, "enroll_recorder", None)
     if rec is None:
         raise HTTPException(status_code=503, detail="实时采集未启用，无法用现场麦录声纹")

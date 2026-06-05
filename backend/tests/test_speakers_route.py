@@ -238,6 +238,15 @@ def test_enroll_start_503_without_recorder(tmp_dal: DAL, monkeypatch):
         assert r.status_code == 503
 
 
+def test_enroll_start_409_when_already_running(tmp_dal: DAL, monkeypatch):
+    rec = _FakeRecorder()
+    with _client(tmp_dal, monkeypatch, engine=_FakeEngine(), recorder=rec) as c:
+        sid = c.post("/api/v1/speakers", json={"display_name": "张三"}, headers=_HEADERS).json()["speaker_id"]
+        assert c.post(f"/api/v1/speakers/{sid}/enroll/start", headers=_HEADERS).status_code == 202
+        r = c.post(f"/api/v1/speakers/{sid}/enroll/start", headers=_HEADERS)  # 第二次：已在录
+        assert r.status_code == 409
+
+
 def test_enroll_stop_silent_400_releases_device(tmp_dal: DAL, monkeypatch):
     rec = _FakeRecorder(pcm=np.zeros(16000 * 3, dtype=np.int16))  # 静音
     with _client(tmp_dal, monkeypatch, engine=_FakeEngine(), recorder=rec) as c:
@@ -263,3 +272,10 @@ def test_enroll_cancel_aborts(tmp_dal: DAL, monkeypatch):
         r = c.post(f"/api/v1/speakers/{sid}/enroll/cancel", headers=_HEADERS)
         assert r.status_code == 204
         assert rec.events == ["start", "abort"]
+
+
+def test_enroll_cancel_without_recorder_is_204(tmp_dal: DAL, monkeypatch):
+    with _client(tmp_dal, monkeypatch, engine=_FakeEngine(), recorder=None) as c:
+        sid = c.post("/api/v1/speakers", json={"display_name": "张三"}, headers=_HEADERS).json()["speaker_id"]
+        r = c.post(f"/api/v1/speakers/{sid}/enroll/cancel", headers=_HEADERS)
+        assert r.status_code == 204
