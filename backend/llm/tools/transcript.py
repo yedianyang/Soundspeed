@@ -9,20 +9,26 @@ from __future__ import annotations
 
 
 def build_count_takes_tool() -> dict:
+    """构造 count_takes OpenAI 风格 tool dict。
+
+    Returns:
+        type="function"，name="count_takes" 的工具字典。
+    """
     return {
         "type": "function",
         "function": {
             "name": "count_takes",
-            "description": "统计某场次已拍摄的 take 条数（可选按状态过滤）。问「第N场拍了多少条」用它。",
+            "description": "统计某场次已拍摄的 take 条数（已排除软删，可选按状态过滤）。问「第N场拍了多少条」用它。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "scene_ref": {
                         "type": "string",
-                        "description": "场次引用，如 '第一场' / '72' / 'Scene_3A'",
+                        "description": "场次引用，如 '第3场' / '3' / 'Scene_3'",
                     },
                     "status": {
                         "type": "string",
+                        "enum": ["keep", "ng", "pass", "tbd"],
                         "description": "可选状态过滤：keep/ng/pass/tbd，不填则统计全部",
                     },
                 },
@@ -33,6 +39,11 @@ def build_count_takes_tool() -> dict:
 
 
 def build_get_scene_info_tool() -> dict:
+    """构造 get_scene_info OpenAI 风格 tool dict。
+
+    Returns:
+        type="function"，name="get_scene_info" 的工具字典。
+    """
     return {
         "type": "function",
         "function": {
@@ -43,7 +54,7 @@ def build_get_scene_info_tool() -> dict:
                 "properties": {
                     "scene_ref": {
                         "type": "string",
-                        "description": "场次引用，如 '第72场' / '72' / 'Scene_72'",
+                        "description": "场次引用，如 '第3场' / '3' / 'Scene_3'",
                     },
                 },
                 "required": ["scene_ref"],
@@ -53,6 +64,11 @@ def build_get_scene_info_tool() -> dict:
 
 
 def build_list_characters_tool() -> dict:
+    """构造 list_characters OpenAI 风格 tool dict。
+
+    Returns:
+        type="function"，name="list_characters" 的工具字典。
+    """
     return {
         "type": "function",
         "function": {
@@ -73,6 +89,11 @@ def build_list_characters_tool() -> dict:
 
 
 def build_search_script_lines_tool() -> dict:
+    """构造 search_script_lines OpenAI 风格 tool dict。
+
+    Returns:
+        type="function"，name="search_script_lines" 的工具字典。
+    """
     return {
         "type": "function",
         "function": {
@@ -97,6 +118,11 @@ def build_search_script_lines_tool() -> dict:
 
 
 def build_query_database_tool() -> dict:
+    """构造 query_database OpenAI 风格 tool dict（万能笔）。
+
+    Returns:
+        type="function"，name="query_database" 的工具字典。
+    """
     return {
         "type": "function",
         "function": {

@@ -60,3 +60,19 @@ def test_query_database_has_single_sql_param() -> None:
     props = build_query_database_tool()["function"]["parameters"]["properties"]
     assert list(props) == ["sql"]
     assert props["sql"]["type"] == "string"
+
+
+@pytest.mark.parametrize("builder", _BUILDERS)
+def test_required_fields_exist_in_properties(builder) -> None:
+    # 防将来改 builder 手滑删了 properties 但 required 留着
+    schema = builder()["function"]["parameters"]
+    props = schema["properties"]
+    for name in schema.get("required", []):
+        assert name in props, f"required 字段 '{name}' 不在 properties 里"
+
+
+def test_count_takes_status_has_enum() -> None:
+    # 必修1：status 必须用 enum 约束，防模型传中文或非法值
+    props = build_count_takes_tool()["function"]["parameters"]["properties"]
+    assert "enum" in props["status"], "status 参数缺少 enum 约束"
+    assert set(props["status"]["enum"]) == {"keep", "ng", "pass", "tbd"}
