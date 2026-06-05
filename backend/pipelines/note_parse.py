@@ -16,7 +16,7 @@ _SCENE_TAKE_RE = re.compile(r"^([A-Za-z0-9_-]+) (\d+)\b\s*")
 _CATEGORY_RE = re.compile(r"^@([a-z]+)\b\s*")
 
 # Valid category values
-_VALID_CATEGORIES = frozenset({"keeper", "ng", "hold", "issue", "note"})
+_VALID_CATEGORIES = frozenset({"pass", "ng", "keep", "issue", "note"})
 
 # Maximum content length
 _MAX_CONTENT_LENGTH = 2000
@@ -84,7 +84,7 @@ def parse_note(raw_text: str, ts: float) -> NoteStruct:
     # --- validation ---------------------------------------------------------
     if category not in _VALID_CATEGORIES:
         raise NoteParseError(
-            f"未知类别: {category}，合法值: keeper, ng, hold, issue, note"
+            f"未知类别: {category}，合法值: pass, ng, keep, issue, note"
         )
 
     if len(content) > _MAX_CONTENT_LENGTH:

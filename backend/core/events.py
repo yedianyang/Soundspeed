@@ -130,7 +130,7 @@ class ScriptUploadPayload:
 class TakeChangedPayload:
     """take.changed 的 payload（1.H L2 pipeline 完成后 publish）。
 
-    status 取值与 takes.status 一致：'keeper' | 'ng' | 'hold' | 'tbd'。
+    status 取值与 takes.status 一致：'pass' | 'ng' | 'keep' | 'tbd'。
     script_diff=None 表示 L2 未完成或失败（降级状态）。
     """
 

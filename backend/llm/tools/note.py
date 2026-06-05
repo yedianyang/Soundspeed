@@ -48,8 +48,11 @@ def build_note_tool() -> dict:
                         "type": "string",
                         "enum": list(_VALID_NOTE_CATEGORIES),
                         "description": (
-                            "备注类别：note 一般备注 / issue 问题 / keeper 保留可用 / "
-                            "ng NG / hold 待定。"
+                            "听中文口语判类别（先看有没有「保/留」）："
+                            "keep=保/留/留着/保留(含「可以保」「可以留」「先保」，别因带「可以」就判 pass)；"
+                            "pass=过/过了/通过/可以用/可以(单说)/OK(无保留时)；"
+                            "ng=不好/不行/NG/废/重来；issue=技术问题(收音小/灯光暗/穿帮)；"
+                            "note=其他一般备注。"
                         ),
                     },
                     "content": {

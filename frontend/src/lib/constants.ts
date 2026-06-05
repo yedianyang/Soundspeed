@@ -1,22 +1,22 @@
 import type { Status } from "@/types/take"
 
 export const STATUS_DOT: Record<Status, string> = {
-  keeper: "bg-green-500",
+  keep: "bg-green-500",
   ng: "bg-destructive",
-  hold: "bg-primary",
+  pass: "bg-primary",
   tbd: "bg-muted-foreground",
   recording: "bg-destructive animate-pulse",
 }
 
 export const STATUS_LABEL: Record<Status, string> = {
-  keeper: "KEEP",
+  keep: "KEEP",
   ng: "NG",
-  hold: "PASS",
+  pass: "PASS",
   tbd: "TBD",
   recording: "REC",
 }
 
-export const MARK_ORDER: Status[] = ["ng", "keeper", "hold"]
+export const MARK_ORDER: Status[] = ["ng", "keep", "pass"]
 
 export const SPEAKER_OPTIONS = ["SZA", "YY", "Unknown"]
 

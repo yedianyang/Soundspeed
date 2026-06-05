@@ -40,6 +40,10 @@ from backend.db.dal import DAL
 
 Handler = Callable[[object], None]
 
+# NP note 类别里直接映射到 take.status（= UI Mark）的三类：场记口播「过/保/不好」即打 Mark。
+# 与 take.status 枚举同值（pass/ng/keep）；note/issue 不在内，不碰状态。tbd 只作初始态，note 不产出。
+_STATUS_CATEGORIES = frozenset({"pass", "ng", "keep"})
+
 logger = logging.getLogger(__name__)
 
 
@@ -608,6 +612,7 @@ class Orchestrator:
         from backend.llm.errors import ModelUnavailableError  # noqa: PLC0415
         from backend.pipelines.np_note import NPParseError  # noqa: PLC0415
 
+        status_marked = False
         try:
             output = await run_awaitable
             stored_raw = raw_text_override if raw_text_override is not None else output.content
@@ -618,6 +623,10 @@ class Orchestrator:
                 raw_text=stored_raw,
                 ts=ts,
             )
+            # pass/ng/keep 类别同时把该 take 标成对应 status（= UI Mark）；note/issue 不动。
+            if output.category in _STATUS_CATEGORIES:
+                self.dal.set_take_status(output.take_id, output.category)
+                status_marked = True
         except Exception as exc:
             # 失败原因在产生地确定（typed domain error），这里只做干净映射，不靠宽泛内建异常类型反推。
             if isinstance(exc, NPParseError):
@@ -652,6 +661,21 @@ class Orchestrator:
                 client_id=client_id,
             ),
         )
+
+        # 打了 Mark → 广播 take.changed，让前端状态徽章 / 底部 Mark 即时更新。
+        if status_marked:
+            take = self.dal.get_take(output.take_id)
+            if take is not None:
+                self.publish(
+                    TAKE_CHANGED,
+                    TakeChangedPayload(
+                        take_id=take.take_id,
+                        scene_id=take.scene_id,
+                        take_number=take.take_number,
+                        status=take.status,
+                        script_diff=take.script_diff,
+                    ),
+                )
 
     async def _run_np_async(
         self, raw_text: str, parsed_category: str, ts: float, client_id: str | None = None

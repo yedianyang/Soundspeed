@@ -16,9 +16,11 @@ import pytest
 from backend.core.events import (
     NOTE_FAILED,
     NOTE_PROCESSED,
+    TAKE_CHANGED,
     TAKE_START,
     NoteFailedPayload,
     NoteProcessedPayload,
+    TakeChangedPayload,
     TakeStartPayload,
 )
 from backend.core.orchestrator import create_orchestrator
@@ -45,7 +47,7 @@ async def test_run_np_async_propagates_client_id(tmp_dal: DAL) -> None:
 
     # np_runner 归到该 take 且改写 content（模拟 LLM 去掉指代词「这条」）
     stub_np.return_value = NPOutput(
-        take_id=session.take_id, category="keeper", content="很好可以用"
+        take_id=session.take_id, category="keep", content="很好可以用"
     )
 
     captured: list[NoteProcessedPayload] = []
@@ -53,7 +55,7 @@ async def test_run_np_async_propagates_client_id(tmp_dal: DAL) -> None:
 
     orch.run_np_async(
         raw_text="这条很好可以用",
-        parsed_category="keeper",
+        parsed_category="keep",
         ts=111.0,
         client_id="cid-abc-123",
     )
@@ -222,7 +224,7 @@ async def test_run_np_voice_async_processed_threads_audio_and_stores_transcript(
     orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
     assert session.take_id is not None
     stub_voice.return_value = NPOutput(
-        take_id=session.take_id, category="keeper", content="结尾好可以用"
+        take_id=session.take_id, category="keep", content="结尾好可以用"
     )
 
     captured: list[NoteProcessedPayload] = []
@@ -323,3 +325,76 @@ async def test_run_np_voice_async_model_unavailable_emits_note_failed(tmp_dal: D
     assert len(failed) == 1
     assert failed[0].reason == "model_unavailable"
     assert failed[0].client_id == "cid-mu"
+
+
+# ── option 1：note 类别接 take.status（Mark）──────────────────────────────────
+# keep/ng/pass 三类直接把该 take 标成对应 status（场记口播即打 Mark）；note/issue 不碰状态。
+
+
+async def _setup_orch_with_take(tmp_dal: DAL, scene_code: str):
+    """建场 + 起一条 take，返回 (orch, stub_np, take_id)。"""
+    scene_id = tmp_dal.create_scene(scene_code)
+    session = SessionState()
+    session.activate_scene(scene_id)
+    stub_np = AsyncMock()
+    orch = create_orchestrator(tmp_dal, session, llm_service=MagicMock(), np_runner=stub_np)
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot=None, start_ts=time.time()))
+    assert session.take_id is not None
+    return orch, stub_np, session.take_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ["keep", "ng", "pass"])
+async def test_np_status_category_sets_take_status_and_broadcasts(
+    tmp_dal: DAL, category: str
+) -> None:
+    """category∈{keep,ng,pass} → set_take_status(take_id, category) + publish take.changed。"""
+    orch, stub_np, take_id = await _setup_orch_with_take(tmp_dal, f"sc_mark_{category}")
+    stub_np.return_value = NPOutput(take_id=take_id, category=category, content="x")
+
+    changed: list[TakeChangedPayload] = []
+    orch.subscribe(TAKE_CHANGED, lambda p: changed.append(p))  # type: ignore[arg-type]
+
+    orch.run_np_async(raw_text="x", parsed_category=category, ts=1.0, client_id="c1")
+    await orch._np_task  # type: ignore[attr-defined]
+
+    take = tmp_dal.get_take(take_id)
+    assert take is not None and take.status == category
+    assert any(c.take_id == take_id and c.status == category for c in changed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ["note", "issue"])
+async def test_np_plain_category_leaves_status_unchanged(
+    tmp_dal: DAL, category: str
+) -> None:
+    """category∈{note,issue} → 不碰 take.status，不广播状态变更。"""
+    orch, stub_np, take_id = await _setup_orch_with_take(tmp_dal, f"sc_plain_{category}")
+    before = tmp_dal.get_take(take_id).status  # type: ignore[union-attr]
+    stub_np.return_value = NPOutput(take_id=take_id, category=category, content="收音有点小")
+
+    changed: list[TakeChangedPayload] = []
+    orch.subscribe(TAKE_CHANGED, lambda p: changed.append(p))  # type: ignore[arg-type]
+
+    orch.run_np_async(raw_text="收音有点小", parsed_category=category, ts=1.0, client_id="c2")
+    await orch._np_task  # type: ignore[attr-defined]
+
+    take = tmp_dal.get_take(take_id)
+    assert take is not None and take.status == before  # 未变
+    assert changed == []
+
+
+def test_status_categories_coupling_holds(tmp_dal: DAL) -> None:
+    """守不变量：_finalize_np 用 set_take_status(take_id, category) 靠「category 名 == status 值」同名耦合。
+    若哪天单边改了 note 类别名 / status 枚举名，这条会红——避免 Mark 静默断掉（altitude 守卫）。"""
+    from backend.core.orchestrator import _STATUS_CATEGORIES
+    from backend.pipelines.np_note import _VALID_NOTE_CATEGORIES
+
+    # ① 每个会打 Mark 的 category 都是合法 note 类别（模型 schema enum 产得出）
+    assert _STATUS_CATEGORIES <= set(_VALID_NOTE_CATEGORIES)
+
+    # ② 每个又都是合法 take.status（set_take_status 不抛 ValueError → 同名耦合成立）
+    scene_id = tmp_dal.create_scene("sc_invariant")
+    take_id, _ = tmp_dal.start_take(scene_id=scene_id, shot="", start_ts=0.0)
+    for cat in _STATUS_CATEGORIES:
+        tmp_dal.set_take_status(take_id, cat)  # 任一抛 ValueError 即耦合已断裂

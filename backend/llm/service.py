@@ -332,6 +332,26 @@ class LLMService:
         )
         return await asyncio.wait_for(fut, timeout=timeout)
 
+    async def infer_voice_tool(
+        self,
+        messages: list[dict],
+        audio: bytes,
+        task_type: str,
+        priority: int | None = None,
+        timeout: float | None = 60.0,
+    ) -> dict:
+        """音频 + tool-call 推理入口（语音 NP forced tool-call）。
+
+        = infer_voice（透 audio）∩ infer_tool（取 tool_calls[0]）：_submit 同时带 audio +
+        want_tool_call=True（两者正交）。多模态 handler 在 __call__ 里先把音频 eval 进 KV，
+        再按 forced tool_choice 的 schema grammar 约束生成（输入/输出两阶段不冲突，源码实证）。
+        messages 须含音频哨兵（run_np_voice 组装）。返回 tool_calls[0] dict。
+        """
+        fut = await self._submit(
+            messages, task_type, priority, timeout, want_tool_call=True, audio=audio
+        )
+        return await asyncio.wait_for(fut, timeout=timeout)
+
     async def aclose(self) -> None:
         """关闭 worker task，清空队列中未处理的 Future。
 

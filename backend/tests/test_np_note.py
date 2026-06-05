@@ -1,4 +1,6 @@
 """NP Pipeline 单元测试。"""
+import json
+
 import pytest
 
 from backend.pipelines.np_note import (
@@ -24,9 +26,9 @@ def test_parse_default_category():
 
 
 def test_parse_markdown_fenced():
-    output = _parse_llm_output('```json\n{"take_id": 3, "category": "keeper", "content": ""}\n```')
+    output = _parse_llm_output('```json\n{"take_id": 3, "category": "keep", "content": ""}\n```')
     assert output.take_id == 3
-    assert output.category == "keeper"
+    assert output.category == "keep"
     assert output.content == ""
 
 
@@ -128,20 +130,31 @@ def test_system_prompt_per_shot_semantics():
 # ---------------------------------------------------------------------------
 
 
-class _FakeVoiceLLM:
-    """记录 infer_voice 收到的 messages/audio/task_type，并回固定文本。"""
+def _voice_tool_call(arguments: dict) -> dict:
+    return {
+        "id": "call_voice_stub",
+        "type": "function",
+        "function": {
+            "name": "structure_note",
+            "arguments": json.dumps(arguments, ensure_ascii=False),
+        },
+    }
 
-    def __init__(self, response: str) -> None:
-        self._response = response
+
+class _FakeVoiceLLM:
+    """记录 infer_voice_tool 收到的 messages/audio/task_type，并回固定 tool_call。"""
+
+    def __init__(self, arguments: dict) -> None:
+        self._arguments = arguments
         self.seen: dict = {}
 
-    async def infer_voice(
+    async def infer_voice_tool(
         self, messages, audio, task_type, priority=None, timeout=None  # noqa: ANN001
-    ) -> str:
+    ) -> dict:
         self.seen.update(
             messages=messages, audio=audio, task_type=task_type, priority=priority
         )
-        return self._response
+        return _voice_tool_call(self._arguments)
 
 
 def _voice_input() -> NPInput:
@@ -162,14 +175,15 @@ def _voice_input() -> NPInput:
 
 @pytest.mark.asyncio
 async def test_run_np_voice_parses_output_and_threads_audio() -> None:
-    """run_np_voice：组装场镜次 + 音频哨兵 → infer_voice（透传 audio + note_struct）→ 解析 NPOutput。"""
+    """run_np_voice：组装场镜次 + 音频哨兵 → infer_voice_tool（透传 audio + note_struct）→
+    解析 tool_calls[0] → NPOutput（语音也走 forced tool-call）。"""
     from backend.llm.multimodal import AUDIO_SENTINEL  # noqa: PLC0415
     from backend.pipelines.np_note import NPOutput, run_np_voice  # noqa: PLC0415
 
-    fake = _FakeVoiceLLM('{"take_id": 103, "category": "keeper", "content": "结尾好"}')
+    fake = _FakeVoiceLLM({"take_id": 103, "category": "keep", "content": "结尾好"})
     out = await run_np_voice(_voice_input(), b"WAVBYTES", fake)  # type: ignore[arg-type]
 
-    assert out == NPOutput(take_id=103, category="keeper", content="结尾好")
+    assert out == NPOutput(take_id=103, category="keep", content="结尾好")
     assert fake.seen["audio"] == b"WAVBYTES"
     assert fake.seen["task_type"] == "note_struct"
 
@@ -191,12 +205,15 @@ async def test_run_np_voice_parses_output_and_threads_audio() -> None:
 
 @pytest.mark.asyncio
 async def test_run_np_voice_parse_error_propagates() -> None:
-    """模型吐非法 JSON → NPParseError 上抛（复用文本解析器 → 4.I 失败分类对语音同样生效）。"""
+    """tool_call.arguments 非法 JSON → NPParseError 上抛（4.I 失败分类对语音同样生效）。"""
     from backend.pipelines.np_note import run_np_voice  # noqa: PLC0415
 
-    fake = _FakeVoiceLLM("这不是 JSON")
+    class _BadVoice:
+        async def infer_voice_tool(self, messages, audio, task_type, priority=None, timeout=None):  # noqa: ANN001
+            return {"type": "function", "function": {"name": "structure_note", "arguments": "{not json"}}
+
     with pytest.raises(NPParseError):
-        await run_np_voice(_voice_input(), b"x", fake)  # type: ignore[arg-type]
+        await run_np_voice(_voice_input(), b"x", _BadVoice())  # type: ignore[arg-type]
 
 
 def test_voice_system_prompt_mentions_listening() -> None:
@@ -216,7 +233,7 @@ async def test_real_voice_np_smoke() -> None:
     走产品化路径：run_np_voice → LLMService.infer_voice → 多模态 GemmaClient → 真 Gemma 4 + mmproj。
     需 SOUNDSPEED_SMOKE_VOICE_WAV 指向一段中文语音 WAV，且 mmproj 可解析（本地/cache）。
     手测实证（2026-06-05）：「第三条结尾很好可以用」+ Scene_1/Shot1/take101-103 →
-    {take_id:103, keeper, '结尾很好，可以用'}，16k/48k 一致，RSS ~6.7GB。
+    {take_id:103, keep, '结尾很好，可以用'}，16k/48k 一致，RSS ~6.7GB。
     """
     import os  # noqa: PLC0415
 
@@ -255,7 +272,7 @@ async def test_real_voice_np_smoke() -> None:
             audio = f.read()
         out = await run_np_voice(inp, audio, svc, timeout=120.0)  # type: ignore[arg-type]
         assert isinstance(out.take_id, int)
-        assert out.category in ("note", "issue", "keeper", "ng", "hold")
+        assert out.category in ("note", "issue", "keep", "ng", "pass")
         assert isinstance(out.content, str) and out.content.strip()
     finally:
         await svc.aclose()

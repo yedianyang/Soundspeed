@@ -286,7 +286,18 @@ function StatusBadge({
   )
 }
 
-// 展开后的详情：拉 getTake → segments（speaker 可纠正）+ L2 摘要 + line_matches。
+// take.notes 聚合串（每行 "[ISO] @类别 正文"，insert_note 重建）→ 去掉时间前缀的展示行。
+// NP note（打字/语音备注，take_events manual.note）经此显示在历史卡片，区别于 ch2 旧语音通道。
+function parseNoteLines(raw: string | null | undefined): string[] {
+  if (!raw) return []
+  return raw
+    // 只剥 ISO 时间戳前缀（锚定 yyyy-mm-ddThh…），避免吃掉正文里真以「[…]」开头的内容。
+    .split("\n")
+    .map((l) => l.replace(/^\[\d{4}-\d{2}-\d{2}T[^\]]*\]\s*/, "").trim())
+    .filter(Boolean)
+}
+
+// 展开后的详情：拉 getTake → segments（speaker 可纠正）+ L2 摘要 + line_matches + note。
 function TakeDetail({
   takeId,
   corrected,
@@ -325,6 +336,8 @@ function TakeDetail({
   // 按通道分组：ch1 = 主对话（speaker 可纠正）；ch2 = 备注（语音备注，与将来 typing memo 同层级）。
   const ch1Segs = data.segments.filter((s) => s.ch === 1)
   const memoItems = data.segments.filter((s) => s.ch === 2)
+  // NP note（打字/语音备注归置到本 take，take.notes 聚合）。
+  const noteLines = parseNoteLines(data.notes)
 
   async function handleCorrect(seg: TranscriptSegmentDTO, next: string | null) {
     // 点当前值是 no-op：不发 PATCH、不标记已纠正。
@@ -378,6 +391,22 @@ function TakeDetail({
         <p className="text-[11px] text-muted-foreground/80">说话人已纠正，剧本分析未更新</p>
       )}
       <ScriptDiffView diff={diff} />
+
+      {/* note 区：NP note（打字/语音备注归置到本 take）。L2 下方独立分隔线，正文逐条显示。 */}
+      {noteLines.length > 0 && (
+        <div className="space-y-1 pt-1">
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-px bg-border" />
+            <span className="text-[10px] text-muted-foreground whitespace-nowrap">note</span>
+            <div className="flex-1 h-px bg-border" />
+          </div>
+          {noteLines.map((line, i) => (
+            <p key={i} className="text-xs text-foreground break-all">
+              {line}
+            </p>
+          ))}
+        </div>
+      )}
 
       {/* 备注区：ch2 语音备注（speaker 恒空、不可点）。通用结构——将来 typing memo（手输备注）
           接入同一区、同层级（本次只预留，不实现输入/存储）。无 ch2 + 无 memo → 整块不渲染。 */}
@@ -445,6 +474,8 @@ export function HistoryTakes() {
       {takes.map((take) => {
         const isExpanded = expanded.has(take.take_id)
         const summary = take.script_diff?.script_diff_summary
+        // 折叠态正文也带 note 预览（take.notes 聚合，零额外请求）。
+        const collapsedNotes = parseNoteLines(take.notes)
         return (
           <Card
             key={take.take_id}
@@ -488,9 +519,20 @@ export function HistoryTakes() {
                   }
                 />
               ) : (
-                <p className="text-sm text-muted-foreground line-clamp-2">
-                  {summary ?? "（展开查看转录）"}
-                </p>
+                <div className="space-y-0.5">
+                  {summary && (
+                    <p className="text-sm text-muted-foreground line-clamp-2">{summary}</p>
+                  )}
+                  {collapsedNotes.length > 0 && (
+                    <p className="text-xs text-foreground line-clamp-2 break-all">
+                      <span className="text-muted-foreground">note </span>
+                      {collapsedNotes.join("　")}
+                    </p>
+                  )}
+                  {!summary && collapsedNotes.length === 0 && (
+                    <p className="text-sm text-muted-foreground">（展开查看转录）</p>
+                  )}
+                </div>
               )}
             </CardContent>
           </Card>

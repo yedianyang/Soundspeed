@@ -87,7 +87,7 @@ def test_insert_note_append_aggregation(dal, take_id):
 
 def test_insert_note_empty_content(dal, take_id):
     """content 为空时不追加内容文本（仅 [ts] @category）。"""
-    dal.insert_note(take_id, "keeper", "", "keeper mark", 1686580201.0)
+    dal.insert_note(take_id, "keep", "", "keep mark", 1686580201.0)
 
     row = dal._conn.execute(
         "SELECT notes FROM takes WHERE take_id = ?", (take_id,)
@@ -95,9 +95,9 @@ def test_insert_note_empty_content(dal, take_id):
     assert row is not None
     notes = row["notes"]
     assert notes is not None
-    assert "@keeper" in notes
-    # 确认 @keeper 后面就是行尾（没有多余文本）
-    assert notes.strip().endswith("@keeper")
+    assert "@keep" in notes
+    # 确认 @keep 后面就是行尾（没有多余文本）
+    assert notes.strip().endswith("@keep")
 
 
 # ── list_notes ───────────────────────────────────────────────────────────────

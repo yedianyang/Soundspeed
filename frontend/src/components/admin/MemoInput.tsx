@@ -11,7 +11,7 @@ interface MemoInputProps {
   onNoteAdded?: () => void
 }
 
-// 底部栏的打字 memo 输入（场记真实输入口）。接 POST /notes；类别走 @语法（如「@keeper 第三条好」），
+// 底部栏的打字 memo 输入（场记真实输入口）。接 POST /notes；类别走 @语法（如「@keep 第三条好」），
 // 不打前缀默认 note。提交后乐观插入 pending note（队列由上方 NoteList 显示「处理中」），
 // WS note.processed 落定后转实。麦克风按钮按住录音（4.L）→ 16k WAV → POST /notes/voice → Gemma 原生音频归置。
 export default function MemoInput({ onNoteAdded }: MemoInputProps) {
@@ -110,7 +110,7 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
         placeholder={
           recorder.recording
             ? "录音中…松开发送，上滑取消"
-            : "Typing memo · 例：第三条结尾好，可以用（@keeper / @ng / @issue）"
+            : "Typing memo · 例：第三条结尾好，可以用（@keep / @pass / @ng）"
         }
         className="flex-1 bg-transparent border-0 ring-0 rounded-none text-sm focus:outline-none placeholder:text-muted-foreground/70 focus-visible:ring-0"
         value={text}

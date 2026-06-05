@@ -38,10 +38,10 @@ def test_parse_note_with_category_issue():
     assert s.content == "灯光问题"
 
 
-def test_parse_note_with_category_keeper():
-    """@keeper category with empty content."""
-    s = parse_note("@keeper", 0.0)
-    assert s.category == "keeper"
+def test_parse_note_with_category_keep():
+    """@keep category with empty content."""
+    s = parse_note("@keep", 0.0)
+    assert s.category == "keep"
     assert s.content == ""
 
 
@@ -63,10 +63,10 @@ def test_parse_note_current_take():
 
 def test_parse_note_category_only():
     """Only a category marker, no content after it."""
-    s = parse_note("@keeper", 0.0)
+    s = parse_note("@keep", 0.0)
     assert s.scene_code is None
     assert s.take_number is None
-    assert s.category == "keeper"
+    assert s.category == "keep"
     assert s.content == ""
 
 

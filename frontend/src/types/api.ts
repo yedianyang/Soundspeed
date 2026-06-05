@@ -1,7 +1,7 @@
 // 后端 boundary 类型（snake_case）。派生自 backend/db/dal.py（Take / TranscriptSegment）
 // 与 backend/core/events.py（WS payload）。应用内部只在此层用 snake_case，其余读自 typed store。
 
-export type TakeStatus = "keeper" | "ng" | "hold" | "tbd"
+export type TakeStatus = "keep" | "ng" | "pass" | "tbd"
 
 // ── Scene DTO（GET /api/v1/scenes，spec v0.3 §2.5）──
 
@@ -43,7 +43,7 @@ export interface ActivateSceneResult {
   scene_code: string
 }
 
-// PATCH /api/v1/takes/{id} body，全可选。status ∈ keeper/ng/hold/tbd。
+// PATCH /api/v1/takes/{id} body，全可选。status ∈ keep/ng/pass/tbd。
 export interface PatchTakeBody {
   status?: TakeStatus
   scene_id?: number
@@ -220,7 +220,7 @@ export interface NoteDTO {
   take_id: number
   scene_code: string | null
   take_number: number | null
-  category: string // "note" | "issue" | "keeper" | "ng" | "hold"
+  category: string // "note" | "issue" | "keep" | "ng" | "pass"
   content: string
   raw_text: string
   ts: number

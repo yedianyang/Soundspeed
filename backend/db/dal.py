@@ -43,7 +43,7 @@ class Take:
     take_suffix: str  # 冲突后缀，默认 ''，冲突时 '+' / '++' …（v3）
     start_ts: float
     end_ts: float | None
-    status: str  # 'keeper' | 'ng' | 'hold' | 'tbd'
+    status: str  # 'pass' | 'ng' | 'keep' | 'tbd'
     performer_issues: dict | list | None  # NP 解析输出，DAL 负责 json.loads；写入时也传 dict/list
     audio_quality: str | None
     script_diff: dict | None  # L2 输出，DAL 负责 json.loads；写入时也传 dict
@@ -871,7 +871,7 @@ class DAL:
            按 ts 升序拼接为：
            [2026-06-12T14:30:01+00:00] @issue 开头有飞机声
            用 datetime.fromtimestamp(ts, timezone.utc).isoformat() 生成时间戳格式。
-           如果 content 为空，则不追加内容文本（如 \"[ts] @keeper\"）。
+           如果 content 为空，则不追加内容文本（如 \"[ts] @pass\"）。
            拼接后 UPDATE takes SET notes=?, updated_at=... WHERE take_id=?。
         """
         payload = {"category": category, "content": content, "raw_text": raw_text}
@@ -1087,10 +1087,10 @@ class DAL:
     def set_take_status(self, take_id: int, status: str) -> None:
         """更新 take 的 status，并在 take_events 写一条 manual.mark 事件。
 
-        status 必须是 'keeper' / 'ng' / 'hold' / 'tbd' 之一，否则抛 ValueError。
+        status 必须是 'pass' / 'ng' / 'keep' / 'tbd' 之一，否则抛 ValueError。
         单事务内完成：UPDATE takes + INSERT take_events（inline，不调 insert_take_event 避免嵌套事务）。
         """
-        _VALID_STATUSES = {"keeper", "ng", "hold", "tbd"}
+        _VALID_STATUSES = {"pass", "ng", "keep", "tbd"}
         if status not in _VALID_STATUSES:
             raise ValueError(
                 f"非法 status 值 {status!r}，必须是 {sorted(_VALID_STATUSES)} 之一"

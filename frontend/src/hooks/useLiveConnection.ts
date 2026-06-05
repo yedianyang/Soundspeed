@@ -100,8 +100,9 @@ export function useLiveConnection(): void {
         if (topic === "note.processed") {
           const m = payload as NoteProcessedMsg
           s.noteProcessed(m)
-          // 刷新受影响的 take 的 notes + takes 列表
+          // 刷新受影响的 take：takes 列表（折叠态 take.notes）+ 该 take 详情（展开态 data.notes）。
           queryClient.invalidateQueries({ queryKey: ["takes"] })
+          queryClient.invalidateQueries({ queryKey: takeQueryKey(m.take_id) })
           return
         }
         if (topic === "note.failed") {

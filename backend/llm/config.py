@@ -60,9 +60,9 @@ def _build_l2_task_config() -> dict:
 
 
 def _build_note_task_config() -> dict:
-    """构造 note_struct 配置，含 tools/tool_choice（文本 NP forced tool-call，对标 l2_take）。
+    """构造 note_struct 配置，含 tools/tool_choice（文本/语音 NP forced tool-call，对标 l2_take）。
 
-    note 短（512 token 够）；system 仅参考模板，真 system prompt 由 run_np_note 组装。
+    note 短（512 token 够）；system 仅参考模板，真 system prompt 由 run_np_note/run_np_voice 组装。
     """
     from backend.llm.tools.note import NOTE_TOOL_NAME, build_note_tool  # noqa: PLC0415
 
@@ -99,18 +99,9 @@ TASK_CONFIG: dict[str, dict] = {
         # TODO(1.G): 接入时按剧本结构化需求细化 system prompt
         "system": "将剧本解析为结构化 JSON。",
     },
-    # note_struct：无 tool，语音 NP（run_np_voice，infer_voice → content）专用。
-    # tools/tool_choice 不在 _META_KEYS，若加到此 key 会让 infer_voice 也吃强制 tool_choice
-    # → content=None → 语音 note 全挂。文本 FC 走独立的 note_struct_tool。
-    "note_struct": {
-        "max_tokens": 512,
-        "temperature": 0.2,
-        "priority": 2,
-        # system 仅参考模板，真 system prompt 由 run_np_voice 组装。
-        "system": "将录音师备注解析为结构化字段。",
-    },
-    # note_struct_tool：带 tools + 强制 tool_choice，文本 NP（run_np_note，infer_tool）专用。
-    "note_struct_tool": _build_note_task_config(),
+    # note_struct：带 tools + 强制 tool_choice，文本（run_np_note/infer_tool）与语音
+    # （run_np_voice/infer_voice_tool）NP 共用——两者都走 forced tool-call，无 content-mode 调用。
+    "note_struct": _build_note_task_config(),
     "agent_init": {
         "_reserved": True,
         "max_tokens": 1024,

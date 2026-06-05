@@ -51,7 +51,22 @@ class NPOutput:
 
 # note 合法类别（单一真源）：_validate_data_dict 校验 + tools/note.py 的 schema enum 同取它，
 # 改类别一处改两路同步（与 L2 的 _VALID_DIFF_TYPES 同思路）。
-_VALID_NOTE_CATEGORIES = ("note", "issue", "keeper", "ng", "hold")
+_VALID_NOTE_CATEGORIES = ("note", "issue", "pass", "ng", "keep")
+
+
+# 类别判定（文本/语音 system prompt + tools/note.py schema 描述共用语义）。
+# 只描述录音师口语「想说什么」，不提系统拿类别去做什么（接 Mark 的副作用在 orchestrator，
+# 不进 prompt，免得给模型无关噪声/偏置）。pass=「过」、keep=「保」（= UI Mark 的 PASS / KEEP）。
+_CATEGORY_GUIDE = (
+    "category 判定（听准录音师的中文口语；判别顺序：先看有没有「保/留」，再看其他）：\n"
+    "- keep（要保这条）：句子里出现「保 / 留 / 留着 / 保留」就判 keep，"
+    "包括「可以保 / 可以留 / 先保 / 这条留着 / 留一条」——⚠ 别因为带了「可以」就误判成 pass。\n"
+    "- pass（这条过了、能用）：没有「保/留」，而是「过 / 过了 / 这条过 / 通过 / 可以用 / "
+    "可以（单独说）/ OK / 行」。\n"
+    "- ng（这条不行）：「不好 / 不行 / 不要 / NG / 废 / 废了 / 重来 / 再来一条」。\n"
+    "- issue（问题记录，不打 Mark 不算好坏）：技术问题，如「收音小 / 灯光暗 / 穿帮 / 有杂音 / 对焦虚」。\n"
+    "- note（一般备注）：以上都不是的普通评论。\n"
+)
 
 
 # NP 输出契约（文本/语音 system prompt 共用，单一真源）：严格 JSON、无 markdown。
@@ -74,8 +89,9 @@ def _build_system_prompt() -> str:
         "- \"上一条\"/\"上一个\"/\"前一条\" → 最近一条已完成的 take\n"
         "- \"第N条\"（如\"第三条\"）→ 当前场当前镜的第 N 条 take；跨镜/跨场时备注须显式带镜次/场次，否则按当前场当前镜解析\n"
         "- 无明确指代 → 默认当前活跃 take，若无则最近一条\n"
-        "- category 取值：note（一般备注）、issue（问题记录）、keeper（保留）、ng（NG）、hold（待定）\n"
         "- content 是去掉指代词和类别标记后的纯净正文\n\n"
+        + _CATEGORY_GUIDE
+        + "\n"
         + _NP_OUTPUT_FORMAT
     )
 
@@ -134,7 +150,7 @@ def _build_voice_user_message(input_data: NPInput) -> str:
 
 
 def _validate_data_dict(data: dict) -> NPOutput:
-    """校验已解析 dict（FC tool_call arguments 或语音裸 JSON 通路共用）→ NPOutput。
+    """校验已解析 dict（tool_call arguments 与裸 JSON 文本两条解析通路共用）→ NPOutput。
 
     字段：take_id（int，非 bool）、category（5 类枚举）、content（str）。
     """
@@ -178,6 +194,16 @@ def _parse_llm_output(raw_text: str) -> NPOutput:
     return _validate_data_dict(data)
 
 
+def _parse_tool_call(tool_call: dict) -> NPOutput:
+    """tool_calls[0] → NPOutput（文本/语音 forced tool-call 共用）：解析 arguments JSON → 校验。"""
+    try:
+        args_json: str = tool_call["function"]["arguments"]
+        data = json.loads(args_json)
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise NPParseError("tool_call arguments 解析失败", cause=exc)
+    return _validate_data_dict(data)
+
+
 async def run_np_note(
     input_data: NPInput,
     llm_service: "LLMService",
@@ -197,24 +223,17 @@ async def run_np_note(
     ]
 
     # FC 路径：调 infer_tool，取 tool_calls[0]，解析 arguments JSON（镜像 run_l2_take）。
-    # task_type=note_struct_tool（带 tools）；语音 run_np_voice 仍用无 tool 的 note_struct。
     try:
         tool_call: dict = await llm_service.infer_tool(
             messages,
-            task_type="note_struct_tool",
+            task_type="note_struct",
             priority=2,
             timeout=timeout,
         )
     except LookupError as exc:
         raise NPParseError("tool_calls 缺失或为空，模型未走 function calling 路径", cause=exc)
 
-    try:
-        args_json: str = tool_call["function"]["arguments"]
-        data = json.loads(args_json)
-    except (KeyError, TypeError, json.JSONDecodeError) as exc:
-        raise NPParseError("tool_call arguments 解析失败", cause=exc)
-
-    return _validate_data_dict(data)
+    return _parse_tool_call(tool_call)
 
 
 def _build_voice_system_prompt() -> str:
@@ -230,8 +249,9 @@ def _build_voice_system_prompt() -> str:
         "- \"上一条\"/\"上一个\"/\"前一条\" → 最近一条已完成的 take\n"
         "- \"第N条\"（如\"第三条\"）→ 当前场当前镜的第 N 条 take；跨镜/跨场时语音须显式带镜次/场次，否则按当前场当前镜解析\n"
         "- 无明确指代 → 默认当前活跃 take，若无则最近一条\n"
-        "- category 取值：note（一般备注）、issue（问题记录）、keeper（保留、可以用）、ng（NG）、hold（待定）\n"
         "- content 是去掉指代词和编号后的纯净正文\n\n"
+        + _CATEGORY_GUIDE
+        + "\n"
         + _NP_OUTPUT_FORMAT
     )
 
@@ -242,11 +262,12 @@ async def run_np_voice(
     llm_service: "LLMService",
     timeout: float = 60.0,
 ) -> NPOutput:
-    """语音 NP：场镜次上下文 + 音频哨兵 → 多模态 infer_voice → 解析 {take_id, category, content}。
+    """语音 NP：场镜次上下文 + 音频哨兵 → 多模态 forced tool-call → 解析 {take_id, category, content}。
 
-    与 run_np_note 共用 NPInput / _parse_llm_output / 场镜次上下文，唯一分叉：user content 是
-    `[text, 音频哨兵]` 多模态 list，且走 llm_service.infer_voice（带 audio 字节）。失败（解析/超时/
-    FK）分类沿用文本路径（NPParseError / TimeoutError / IntegrityError，由 orchestrator 4.I 兜底）。
+    与文本 run_np_note 同一条 tool 路径（note_struct + tool_calls），唯一分叉：user content 是
+    `[text, 音频哨兵]` 多模态 list，走 llm_service.infer_voice_tool（带 audio 字节）。多模态 handler
+    先 eval 音频再按 schema grammar 约束输出，故语音也享 schema 强约束（不再靠模型自觉吐 JSON）。
+    失败（解析/超时/FK）分类沿用文本路径（NPParseError / TimeoutError / IntegrityError，4.I 兜底）。
     """
     from backend.llm.multimodal import AUDIO_SENTINEL  # noqa: PLC0415  延迟导入避免顶层拉 llama_cpp
 
@@ -261,12 +282,15 @@ async def run_np_voice(
         },
     ]
 
-    raw_text = await llm_service.infer_voice(
-        messages,
-        audio,
-        task_type="note_struct",
-        priority=2,
-        timeout=timeout,
-    )
+    try:
+        tool_call: dict = await llm_service.infer_voice_tool(
+            messages,
+            audio,
+            task_type="note_struct",
+            priority=2,
+            timeout=timeout,
+        )
+    except LookupError as exc:
+        raise NPParseError("tool_calls 缺失或为空，模型未走 function calling 路径", cause=exc)
 
-    return _parse_llm_output(raw_text)
+    return _parse_tool_call(tool_call)

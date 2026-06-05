@@ -1393,16 +1393,16 @@ def _make_take(tmp_dal: DAL, scene_code: str = "ScenePatch") -> tuple[int, int]:
 
 
 def test_patch_take_status(tmp_dal: DAL, monkeypatch) -> None:
-    """PATCH /takes/{id} status=keeper → 200，状态改变，有 take_events manual.mark。"""
+    """PATCH /takes/{id} status=keep → 200，状态改变，有 take_events manual.mark。"""
     sid, tid = _make_take(tmp_dal, "ScenePatchStatus")
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
-    resp = client.patch(f"/api/v1/takes/{tid}", json={"status": "keeper"}, headers=_AUTH)
+    resp = client.patch(f"/api/v1/takes/{tid}", json={"status": "keep"}, headers=_AUTH)
     assert resp.status_code == 200
-    assert resp.json()["status"] == "keeper"
+    assert resp.json()["status"] == "keep"
     # DAL 里 status 已更新
     updated_take = tmp_dal.get_take(tid)
     assert updated_take is not None
-    assert updated_take.status == "keeper"
+    assert updated_take.status == "keep"
     # take_events 有 manual.mark 记录
     evts = tmp_dal.list_take_events(tid, event_type="manual.mark")
     assert len(evts) >= 1
@@ -1440,7 +1440,7 @@ def test_patch_take_number_suffix_when_conflict(tmp_dal: DAL, monkeypatch) -> No
     tmp_dal.set_active_scene(sid)
     # 两次 start_take 在同 shot="1" 组内，分别拿到 number=1, 2
     t1, _ = tmp_dal.start_take(sid, "1", 1000.0)   # shot="1", number=1
-    tmp_dal.end_take(t1, 1010.0, "keeper")
+    tmp_dal.end_take(t1, 1010.0, "keep")
     t2, _ = tmp_dal.start_take(sid, "1", 1020.0)   # shot="1", number=2
     tmp_dal.end_take(t2, 1030.0, "ng")
 
@@ -1466,9 +1466,9 @@ def test_patch_take_scene_id_cross_scene_conflict_uses_suffix(tmp_dal: DAL, monk
     tmp_dal.set_active_scene(sid1)
 
     t1, _ = tmp_dal.start_take(sid1, "1", 1000.0)   # shot="1", number=1
-    tmp_dal.end_take(t1, 1010.0, "keeper")
+    tmp_dal.end_take(t1, 1010.0, "keep")
     t2, _ = tmp_dal.start_take(sid2, "1", 1020.0)   # shot="1", number=1（不同场）
-    tmp_dal.end_take(t2, 1030.0, "keeper")
+    tmp_dal.end_take(t2, 1030.0, "keep")
 
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
     # 把 t1 移到 sid2 且指定 take_number=1（已被 t2 占用），应追加后缀而非 409

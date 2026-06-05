@@ -5,7 +5,7 @@ import { useSessionStore } from "@/store/session"
 import type { NoteDTO, PendingNote } from "@/types/api"
 
 const CATEGORY_COLORS: Record<string, string> = {
-  keeper: "text-green-600",
+  keep: "text-green-600",
   ng: "text-red-600",
   issue: "text-yellow-600",
   note: "text-muted-foreground",

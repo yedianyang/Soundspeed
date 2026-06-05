@@ -571,7 +571,7 @@ async def activate_scene(
 class PatchTakeBody(BaseModel):
     """PATCH /takes/{take_id} 请求体（所有字段可选）。"""
 
-    status: Literal["keeper", "ng", "hold", "tbd"] | None = None
+    status: Literal["pass", "ng", "keep", "tbd"] | None = None
     shot: str | None = None
     scene_id: int | None = None
     take_number: int | None = None
