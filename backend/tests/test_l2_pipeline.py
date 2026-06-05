@@ -745,3 +745,97 @@ async def test_detail_empty_string_normalized(l2_input: L2Input) -> None:
     result = await run_l2_take(l2_input, svc)
 
     assert result.line_matches[0].detail is None
+
+
+# ---------------------------------------------------------------------------
+# spec §6.2 smoke gate：真模型行为合规性验证
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_no_script_correction_smoke() -> None:
+    """spec §6.2 smoke gate：4B Gemma 在精简 tool 下不编造 summary/insertion。
+
+    构造无剧本输入，transcript_segments 故意混入繁体 + 错别字：
+    - 段 0：繁体「你覺得這樣怎麼樣」（繁简转换后为「你觉得这样怎么样」）
+    - 段 1：明显同音错别字「那我就在这等候你的好消心」（心→息）
+    - 段 2：正常文本「好的没问题」
+
+    断言（头号风险验证）：
+    - line_matches == []（精简 tool 没有此字段，模型不应编造）
+    - script_diff_summary is None（精简 tool 没有此字段，模型不应编造）
+    - corrected_segments 里无 original == corrected 的项（过滤兜底，验模型未原样透传）
+
+    注意：corrected_segments 的具体内容取决于模型判断（不做强断言），
+    但实际返回值会通过 print 原样输出供 Lead 实证审查。
+    """
+    import os
+
+    model_path = os.environ.get("GEMMA_MODEL_PATH")
+    if not model_path:
+        pytest.skip("GEMMA_MODEL_PATH 未设置，跳过 no-script smoke gate")
+
+    from backend.llm.service import _reset_service, get_service
+
+    _reset_service()
+    svc = get_service()
+    try:
+        inp = L2Input(
+            take_id=999,
+            scene_id=5,
+            take_number=1,
+            transcript_segments=[
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "你覺得這樣怎麼樣",   # 繁体，繁简转换后「你觉得这样怎么样」
+                    "start_frame": 0,
+                    "end_frame": 16000,
+                },
+                {
+                    "speaker": "SPEAKER_01",
+                    "text": "那我就在这等候你的好消心",  # 心→息（同音错别字）
+                    "start_frame": 16000,
+                    "end_frame": 32000,
+                },
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "好的没问题",
+                    "start_frame": 32000,
+                    "end_frame": 48000,
+                },
+            ],
+            script_lines=[],
+            previous_notes=[],
+        )
+
+        result = await run_l2_take(inp, svc)
+
+        # ── 原样打印真实返回，供 Lead 实证审查 ──
+        print("\n[smoke] 真实模型返回：")
+        print(f"  script_diff_summary = {result.script_diff_summary!r}")
+        print(f"  line_matches        = {result.line_matches!r}")
+        print("  corrected_segments  =")
+        for cs in result.corrected_segments:
+            print(f"    idx={cs.idx}  {cs.original!r} -> {cs.corrected!r}")
+        if not result.corrected_segments:
+            print("    （空列表，模型认为无需纠错）")
+
+        # ── 头号风险断言 ──
+        assert result.line_matches == [], (
+            f"4B 模型仍编造了 line_matches（精简 tool 无此字段）: {result.line_matches!r}"
+        )
+        assert result.script_diff_summary is None, (
+            f"4B 模型仍编造了 script_diff_summary（精简 tool 无此字段）: "
+            f"{result.script_diff_summary!r}"
+        )
+
+        # original==corrected 已在 _validate_data_dict 过滤，断言过滤后无此类条目
+        for cs in result.corrected_segments:
+            assert cs.original != cs.corrected, (
+                f"corrected_segments 中仍有 original==corrected: {cs!r}"
+            )
+
+    finally:
+        await svc.aclose()
+        _reset_service()
