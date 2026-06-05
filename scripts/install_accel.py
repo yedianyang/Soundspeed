@@ -94,7 +94,14 @@ def _llama_cu124_wheel_action() -> dict:
 
 
 def _llama_source_compile_action() -> dict:
-    """llama-cpp-python 源码编译 CUDA（Blackwell/future 分支）。"""
+    """llama-cpp-python 源码编译 CUDA（Blackwell/future 分支）。
+
+    刻意不带 --no-build-isolation（与下面 pywhispercpp 不同）：llama-cpp-python
+    用 scikit-build-core 构建，CMAKE_ARGS 在隔离构建子进程里照样读到，无需关隔离。
+    与 docs/2026-06-02-windows-llama-cpp-runbook.md §3 自编译命令一致（那条
+    `pip install llama-cpp-python --no-binary llama-cpp-python` 也不带）。加上反而
+    要求 scikit-build-core/cmake/ninja 预装在当前环境，更脆。
+    """
     return {
         "action": "install",
         "package": "llama-cpp-python",
@@ -120,6 +127,10 @@ def _pywhispercpp_source_compile_action() -> dict:
     才真编译。§7 字面命令带 --no-build-isolation --no-cache-dir 但漏了
     --no-binary；这里以 §5.5 + 任务步骤 2 为准补上 --no-binary（见返回里的
     deviation 说明）。
+
+    保留 --no-build-isolation（与 llama 分支刻意不同）：沿用 spec §7 字面命令。
+    pywhispercpp 1.5.0 的 Windows CUDA 源码编译路径尚未实测，不擅自删此 flag。
+    两个包命令不对称是有意保留的，不是疏漏。
     """
     return {
         "action": "install",
