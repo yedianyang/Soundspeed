@@ -242,3 +242,19 @@ def test_query_readonly_blocks_pragma_table_info(dal: DAL) -> None:
     # scoped PRAGMA：table_info 不是 data_version，仍被 DENY
     res = dal.query_readonly("PRAGMA table_info(scenes);")
     assert "error" in res
+
+
+def test_query_readonly_blocks_load_extension(dal: DAL) -> None:
+    # load_extension 是 RCE 向量，authorizer 层独立 DENY（纵深防御，不依赖 enable_load_extension）
+    res = dal.query_readonly("SELECT load_extension('/tmp/evil.so');")
+    assert "error" in res
+
+
+def test_query_readonly_timeout(dal: DAL) -> None:
+    # DoS 防线：progress_handler 在 deadline 后返回非零，SQLite 中断查询
+    res = dal.query_readonly(
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) "
+        "SELECT count(*) FROM c;",
+        timeout_s=0.1,
+    )
+    assert "error" in res

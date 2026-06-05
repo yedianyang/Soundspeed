@@ -38,7 +38,12 @@ _SCENE_PREFIX_RE = re.compile(r"^(?:scene|场|sc|s)[\s_\-]*(?=\d)", re.IGNORECAS
 # 万能笔 authorizer：只放行 SELECT 系动作，其余 DENY（挡 ATTACH/写/非 data_version PRAGMA）。
 # FTS 影子表（_config/_idx/_data/_docsize）按设计可读：MATCH 内部需要 _config/_idx，
 # 且影子表漏不出 script_lines 之外的剧本内容——模型本就能直接读 script_lines 拿全部台词。
-# 真正边界：action 级（只 SELECT 系）+ mode=ro + 单句守卫 + 行数封顶 + 超时。
+# 真正边界：action 级（PRAGMA scoped + FUNCTION 整体放行除 load_extension）+ mode=ro +
+#   单句守卫 + 行数封顶 + 超时。
+# FUNCTION 放行范围：bm25/coalesce 等 FTS/标量函数均需放行，但 load_extension 在
+#   authorizer 层独立 DENY（RCE 向量，纵深防御，不依赖 enable_load_extension 未调用）。
+# Accepted risk：SELECT zeroblob/randomblob 大分配内存 DoS——单用户 demo、模型上下文受限、
+#   风险有界，本期不堵。
 _QP_ALLOWED_ACTIONS = frozenset(
     {
         sqlite3.SQLITE_SELECT,
@@ -412,11 +417,16 @@ class DAL:
 
         安全边界（action 级，无表名 deny）：
         - PRAGMA 分支最先：只放行 FTS MATCH 内部所需的 data_version，其余 PRAGMA 一律 DENY。
-        - _QP_ALLOWED_ACTIONS（SELECT/READ/FUNCTION/RECURSIVE）放行，其余 DENY。
+        - FUNCTION 分支次之：整体放行（bm25 等 FTS/标量函数需要），但独立堵死 load_extension
+          （RCE 向量；即便当前 _readonly_conn 未 enable_load_extension，也在 authorizer 层
+          独立防御，防未来连接配置变动打开缺口）。
+        - _QP_ALLOWED_ACTIONS（SELECT/READ/FUNCTION/RECURSIVE）放行其余，其余 DENY。
           这挡住了 ATTACH（SQLITE_ATTACH）、写（INSERT/UPDATE/DELETE）、临时表（CREATE）等。
         - FTS 影子表（_config/_idx/_data/_docsize）按设计可读：MATCH 内部需要 _config/_idx，
           且影子表漏不出 script_lines 之外信息（模型本就能直接读 script_lines）。
         - 额外防线：mode=ro 连接挡物理写；单句守卫（sqlite3.Warning）；行数封顶；超时 abort。
+        - Accepted risk：SELECT zeroblob/randomblob 大分配内存 DoS——单用户 demo、上下文受限，
+          本期不堵。
         错误不抛穿：包成 {"error": ...} 让循环下一跳自纠。
         成功返回 {"columns": [...], "rows": [...], "row_count": n, "truncated": bool}。
         """
@@ -429,6 +439,11 @@ class DAL:
             # 只放行 data_version（FTS MATCH 内部用来检测 DB 并发修改），其余 PRAGMA 全部 DENY。
             if action == sqlite3.SQLITE_PRAGMA:
                 return sqlite3.SQLITE_OK if arg1 == "data_version" else sqlite3.SQLITE_DENY
+            # FUNCTION 整体放行（bm25 等 FTS/标量函数需要），但独立堵死 load_extension——
+            # 它是 RCE 向量；即便当前 _readonly_conn 未 enable_load_extension，也在
+            # authorizer 层堵死，防未来连接配置变动打开缺口（纵深防御）。
+            if action == sqlite3.SQLITE_FUNCTION:
+                return sqlite3.SQLITE_DENY if arg2 == "load_extension" else sqlite3.SQLITE_OK
             if action in _QP_ALLOWED_ACTIONS:
                 return sqlite3.SQLITE_OK
             return sqlite3.SQLITE_DENY
