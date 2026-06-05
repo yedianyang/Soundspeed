@@ -49,6 +49,7 @@ async def post_query(
     cm = request.app.state.connection_manager
     cm.broadcast(
         f"{QP_ANSWER}.{body.conn_id}",
+        # conn_id（API/WS topic 缩写）→ connection_id（payload 字段，对齐 QueryRequestPayload）
         QpAnswerPayload(connection_id=body.conn_id, answer_text=answer),
     )
     return {"status": "ok", "answer": answer}

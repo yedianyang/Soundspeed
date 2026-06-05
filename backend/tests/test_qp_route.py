@@ -100,3 +100,20 @@ def test_post_query_exception_returns_fallback_not_500(client, monkeypatch) -> N
     assert "抱歉" in body["answer"] or "出错" in body["answer"]
     # 即使出错仍然广播（让前端不挂起）
     assert captured.get("topic") == "qp.answer.xyz"
+
+
+def test_post_query_503_when_no_service(tmp_path, monkeypatch) -> None:
+    """llm_service=None 时 route 在 try 块外抛 503（不被兜底吞）。"""
+    monkeypatch.setenv("ADMIN_TOKEN", "devtoken")
+    dal = DAL(tmp_path / "no_svc.db")
+    orch = create_orchestrator(dal)
+    app = create_app(orch, llm_service=None)  # 不注入 service
+
+    with TestClient(app) as c:
+        resp = c.post(
+            "/api/v1/query",
+            json={"text": "x", "conn_id": "abc"},
+            headers={"Authorization": "Bearer devtoken"},
+        )
+    dal.close()
+    assert resp.status_code == 503

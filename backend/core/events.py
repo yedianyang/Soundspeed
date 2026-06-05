@@ -49,6 +49,9 @@ AUDIO_LEVEL = "audio.level"
 # 在线观看数（WS 连接建立 / 断开时 ConnectionManager 广播，驱动前端 header 眼睛计数）
 VIEWER_COUNT = "viewer.count"
 
+# QP 查询管线（QP route 直接调 cm.broadcast，不经 orchestrator.publish；topic 带动态 conn_id）
+QP_ANSWER = "qp.answer"  # 实际广播 topic 为 f"{QP_ANSWER}.{conn_id}"，客户端按前缀过滤
+
 
 # ── Payload dataclass ─────────────────────────────────────────────────────────
 
@@ -280,10 +283,6 @@ class ViewerCountPayload:
     """
 
     count: int
-
-
-# QP 查询管线（Task 10）
-QP_ANSWER = "qp.answer"  # 实际广播 topic 为 f"{QP_ANSWER}.{conn_id}"，客户端按前缀过滤
 
 
 @dataclass(frozen=True)
