@@ -602,6 +602,35 @@ async def test_run_l2_take_fc_real_model_structure(
         _reset_service()
 
 
+# ---------------------------------------------------------------------------
+# 2026-06-06 无剧本 tool schema 单测（spec §6.1 test_l2_tool_schema）
+# ---------------------------------------------------------------------------
+
+
+def test_no_script_tool_has_only_corrected_segments() -> None:
+    """build_l2_no_script_tool schema 不含 script_diff_summary / line_matches。"""
+    from backend.llm.tools.script import build_l2_no_script_tool
+
+    params = build_l2_no_script_tool()["function"]["parameters"]
+    props = params["properties"]
+    assert "corrected_segments" in props
+    assert "script_diff_summary" not in props
+    assert "line_matches" not in props
+
+
+def test_no_script_tool_required_fields() -> None:
+    """build_l2_no_script_tool required 只有 ['corrected_segments']。"""
+    from backend.llm.tools.script import build_l2_no_script_tool
+
+    params = build_l2_no_script_tool()["function"]["parameters"]
+    assert params["required"] == ["corrected_segments"]
+
+
+# ---------------------------------------------------------------------------
+# Layer 5 smoke
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.smoke
 def test_jinja_template_renders_tool_declaration() -> None:
     """Layer 0：vocab_only=True 读 GGUF tokenizer.chat_template，

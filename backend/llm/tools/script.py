@@ -17,6 +17,19 @@ from __future__ import annotations
 from backend.pipelines.l2_constants import _VALID_DIFF_TYPES
 
 
+def build_l2_no_script_tool() -> dict:
+    """构造 report_corrections_only OpenAI 风格 tool dict（无剧本纯纠错路径）。
+
+    只含 corrected_segments 一个字段，不含 script_diff_summary / line_matches，
+    grammar 层面约束模型不能生成剧本比对相关输出。
+
+    Returns:
+        符合 OpenAI function calling spec 的 tool 字典，
+        type="function"，name="report_corrections_only"。
+    """
+    raise NotImplementedError
+
+
 def build_l2_tool() -> dict:
     """构造 report_script_analysis OpenAI 风格 tool dict。
 

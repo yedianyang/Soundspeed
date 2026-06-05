@@ -570,3 +570,178 @@ async def test_run_l2_take_corrected_segments_bool_idx(l2_input: L2Input) -> Non
     svc = _mock_llm(response)
     with pytest.raises(L2ParseError, match="non-negative integer"):
         await run_l2_take(l2_input, svc)
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-06 无剧本分支新测试（spec §6.1）
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_script_input(stub_segments: list[dict]) -> L2Input:
+    """script_lines=[] 的无剧本输入。"""
+    return L2Input(
+        take_id=20,
+        scene_id=3,
+        take_number=1,
+        transcript_segments=stub_segments,
+        script_lines=[],
+        previous_notes=[],
+    )
+
+
+def _no_script_response(corrected_segments: list[dict] | None = None) -> str:
+    """无剧本路径 tool 返回 JSON（只含 corrected_segments）。"""
+    return json.dumps(
+        {"corrected_segments": corrected_segments if corrected_segments is not None else []},
+        ensure_ascii=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_script_uses_no_script_task_type(
+    no_script_input: L2Input,
+) -> None:
+    """script_lines=[] 时，infer_tool 收到 task_type='l2_take_no_script'。"""
+    svc = _mock_llm(_no_script_response())
+    await run_l2_take(no_script_input, svc)
+
+    call_kwargs = svc.infer_tool.call_args
+    actual_task_type = call_kwargs.kwargs.get("task_type") or call_kwargs[1].get("task_type")
+    assert actual_task_type == "l2_take_no_script"
+
+
+@pytest.mark.asyncio
+async def test_has_script_uses_l2_take_task_type(l2_input: L2Input) -> None:
+    """script_lines 非空时，infer_tool 收到 task_type='l2_take'（回归）。"""
+    svc = _mock_llm(
+        json.dumps(
+            {"script_diff_summary": "ok", "line_matches": [], "corrected_segments": []},
+            ensure_ascii=False,
+        )
+    )
+    await run_l2_take(l2_input, svc)
+
+    call_kwargs = svc.infer_tool.call_args
+    actual_task_type = call_kwargs.kwargs.get("task_type") or call_kwargs[1].get("task_type")
+    assert actual_task_type == "l2_take"
+
+
+@pytest.mark.asyncio
+async def test_no_script_user_message_no_script_block(
+    no_script_input: L2Input,
+) -> None:
+    """无剧本时，user message 不含「剧本台词」节。"""
+    svc = _mock_llm(_no_script_response())
+    await run_l2_take(no_script_input, svc)
+
+    call_args = svc.infer_tool.call_args
+    messages = call_args[0][0]
+    user_message = next(m["content"] for m in messages if m["role"] == "user")
+    assert "剧本台词" not in user_message
+
+
+@pytest.mark.asyncio
+async def test_no_script_user_message_no_diff_task(
+    no_script_input: L2Input,
+) -> None:
+    """无剧本时，user message 不含「①找出 insertion」任务说明。"""
+    svc = _mock_llm(_no_script_response())
+    await run_l2_take(no_script_input, svc)
+
+    call_args = svc.infer_tool.call_args
+    messages = call_args[0][0]
+    user_message = next(m["content"] for m in messages if m["role"] == "user")
+    assert "insertion" not in user_message
+    assert "①" not in user_message
+
+
+@pytest.mark.asyncio
+async def test_no_script_output_empty_line_matches(
+    no_script_input: L2Input,
+) -> None:
+    """无剧本路径输出解析后，line_matches=[] 且 script_diff_summary is None。"""
+    svc = _mock_llm(_no_script_response())
+    result = await run_l2_take(no_script_input, svc)
+
+    assert result.line_matches == []
+    assert result.script_diff_summary is None
+
+
+@pytest.mark.asyncio
+async def test_filter_identical_corrected_segments(l2_input: L2Input) -> None:
+    """original==corrected 的段被丢弃，不出现在 L2Output.corrected_segments（有剧本路径兜底）。"""
+    response = json.dumps(
+        {
+            "script_diff_summary": None,
+            "line_matches": [],
+            "corrected_segments": [
+                {"idx": 0, "original": "不变文本", "corrected": "不变文本"},  # 应被过滤
+                {"idx": 1, "original": "原始", "corrected": "修正"},            # 应保留
+            ],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    result = await run_l2_take(l2_input, svc)
+
+    assert len(result.corrected_segments) == 1
+    assert result.corrected_segments[0].original == "原始"
+    assert result.corrected_segments[0].corrected == "修正"
+
+
+@pytest.mark.asyncio
+async def test_detail_null_string_normalized(l2_input: L2Input) -> None:
+    """line_matches 中 detail='null' 归一化为 Python None。"""
+    response = json.dumps(
+        {
+            "script_diff_summary": None,
+            "line_matches": [
+                {"line_no": 1, "diff_type": "match", "detail": "null"},
+            ],
+            "corrected_segments": [],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    result = await run_l2_take(l2_input, svc)
+
+    assert result.line_matches[0].detail is None
+
+
+@pytest.mark.asyncio
+async def test_detail_none_string_normalized(l2_input: L2Input) -> None:
+    """line_matches 中 detail='none' 归一化为 Python None。"""
+    response = json.dumps(
+        {
+            "script_diff_summary": None,
+            "line_matches": [
+                {"line_no": 1, "diff_type": "match", "detail": "none"},
+            ],
+            "corrected_segments": [],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    result = await run_l2_take(l2_input, svc)
+
+    assert result.line_matches[0].detail is None
+
+
+@pytest.mark.asyncio
+async def test_detail_empty_string_normalized(l2_input: L2Input) -> None:
+    """line_matches 中 detail='' 归一化为 Python None。"""
+    response = json.dumps(
+        {
+            "script_diff_summary": None,
+            "line_matches": [
+                {"line_no": 1, "diff_type": "match", "detail": ""},
+            ],
+            "corrected_segments": [],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    result = await run_l2_take(l2_input, svc)
+
+    assert result.line_matches[0].detail is None
