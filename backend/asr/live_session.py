@@ -61,6 +61,15 @@ class LiveAsrSession:
         with self._lock:
             self._device = device
 
+    def make_source(self) -> Iterable:
+        """按当前设备构造一个 AudioSource（与 take 同设备解析，跟随 set_device）。
+
+        供 EnrollRecorder 复用 —— 保证录声纹和 Capture 永远用同一支后端麦。
+        """
+        with self._lock:
+            device = self._device
+        return self._source_factory(device)
+
     @property
     def language(self) -> str:
         return self._runner.language
