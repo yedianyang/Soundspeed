@@ -18,6 +18,7 @@ const FAIL_REASON_TEXT: Record<string, string> = {
   timeout: "处理超时",
   asr_unclear: "没听清",
   model_unavailable: "模型未就绪", // mmproj 缺失/下载失败，语音模型未挂载（4.J）
+  upload_failed: "提交失败", // 前端网络/上传层失败（请求没进后端），区别于后端 NP 的 timeout
 }
 
 function formatTime(ts: number): string {
@@ -46,7 +47,7 @@ export default function NoteList({ takeId, refreshKey }: NoteListProps) {
       ? postVoiceNote(pn.voiceBlob, pn.client_id, pn.ts)
       : postNote(pn.rawText, undefined, pn.client_id)
     resubmit.catch(() => {
-      noteFailed({ reason: "timeout", ts: pn.ts, client_id: pn.client_id })
+      noteFailed({ reason: "upload_failed", ts: pn.ts, client_id: pn.client_id })
     })
   }
 

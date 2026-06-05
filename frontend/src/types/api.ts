@@ -257,7 +257,7 @@ export interface NoteProcessedMsg {
 
 // WS note.failed payload（4.I）：NP 失败兜底，前端据此把对应 pending 转失败态。
 export interface NoteFailedMsg {
-  reason: string // take_not_found / parse_error / timeout / model_unavailable（机制可检测的失败）
+  reason: string // take_not_found / parse_error / timeout / model_unavailable（后端 NP 失败）；upload_failed（前端网络/上传层失败，不进后端）
   ts: number
   client_id: string | null // 定位要标失败的 pending；null=异常/旧链路，不误标
 }

@@ -74,8 +74,8 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
     try {
       await postVoiceNote(wav, clientId, ts)
     } catch {
-      // 网络层失败 → 标失败态（用 client_id 精确定位），不卡处理中。
-      useSessionStore.getState().noteFailed({ reason: "timeout", ts, client_id: clientId })
+      // 网络层失败 → 标失败态（用 client_id 精确定位），不卡处理中。upload_failed 区别于后端 NP timeout。
+      useSessionStore.getState().noteFailed({ reason: "upload_failed", ts, client_id: clientId })
     }
   }
 
