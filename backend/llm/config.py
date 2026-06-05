@@ -46,7 +46,7 @@ def _build_note_task_config() -> dict:
 
 # task_type -> 配置字典
 # 字段：max_tokens, temperature, priority, system, _reserved（可选）；
-# l2_take 额外含 tools/tool_choice（Tier 1 forced function calling）。
+# l2_take 含 tools/tool_choice（Tier 1 forced FC）；query_session 含 tools/tool_choice（Tier 2 auto 路由）。
 TASK_CONFIG: dict[str, dict] = {
     "query_session": {
         "max_tokens": 1024,
