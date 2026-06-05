@@ -6,6 +6,7 @@ import type { NoteDTO, PendingNote } from "@/types/api"
 
 const CATEGORY_COLORS: Record<string, string> = {
   keep: "text-green-600",
+  pass: "text-green-600",
   ng: "text-red-600",
   issue: "text-yellow-600",
   note: "text-muted-foreground",

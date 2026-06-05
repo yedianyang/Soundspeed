@@ -217,10 +217,12 @@ class NoteFailedPayload:
     """note.failed 的 payload：NP Pipeline 失败时发布，让前端把对应 pending 转失败态而非永久卡死。
 
     reason 只列机制上可检测的失败：
-      - take_not_found —— LLM 返回的 take_id 不存在（insert_note 撞 FK）。
-      - parse_error    —— LLM 输出非合法 JSON / 字段缺失（NPParseError）。
-      - timeout        —— infer 排队 + 推理超时（asyncio.TimeoutError）。
+      - take_not_found    —— LLM 返回的 take_id 不存在（insert_note 撞 FK）。
+      - parse_error       —— LLM 输出非合法 JSON / 字段缺失（NPParseError）。
+      - timeout           —— infer 排队 + 推理超时（asyncio.TimeoutError）。
+      - model_unavailable —— 多模态模型不可用（mmproj 缺失/下载失败退纯文本，或 mtmd 自检失败）。
     asr_unclear（音频没听清）需模型自报机制，非后端可直接判定，MVP 不发。
+    upload_failed 由前端网络/上传层失败时自行置位，不经后端。
     """
 
     reason: str

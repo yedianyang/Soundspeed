@@ -149,7 +149,7 @@ class LLMService:
         self._model_path = await asyncio.to_thread(resolve_model_path, True)
         try:
             self._mmproj_path = await asyncio.to_thread(resolve_mmproj_path, True)
-        except Exception:  # noqa: BLE0001  下载失败容错：退纯文本，不崩启动
+        except Exception:  # noqa: BLE001  下载失败容错：退纯文本，不崩启动
             self._mmproj_path = None
 
     def _ensure_worker(self) -> None:
