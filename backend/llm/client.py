@@ -11,7 +11,12 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from backend.llm.errors import ModelUnavailableError
+
+if TYPE_CHECKING:
+    from backend.llm.multimodal import MultimodalGemma4Handler
 
 # 默认模型路径，由环境变量覆盖
 _DEFAULT_MODEL_PATH = "models/gemma-4-E4B-it-Q4_K_M.gguf"
@@ -39,7 +44,11 @@ class LLMClient(Protocol):
         messages: list[dict],
         **kwargs: object,
     ) -> dict:
-        """同步执行 chat completion，返回 OpenAI 风格 dict。"""
+        """同步执行 chat completion，返回 OpenAI 风格 dict。
+
+        多模态音频路径用 audio kwarg（GemmaClient 显式声明该形参，经 **kwargs 兼容本协议）：
+        非 None 时 messages 含音频哨兵、client 把字节喂给 handler；纯文本 client 收到 audio 报错。
+        """
         ...
 
 
@@ -55,7 +64,12 @@ class GemmaClient:
     保证后续替换为 Ollama / vLLM 时只改 client.py。
     """
 
-    def __init__(self, model_path: str | None = None, **llama_kwargs: object) -> None:
+    def __init__(
+        self,
+        model_path: str | None = None,
+        mmproj_path: str | None = None,
+        **llama_kwargs: object,
+    ) -> None:
         from llama_cpp import Llama  # type: ignore[import]
 
         resolved_path = model_path or os.environ.get("GEMMA_MODEL_PATH", _DEFAULT_MODEL_PATH)
@@ -68,14 +82,46 @@ class GemmaClient:
                 params["n_gpu_layers"] = int(gpu_env)
             except ValueError:
                 pass
-        self._llm = Llama(model_path=resolved_path, **params)  # type: ignore[arg-type]
+
+        # mmproj_path 给定 → 升级为多模态单实例（text/audio/image 三入口共用，方案 A，spec §5.1）。
+        # 文本（L2 + 文本 NP）也借道这一份 handler，保证文本输入统一格式化。
+        self._handler: MultimodalGemma4Handler | None = None
+        if mmproj_path is not None:
+            from backend.llm.multimodal import MultimodalGemma4Handler  # noqa: PLC0415
+
+            self._handler = MultimodalGemma4Handler(
+                clip_model_path=mmproj_path, verbose=bool(params.get("verbose"))
+            )
+            params["chat_handler"] = self._handler
+            # vision-ready：gemma4 vision non-causal 要 1120 image token 落单 ubatch，
+            # 故 n_batch=n_ubatch=2048。audio/text 用不上但无害（caller 显式传则尊重）。
+            params.setdefault("n_batch", 2048)
+            params.setdefault("n_ubatch", 2048)
+
+        # self._llm 标 Any：llama_cpp 是底层封装边界，不让其精确返回类型（CreateChatCompletion
+        # Response | Iterator）泄漏到本层（否则 result: dict 赋值处处需 cast/ignore）。
+        self._llm: Any = Llama(model_path=resolved_path, **params)  # type: ignore[arg-type]
 
     def create_chat_completion(
         self,
         messages: list[dict],
         **kwargs: object,
     ) -> dict:
-        result: dict = self._llm.create_chat_completion(messages=messages, **kwargs)  # type: ignore[arg-type]
+        # 音频路径：audio 经 kwargs 传入（保持签名与 LLMClient 协议一致，不破坏 StubClient 等的结构匹配）。
+        audio = kwargs.pop("audio", None)
+        if audio is not None:
+            if self._handler is None:
+                raise ModelUnavailableError("纯文本 GemmaClient 不支持音频推理（未挂多模态 handler）")
+            if not isinstance(audio, (bytes, bytearray)):
+                raise TypeError(f"audio 必须是 bytes，收到 {type(audio).__name__}")
+            # _lock 串行下设置该次请求音频，handler.load_image(哨兵) 取回；推理后必复位避免串号。
+            self._handler.set_pending_audio(bytes(audio))
+            try:
+                result: dict = self._llm.create_chat_completion(messages=messages, **kwargs)
+            finally:
+                self._handler.set_pending_audio(None)
+            return result
+        result = self._llm.create_chat_completion(messages=messages, **kwargs)
         return result
 
 

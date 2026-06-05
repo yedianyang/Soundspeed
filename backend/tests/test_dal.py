@@ -297,11 +297,11 @@ def test_end_take_sets_end_ts(tmp_path: Path) -> None:
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
     tid, _ = dal.start_take(sid, "1", 1000.0)
-    dal.end_take(tid, 1060.0, "keeper")
+    dal.end_take(tid, 1060.0, "keep")
     take = dal.get_take(tid)
     assert take is not None
     assert take.end_ts == pytest.approx(1060.0)
-    assert take.status == "keeper"
+    assert take.status == "keep"
 
 
 def test_take_status_check_constraint(tmp_path: Path) -> None:
@@ -322,18 +322,18 @@ def test_end_take_preserves_omitted_fields(tmp_path: Path) -> None:
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
     tid, _ = dal.start_take(sid, "1", 1000.0)
-    # 录音中标 keeper；借一次 end_take 写 notes（status 省略 → 保留 keeper）
-    dal.set_take_status(tid, "keeper")
+    # 录音中标 keep；借一次 end_take 写 notes（status 省略 → 保留 keep）
+    dal.set_take_status(tid, "keep")
     dal.end_take(tid, 1010.0, notes="第三条最好")
     mid = dal.get_take(tid)
-    assert mid is not None and mid.status == "keeper" and mid.notes == "第三条最好"
+    assert mid is not None and mid.status == "keep" and mid.notes == "第三条最好"
 
     # 再 end_take 只更新 end_ts（status/notes 全省略）→ 两者都不被冲掉
     dal.end_take(tid, 1060.0)
     take = dal.get_take(tid)
     assert take is not None
     assert take.end_ts == pytest.approx(1060.0)
-    assert take.status == "keeper"  # 不回退 tbd
+    assert take.status == "keep"  # 不回退 tbd
     assert take.notes == "第三条最好"  # 不清成 NULL
 
 
@@ -414,12 +414,12 @@ def test_update_take_np_output(tmp_path: Path) -> None:
         tid,
         performer_issues=["line_miss"],
         audio_quality="clean",
-        status="keeper",
+        status="keep",
     )
     take = dal.get_take(tid)
     assert take is not None
     assert take.audio_quality == "clean"
-    assert take.status == "keeper"
+    assert take.status == "keep"
     assert take.end_ts == pytest.approx(1060.0)  # end_ts 未被覆盖
 
 
@@ -469,12 +469,12 @@ def test_insert_take_event_with_valid_json(tmp_path: Path) -> None:
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
     tid, _ = dal.start_take(sid, "1", 1000.0)
-    eid = dal.insert_take_event(tid, "manual.mark", {"mark": "keeper"}, 1010.0)
+    eid = dal.insert_take_event(tid, "manual.mark", {"mark": "keep"}, 1010.0)
     assert eid > 0
     events = dal.list_take_events(tid)
     assert len(events) == 1
     assert events[0].event_type == "manual.mark"
-    assert events[0].payload == {"mark": "keeper"}
+    assert events[0].payload == {"mark": "keep"}
 
 
 def test_take_events_payload_json_validation(tmp_path: Path) -> None:
@@ -499,7 +499,7 @@ def test_list_take_events_filter_by_type(tmp_path: Path) -> None:
     dal = DAL(tmp_path / "test.db")
     sid = dal.create_scene("Scene_1")
     tid, _ = dal.start_take(sid, "1", 1000.0)
-    dal.insert_take_event(tid, "manual.mark", {"mark": "keeper"}, 1010.0)
+    dal.insert_take_event(tid, "manual.mark", {"mark": "keep"}, 1010.0)
     dal.insert_take_event(tid, "np.write", {"audio_quality": "clean"}, 1020.0)
     marks = dal.list_take_events(tid, event_type="manual.mark")
     assert len(marks) == 1
@@ -837,10 +837,10 @@ def test_set_take_status_valid_updates_status(tmp_dal: DAL) -> None:
     sid = tmp_dal.create_scene("S1")
     tid, _ = tmp_dal.start_take(sid, "1", 1000.0)
     tmp_dal.end_take(tid, 1060.0, "tbd")
-    tmp_dal.set_take_status(tid, "keeper")
+    tmp_dal.set_take_status(tid, "keep")
     take = tmp_dal.get_take(tid)
     assert take is not None
-    assert take.status == "keeper"
+    assert take.status == "keep"
 
 
 def test_set_take_status_writes_take_event(tmp_dal: DAL) -> None:
@@ -985,7 +985,7 @@ def test_delete_take_soft_deletes_row(tmp_dal: DAL) -> None:
     """delete_take 后 take 行仍存在（软删），deleted_at 被设置，get_take 返回 None（排除软删）。"""
     sid = tmp_dal.create_scene("S1")
     tid, _ = tmp_dal.start_take(sid, "1", 1000.0)
-    tmp_dal.end_take(tid, 1060.0, "keeper")
+    tmp_dal.end_take(tid, 1060.0, "keep")
     tmp_dal.delete_take(tid)
     # get_take 排除软删行，返回 None
     assert tmp_dal.get_take(tid) is None
@@ -1028,7 +1028,7 @@ def test_delete_take_writes_audit_log(tmp_dal: DAL) -> None:
 
     sid = tmp_dal.create_scene("S1")
     tid, _ = tmp_dal.start_take(sid, "1", 1000.0)
-    tmp_dal.end_take(tid, 1060.0, "keeper")
+    tmp_dal.end_take(tid, 1060.0, "keep")
     tmp_dal.delete_take(tid)
     rows = tmp_dal._conn.execute(
         "SELECT payload FROM audit_log WHERE action='take.delete' ORDER BY ts DESC;"
@@ -1038,7 +1038,7 @@ def test_delete_take_writes_audit_log(tmp_dal: DAL) -> None:
     assert payload["take_id"] == tid
     assert payload["scene_id"] == sid
     assert payload["take_number"] == 1
-    assert payload["status"] == "keeper"
+    assert payload["status"] == "keep"
 
 
 def test_delete_take_nonexistent_is_noop(tmp_dal: DAL) -> None:
@@ -1050,7 +1050,7 @@ def test_restore_take_clears_deleted_at(tmp_dal: DAL) -> None:
     """restore_take 后 deleted_at 清为 NULL，get_take 重新可见。"""
     sid = tmp_dal.create_scene("S1")
     tid, _ = tmp_dal.start_take(sid, "1", 1000.0)
-    tmp_dal.end_take(tid, 1060.0, "keeper")
+    tmp_dal.end_take(tid, 1060.0, "keep")
     tmp_dal.delete_take(tid)
     assert tmp_dal.get_take(tid) is None  # 软删后不可见
     tmp_dal.restore_take(tid)
@@ -1142,9 +1142,9 @@ def test_next_take_number_soft_delete_highest_reuses(tmp_dal: DAL) -> None:
     t1, _ = tmp_dal.start_take(sid, "1", 1000.0)
     t2, _ = tmp_dal.start_take(sid, "1", 1001.0)
     t3, _ = tmp_dal.start_take(sid, "1", 1002.0)
-    tmp_dal.end_take(t1, 1010.0, "keeper")
+    tmp_dal.end_take(t1, 1010.0, "keep")
     tmp_dal.end_take(t2, 1020.0, "ng")
-    tmp_dal.end_take(t3, 1030.0, "keeper")
+    tmp_dal.end_take(t3, 1030.0, "keep")
     tmp_dal.delete_take(t3)
     # live MAX = 2（take 3 已软删），下一个复用 3
     assert tmp_dal.next_take_number(sid, "1") == 3
@@ -1403,38 +1403,90 @@ def test_set_setting_multiple_keys(tmp_dal: DAL) -> None:
     assert tmp_dal.get_setting("key_b") == "val_b"
 
 
-def test_v8_incremental_upgrade_from_v7(tmp_path: Path) -> None:
-    """既有 v7 库平滑升级到 v8：user_version=8，app_settings 表存在且可读写。"""
+def _build_db_through(db_path: Path, last_version: int) -> None:
+    """按顺序执行 v1..last_version 的 migration SQL，造一个到指定版本的真实库（不含更高版本）。
+
+    用于测试增量升级：先到 vN，再 apply_migrations 跑 v(N+1).. 。各 .sql 末尾自设 user_version，
+    末尾再显式钉 last_version 兜底（防个别文件没设）。
+    """
     import sqlite3 as _sql
 
-    db_path = tmp_path / "v7_to_v8.db"
+    from backend.db.migrations.runner import MIGRATIONS_DIR
 
-    # 模拟 v7 库：只设 user_version，不建任何表（v8 migration 不依赖前置表）
     conn = _sql.connect(str(db_path))
-    conn.execute("PRAGMA user_version = 7;")
+    for v in range(1, last_version + 1):
+        conn.executescript((MIGRATIONS_DIR / MIGRATION_FILES[v]).read_text())
+    conn.execute(f"PRAGMA user_version = {last_version};")
     conn.commit()
     conn.close()
 
-    # 增量迁移
+
+def test_incremental_upgrade_v8_to_latest(tmp_path: Path) -> None:
+    """既有 v8 真实库平滑升级到最新（v9）：user_version=9，核心表 + app_settings 都在、DAL 可读写。"""
+    db_path = tmp_path / "v8_to_latest.db"
+    _build_db_through(db_path, 8)
+
     apply_migrations(db_path)
 
-    # 断言版本号
     conn = _raw_conn(db_path)
-    version = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert version == 8
-
-    # 断言表存在
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 9
     names = {
         r["name"]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table';"
-        ).fetchall()
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()
     }
     assert "app_settings" in names
+    assert "takes" in names  # v9 整表重建后仍在
     conn.close()
 
-    # 断言可通过 DAL 读写（DAL 自行调用 apply_migrations，已在 v8 → 幂等）
     dal = DAL(db_path)
     dal.set_setting("audio_input_device", "USB Mic")
     assert dal.get_setting("audio_input_device") == "USB Mic"
     dal.close()
+
+
+def test_v9_status_rename_maps_old_values(tmp_path: Path) -> None:
+    """v9 数据迁移：旧 keeper→keep、hold→pass（status 列 + note 聚合串 + take_events payload）；
+    旧 CHECK 允许 keeper/hold，新 CHECK 只允许 pass/ng/keep/tbd。"""
+    import sqlite3 as _sql
+
+    db_path = tmp_path / "v9_data.db"
+    _build_db_through(db_path, 8)  # v8：旧 CHECK 含 keeper/hold
+
+    # 在旧库塞 scene + 两条带旧 status 的 take（旧 CHECK 允许）+ manual.note 事件
+    conn = _sql.connect(str(db_path))
+    conn.execute("INSERT INTO scenes (scene_id, scene_code, is_active) VALUES (1, 'S1', 1);")
+    conn.execute(
+        "INSERT INTO takes (take_id, scene_id, shot, take_number, start_ts, status, notes) "
+        "VALUES (1, 1, '', 1, 0.0, 'keeper', '[t] @keeper 留着'), "
+        "       (2, 1, '', 2, 0.0, 'hold', '[t] @hold 过了');"
+    )
+    conn.execute(
+        "INSERT INTO take_events (take_id, event_type, ts, payload) VALUES "
+        "(1, 'manual.note', 0.0, '{\"category\": \"keeper\", \"content\": \"留着\"}'), "
+        "(2, 'manual.mark', 0.0, '{\"status\": \"hold\"}');"
+    )
+    conn.commit()
+    conn.close()
+
+    apply_migrations(db_path)  # 跑 v9
+
+    conn = _raw_conn(db_path)
+    rows = {r["take_id"]: r["status"] for r in conn.execute("SELECT take_id, status FROM takes;")}
+    assert rows == {1: "keep", 2: "pass"}  # keeper→keep、hold→pass
+    notes = {r["take_id"]: r["notes"] for r in conn.execute("SELECT take_id, notes FROM takes;")}
+    assert "@keep" in notes[1] and "@keeper" not in notes[1]
+    assert "@pass" in notes[2] and "@hold" not in notes[2]
+    payloads = [
+        r["payload"] for r in conn.execute("SELECT payload FROM take_events ORDER BY take_id;")
+    ]
+    assert '"category": "keep"' in payloads[0]
+    assert '"status": "pass"' in payloads[1]
+
+    # 新 CHECK：写旧值 keeper 被拒
+    try:
+        conn.execute("INSERT INTO takes (scene_id, take_number, start_ts, status) "
+                     "VALUES (1, 9, 0.0, 'keeper');")
+        raise AssertionError("旧 status 'keeper' 不应再被 CHECK 接受")
+    except _sql.IntegrityError:
+        pass
+    conn.close()

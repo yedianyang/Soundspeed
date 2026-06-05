@@ -1,7 +1,7 @@
 // 后端 boundary 类型（snake_case）。派生自 backend/db/dal.py（Take / TranscriptSegment）
 // 与 backend/core/events.py（WS payload）。应用内部只在此层用 snake_case，其余读自 typed store。
 
-export type TakeStatus = "keeper" | "ng" | "hold" | "tbd"
+export type TakeStatus = "keep" | "ng" | "pass" | "tbd"
 
 // ── Scene DTO（GET /api/v1/scenes，spec v0.3 §2.5）──
 
@@ -43,7 +43,7 @@ export interface ActivateSceneResult {
   scene_code: string
 }
 
-// PATCH /api/v1/takes/{id} body，全可选。status ∈ keeper/ng/hold/tbd。
+// PATCH /api/v1/takes/{id} body，全可选。status ∈ keep/ng/pass/tbd。
 export interface PatchTakeBody {
   status?: TakeStatus
   scene_id?: number
@@ -211,6 +211,61 @@ export interface LlmStatusMsg {
   state: LlmState
   task_type: string | null
   take_id: number | null
+}
+
+// ── Note DTO（4.C POST /notes + GET /takes/{id}/notes）──
+
+export interface NoteDTO {
+  event_id: number
+  take_id: number
+  scene_code: string | null
+  take_number: number | null
+  category: string // "note" | "issue" | "keep" | "ng" | "pass"
+  content: string
+  raw_text: string
+  ts: number
+}
+
+export interface NoteListResponse {
+  take_id: number
+  notes_aggregated: string | null
+  events: NoteDTO[]
+}
+
+// POST /notes 202 响应（NP Pipeline 非阻塞归置）
+export interface NoteCreateResponse {
+  status: "processing"
+  category: string
+  content: string
+}
+
+// 前端 pending note（已提交、等待 LLM 归置）
+export interface PendingNote {
+  client_id: string // 乐观去重键（crypto.randomUUID），note.processed 原样回传后据此精确移除
+  kind: "text" | "voice" // 显式区分文本/语音 pending（渲染与重试据此分支，不靠 voiceBlob 在场反推）
+  ts: number
+  category: string // 语音 pending 时类别未知（模型判），不渲染；text 时为 @语法解析结果
+  content: string
+  rawText: string // 提交的原始文字，note.failed 后「重试」据此重投 POST /notes（语音为空）
+  failedReason?: string // 置位=NP 失败（4.I），渲染失败态 + 重试；undefined=处理中
+  voiceBlob?: Blob // 语音 note（4.L）：录音 WAV，重试据此重传 POST /notes/voice
+}
+
+// WS note.processed payload
+export interface NoteProcessedMsg {
+  event_id: number
+  take_id: number
+  category: string
+  content: string
+  ts: number
+  client_id: string | null // 后端原样回传前端提交时的去重键；null=异常/旧链路
+}
+
+// WS note.failed payload（4.I）：NP 失败兜底，前端据此把对应 pending 转失败态。
+export interface NoteFailedMsg {
+  reason: string // take_not_found / parse_error / timeout / model_unavailable（后端 NP 失败）；upload_failed（前端网络/上传层失败，不进后端）
+  ts: number
+  client_id: string | null // 定位要标失败的 pending；null=异常/旧链路，不误标
 }
 
 // viewer.count：当前连着 /ws 的客户端总数（含场记自己），连接建立 / 断开时后端广播。

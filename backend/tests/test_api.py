@@ -1440,16 +1440,16 @@ def _make_take(tmp_dal: DAL, scene_code: str = "ScenePatch") -> tuple[int, int]:
 
 
 def test_patch_take_status(tmp_dal: DAL, monkeypatch) -> None:
-    """PATCH /takes/{id} status=keeper → 200，状态改变，有 take_events manual.mark。"""
+    """PATCH /takes/{id} status=keep → 200，状态改变，有 take_events manual.mark。"""
     sid, tid = _make_take(tmp_dal, "ScenePatchStatus")
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
-    resp = client.patch(f"/api/v1/takes/{tid}", json={"status": "keeper"}, headers=_AUTH)
+    resp = client.patch(f"/api/v1/takes/{tid}", json={"status": "keep"}, headers=_AUTH)
     assert resp.status_code == 200
-    assert resp.json()["status"] == "keeper"
+    assert resp.json()["status"] == "keep"
     # DAL 里 status 已更新
     updated_take = tmp_dal.get_take(tid)
     assert updated_take is not None
-    assert updated_take.status == "keeper"
+    assert updated_take.status == "keep"
     # take_events 有 manual.mark 记录
     evts = tmp_dal.list_take_events(tid, event_type="manual.mark")
     assert len(evts) >= 1
@@ -1487,7 +1487,7 @@ def test_patch_take_number_suffix_when_conflict(tmp_dal: DAL, monkeypatch) -> No
     tmp_dal.set_active_scene(sid)
     # 两次 start_take 在同 shot="1" 组内，分别拿到 number=1, 2
     t1, _ = tmp_dal.start_take(sid, "1", 1000.0)   # shot="1", number=1
-    tmp_dal.end_take(t1, 1010.0, "keeper")
+    tmp_dal.end_take(t1, 1010.0, "keep")
     t2, _ = tmp_dal.start_take(sid, "1", 1020.0)   # shot="1", number=2
     tmp_dal.end_take(t2, 1030.0, "ng")
 
@@ -1513,9 +1513,9 @@ def test_patch_take_scene_id_cross_scene_conflict_uses_suffix(tmp_dal: DAL, monk
     tmp_dal.set_active_scene(sid1)
 
     t1, _ = tmp_dal.start_take(sid1, "1", 1000.0)   # shot="1", number=1
-    tmp_dal.end_take(t1, 1010.0, "keeper")
+    tmp_dal.end_take(t1, 1010.0, "keep")
     t2, _ = tmp_dal.start_take(sid2, "1", 1020.0)   # shot="1", number=1（不同场）
-    tmp_dal.end_take(t2, 1030.0, "keeper")
+    tmp_dal.end_take(t2, 1030.0, "keep")
 
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
     # 把 t1 移到 sid2 且指定 take_number=1（已被 t2 占用），应追加后缀而非 409
@@ -1803,6 +1803,98 @@ def test_debug_reset_db_wrong_token_returns_401(tmp_dal: DAL, monkeypatch) -> No
         headers={"Authorization": "Bearer wrong-token"},
     )
     assert resp.status_code == 401
+
+
+# ── POST /notes/voice 语音 note 端点（4.K）──────────────────────────────────────
+
+
+def _auth() -> dict:
+    return {"Authorization": f"Bearer {_TOKEN}"}
+
+
+def test_notes_voice_without_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
+    """无 Authorization → 401。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("note.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        data={"client_id": "cid-1"},
+    )
+    assert resp.status_code == 401
+
+
+def test_notes_voice_happy_returns_202_and_calls_orchestrator(tmp_dal: DAL, monkeypatch) -> None:
+    """合法 multipart（file + client_id + ts）→ 202 {status:processing, client_id}，
+    且 orchestrator.run_np_voice_async 收到 audio 字节 + client_id + ts。"""
+    orch = create_orchestrator(tmp_dal)
+    captured: dict = {}
+    orch.run_np_voice_async = lambda **kw: captured.update(kw)  # type: ignore[method-assign]
+    client = _make_client(orch, monkeypatch)
+
+    wav = b"RIFF\x00\x00\x00\x00WAVEfmt fake-pcm16-mono"
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("note.wav", wav, "audio/wav")},
+        data={"client_id": "cid-voice-1", "ts": "123.5"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["status"] == "processing"
+    assert body["client_id"] == "cid-voice-1"
+    assert captured["audio"] == wav
+    assert captured["client_id"] == "cid-voice-1"
+    assert captured["ts"] == 123.5
+
+
+def test_notes_voice_empty_file_returns_400(tmp_dal: DAL, monkeypatch) -> None:
+    """空音频 → 400（不进 NP）。"""
+    orch = create_orchestrator(tmp_dal)
+    called: list = []
+    orch.run_np_voice_async = lambda **kw: called.append(kw)  # type: ignore[method-assign]
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("note.wav", b"", "audio/wav")},
+        data={"client_id": "cid-2"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 400
+    assert called == []
+
+
+def test_notes_voice_oversized_returns_400(tmp_dal: DAL, monkeypatch) -> None:
+    """音频超限 → 400（不进 NP）。"""
+    orch = create_orchestrator(tmp_dal)
+    called: list = []
+    orch.run_np_voice_async = lambda **kw: called.append(kw)  # type: ignore[method-assign]
+    client = _make_client(orch, monkeypatch)
+
+    big = b"RIFF" + b"\x00" * (11 * 1024 * 1024)  # 11MB > 10MB 上限
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("big.wav", big, "audio/wav")},
+        data={"client_id": "cid-3"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 400
+    assert called == []
+
+
+def test_notes_voice_missing_client_id_returns_422(tmp_dal: DAL, monkeypatch) -> None:
+    """client_id 必填，缺失 → 422（FastAPI Form 校验）。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("note.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        headers=_auth(),
+    )
+    assert resp.status_code == 422
 
 
 # ── DEVICE_WARNING / AUDIO_LEVEL WS 转发测试 ─────────────────────────────────

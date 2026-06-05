@@ -185,7 +185,7 @@ async def test_take_end_handler_l2_failure_still_publishes(tmp_dal: DAL) -> None
 
 @pytest.mark.asyncio
 async def test_take_end_preserves_user_mark_status_sync(tmp_dal: DAL) -> None:
-    """录音中 Mark=keeper，停录（无 L2）后 status 不被写死回 tbd——库与同步 take.changed 都保留 keeper。
+    """录音中 Mark=keep，停录（无 L2）后 status 不被写死回 tbd——库与同步 take.changed 都保留 keep。
 
     回归：_on_take_end 曾硬编码 status='tbd'，把用户 Mark 冲掉（停录后状态回退 bug）。
     """
@@ -199,26 +199,26 @@ async def test_take_end_preserves_user_mark_status_sync(tmp_dal: DAL) -> None:
     take_id = session.take_id
     assert take_id is not None
 
-    # 用户录音中 Mark = keeper
-    tmp_dal.set_take_status(take_id, "keeper")
+    # 用户录音中 Mark = keep
+    tmp_dal.set_take_status(take_id, "keep")
 
     received_changed: list[TakeChangedPayload] = []
     orch.subscribe(TAKE_CHANGED, lambda p: received_changed.append(p))  # type: ignore[arg-type]
 
     orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
 
-    # 库里 status 保留 keeper（end_take 不写死 tbd）
+    # 库里 status 保留 keep（end_take 不写死 tbd）
     take = tmp_dal.get_take(take_id)
     assert take is not None
-    assert take.status == "keeper"
-    # 同步 take.changed 也带 keeper（前端据此更新 store，不回退）
+    assert take.status == "keep"
+    # 同步 take.changed 也带 keep（前端据此更新 store，不回退）
     assert len(received_changed) == 1
-    assert received_changed[0].status == "keeper"
+    assert received_changed[0].status == "keep"
 
 
 @pytest.mark.asyncio
 async def test_take_end_preserves_user_mark_status_through_l2(tmp_dal: DAL) -> None:
-    """录音中 Mark=keeper，停录后 L2 完成的 take.changed 也保留 keeper（第二回退源）。
+    """录音中 Mark=keep，停录后 L2 完成的 take.changed 也保留 keep（第二回退源）。
 
     回归：L2 完成路径同样硬编码 status='tbd'，会在停录数秒后二次把 Mark 冲掉。
     """
@@ -233,7 +233,7 @@ async def test_take_end_preserves_user_mark_status_through_l2(tmp_dal: DAL) -> N
     take_id = session.take_id
     assert take_id is not None
 
-    tmp_dal.set_take_status(take_id, "keeper")
+    tmp_dal.set_take_status(take_id, "keep")
 
     received_changed: list[TakeChangedPayload] = []
     orch.subscribe(TAKE_CHANGED, lambda p: received_changed.append(p))  # type: ignore[arg-type]
@@ -242,12 +242,12 @@ async def test_take_end_preserves_user_mark_status_through_l2(tmp_dal: DAL) -> N
     assert orch._l2_task is not None  # type: ignore[attr-defined]
     await orch._l2_task  # type: ignore[attr-defined]
 
-    # 库 + 两次 take.changed（同步 end + L2 完成）都保留 keeper
+    # 库 + 两次 take.changed（同步 end + L2 完成）都保留 keep
     take = tmp_dal.get_take(take_id)
     assert take is not None
-    assert take.status == "keeper"
+    assert take.status == "keep"
     assert len(received_changed) == 2
-    assert all(c.status == "keeper" for c in received_changed)
+    assert all(c.status == "keep" for c in received_changed)
 
 
 @pytest.mark.asyncio
