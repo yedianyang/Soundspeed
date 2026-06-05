@@ -72,34 +72,47 @@ async def run_tool_loop(
     max_hops: int = _MAX_HOPS,
     timeout: float = 30.0,
 ) -> str:
-    """两步走循环：≤max_hops 跳，返回最终自然语言文本。messages 原地追加每跳的 tool 往返。"""
+    """两步走循环：≤max_hops 跳，返回最终自然语言文本。messages 原地追加每跳的 tool 往返。
+
+    异常契约：
+    - asyncio.TimeoutError / asyncio.CancelledError 放行给 caller（route 兜底返回友好错误）。
+    - step B 取参失败（LookupError/KeyError/JSONDecodeError/TypeError）→ 包成 error 回喂，
+      模型下一跳自纠；不抛穿，循环继续。
+    - step C executor 错误（_run_executor 内已包）→ 同样回喂，不抛穿。
+    """
     for hop in range(max_hops):
         # step A — auto 跳：抠工具名。
         # ✅ Task 7.5 probe 已实证「假设 7」成立：service.infer 在 auto 跳返回 FunctionGemma
         #   content 串（finish_reason=stop，不撞 service 护栏），happy path 即此分支。
         #   （故不需要 infer_message 变体，分诊 A 未触发。）
+        # infer 的 TimeoutError 放行给 caller（与 l2_take 约定对齐）。
         text = await service.infer(messages, task_type=_QP_TASK, priority=1, timeout=timeout)
         name = _scrape_tool_name(text)
         if name is None:
             return text  # 模型给的是自然语言最终答案，终止
 
         # step B — forced 跳：grammar 出干净 JSON 参数
-        tool_call = await service.infer_tool(
-            messages,
-            task_type=_QP_TASK,
-            priority=1,
-            timeout=timeout,
-            tool_choice={"type": "function", "function": {"name": name}},
-        )
         try:
+            tool_call = await service.infer_tool(
+                messages,
+                task_type=_QP_TASK,
+                priority=1,
+                timeout=timeout,
+                tool_choice={"type": "function", "function": {"name": name}},
+            )
             args = json.loads(tool_call["function"]["arguments"])
-        except (KeyError, json.JSONDecodeError) as exc:
-            logger.warning("qp forced 跳参数解析失败 name=%s: %r", name, exc)
-            args = {}
+        except asyncio.TimeoutError:
+            raise  # 超时放行给 caller（route 兜底返回友好错误），对齐 l2_take 约定
+        except (LookupError, KeyError, json.JSONDecodeError, TypeError) as exc:
+            # forced 没拿到干净参数（模型没走 FC / arguments 缺失或非法）→ 当工具失败回喂，模型自纠，不抛穿
+            logger.warning("qp forced 跳取参失败 name=%s: %r", name, exc)
+            result: dict = {"error": f"工具 {name} 调用失败：参数无法解析，请换种方式或直接回答。"}
+        else:
+            # step C — 执行（executor 包 to_thread，错误不抛穿）
+            result = await asyncio.to_thread(_run_executor, name, args, dal)
 
-        # step C — 执行 + 回喂（executor 在 to_thread worker 跑，只读连接跨线程安全）
-        result = await asyncio.to_thread(_run_executor, name, args, dal)
-        # 回喂格式（Task 7.5 probe 实证定案）：**不**用 OpenAI 风格 assistant{tool_calls}+role=tool——
+        # 回喂（单点，纯文本，Task 7.5 probe 实证定案）：
+        # **不**用 OpenAI 风格 assistant{tool_calls}+role=tool——
         # 那会撞这个 GGUF 的 Jinja 模板 `UndefinedError: 'raise_exception' is undefined`（状态相关、不稳）。
         # 改纯文本：assistant 喂 auto 步原始 content（模型自吐的 <|tool_call>...，特殊 token 模型认得），
         # tool 结果用纯文本 user 消息。实测 3 次确定性稳定渲染 + 自然语言收尾、不再无脑调工具。
