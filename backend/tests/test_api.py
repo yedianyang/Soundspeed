@@ -247,6 +247,21 @@ def test_take_end_creates_l2_task_when_deps_injected(tmp_dal: DAL, monkeypatch) 
 # import 炸了。
 
 
+def _recv_until(ws, topic: str, *, max_frames: int = 6) -> dict:
+    """读 WS 帧直到 topic 匹配并返回该帧，跳过前面的 presence 噪声。
+
+    connect 时 ConnectionManager 会先广播一帧 viewer.count（含自己），故所有「连上
+    即收」的转发断言都要跳过它。注意：若目标 topic 因回归永不到达，最后一次
+    receive_json 会阻塞挂死（本文件无 pytest-timeout，与既有转发测试同款风险）；
+    max_frames 仅防持续涌入的噪声帧把循环跑飞，不把挂死变成干净 fail。
+    """
+    for _ in range(max_frames):
+        msg = ws.receive_json()
+        if msg["topic"] == topic:
+            return msg
+    raise AssertionError(f"未在 {max_frames} 帧内收到 topic={topic!r}")
+
+
 def test_ws_without_token_rejected(tmp_dal: DAL, monkeypatch) -> None:
     """/ws 无 token → 握手被拒，close code 1008（不 accept）。
 
@@ -327,11 +342,9 @@ def test_take_changed_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
     CM.broadcast（loop 线程内，走 create_task 路径）→ ws.send_json。
 
     必须先 create_scene：_on_take_start 在 publish 之前 start_take 写库，scene 不存在
-    会让它在 publish 前抛异常并被 publish 吞掉，take.changed 永不发，receive_json 死挂。
+    会让它在 publish 前抛异常并被 publish 吞掉，take.changed 永不发，_recv_until 死挂
+    （挂死风险见 _recv_until docstring）。
     """
-    # 无超时风险：下面 ws.receive_json() 无超时，若上游回归致 take.changed 永不发，
-    # CI 会超时挂死而非干净 fail。当前环境无 pytest-timeout 插件（--markers 无 timeout），
-    # 不引脆弱的 watchdog 线程。TODO: 装 pytest-timeout 后给本函数加 @pytest.mark.timeout(N)。
     scene_id = tmp_dal.create_scene("scene_ws_take")
     tmp_dal.set_active_scene(scene_id)  # 2.C：take/start 需要 active scene
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
@@ -347,8 +360,7 @@ def test_take_changed_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
             )
             assert resp.status_code == 200
 
-            msg = ws.receive_json()
-            assert msg["topic"] == "take.changed"
+            msg = _recv_until(ws, "take.changed")
             assert msg["payload"]["scene_id"] == scene_id
             assert msg["payload"]["take_id"] is not None
             assert msg["payload"]["take_number"] == 1
@@ -361,9 +373,6 @@ def test_asr_final_forwarded_from_background_thread(tmp_dal: DAL, monkeypatch) -
     take 未 active 时 _on_asr_final 直接 return（不写库），桥接转发仍应发生——
     转发是订阅 CM.broadcast，与内置 segment handler 互不影响。
     """
-    # 无超时风险：下面 ws.receive_json() 无超时，若上游回归致 asr.final 永不转发，
-    # CI 会超时挂死而非干净 fail。当前环境无 pytest-timeout 插件（--markers 无 timeout），
-    # 不引脆弱的 watchdog 线程。TODO: 装 pytest-timeout 后给本函数加 @pytest.mark.timeout(N)。
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
     orch = create_orchestrator(tmp_dal)
     app = create_app(orch)
@@ -383,8 +392,7 @@ def test_asr_final_forwarded_from_background_thread(tmp_dal: DAL, monkeypatch) -
             t.start()
             t.join()
 
-            msg = ws.receive_json()
-            assert msg["topic"] == "asr.final.ch1"
+            msg = _recv_until(ws, "asr.final.ch1")
             assert msg["payload"]["text"] == "hello from background"
             assert msg["payload"]["speaker"] == "A"
 
@@ -412,8 +420,7 @@ def test_take_segments_updated_forwarded_from_background_thread(
             t.start()
             t.join()
 
-            msg = ws.receive_json()
-            assert msg["topic"] == "take.segments.updated"
+            msg = _recv_until(ws, "take.segments.updated")
             assert msg["payload"]["take_id"] == 42
             assert msg["payload"]["scene_id"] == 7
 
@@ -430,6 +437,47 @@ def test_ws_disconnect_cleans_up(tmp_dal: DAL, monkeypatch) -> None:
         # 退出 ws 上下文：TestClient join 服务端 task，
         # except WebSocketDisconnect 里 cm.disconnect 跑完才返回 → _active 应空。
         assert len(cm._active) == 0  # type: ignore[attr-defined]
+
+
+def test_viewer_count_broadcast_on_connect(tmp_dal: DAL, monkeypatch) -> None:
+    """连上 /ws → 立即收到 viewer.count，count == 活跃连接数（独连=含自己=1）。
+
+    承重测试：单连接、无并发，确定性绿。它单独就能逼出 connect 路径上的
+    _broadcast_count（口径=全部连接含自己）。RED 时 viewer.count topic 不存在，
+    receive_json 永不收到该帧 → 挂死暴露（同款转发测试风险）。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    app = create_app(create_orchestrator(tmp_dal))
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws:
+            msg = ws.receive_json()
+            assert msg["topic"] == "viewer.count"
+            assert msg["payload"]["count"] == 1
+
+
+def test_viewer_count_updates_on_connect_and_disconnect(
+    tmp_dal: DAL, monkeypatch
+) -> None:
+    """第二个客户端连上 → 两端都见 count==2；它断开后 → 第一端见 count==1。
+
+    覆盖 disconnect 路径的广播。依赖 TestClient 单 portal 驱动两个并发 WS 会话
+    （已知较脆）；故承重断言放在上面的单连接测试，本测试作为 disconnect 行为的
+    端到端补充。_recv_until 跳过两端各自 connect 时的 viewer.count 首帧噪声。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    app = create_app(create_orchestrator(tmp_dal))
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws1:
+            # ws1 独连：首帧 count==1
+            assert ws1.receive_json()["payload"]["count"] == 1
+            with client.websocket_connect(f"/ws?token={_TOKEN}") as ws2:
+                # ws2 连上：connect 向全部活跃连接广播 count==2，两端各收到一帧。
+                assert _recv_until(ws1, "viewer.count")["payload"]["count"] == 2
+                assert _recv_until(ws2, "viewer.count")["payload"]["count"] == 2
+            # ws2 退出 with → disconnect 后广播 count==1，仅 ws1 收到。
+            assert _recv_until(ws1, "viewer.count")["payload"]["count"] == 1
 
 
 # ── 切片 B：codex review BLOCKING 修复回归测试 ─────────────────────────────────
@@ -625,8 +673,7 @@ def test_llm_status_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
             t.start()
             t.join()
 
-            msg = ws.receive_json()
-            assert msg["topic"] == "llm.status"
+            msg = _recv_until(ws, "llm.status")
             assert msg["payload"]["state"] == "loading"
             assert msg["payload"]["task_type"] == "l2_take"
             assert msg["payload"]["take_id"] == 1
@@ -1874,8 +1921,7 @@ def test_device_warning_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
             t.start()
             t.join()
 
-            msg = ws.receive_json()
-            assert msg["topic"] == "device.warning"
+            msg = _recv_until(ws, "device.warning")
             assert msg["payload"]["message"] == "设备已断开"
             assert msg["payload"]["device_name"] == "MacBook Pro 麦克风"
 
@@ -1898,6 +1944,5 @@ def test_audio_level_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
             t.start()
             t.join()
 
-            msg = ws.receive_json()
-            assert msg["topic"] == "audio.level"
+            msg = _recv_until(ws, "audio.level")
             assert abs(msg["payload"]["rms"] - 0.42) < 1e-6

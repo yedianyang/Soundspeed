@@ -199,6 +199,7 @@ export default function AdminHome() {
   // device.warning：持久化设备被拔走 / 不在场（后端已回落 fallback）提示，可手动 dismiss。
   const deviceWarning = useSessionStore((s) => s.deviceWarning)
   const setDeviceWarning = useSessionStore((s) => s.setDeviceWarning)
+  const viewerCount = useSessionStore((s) => s.viewerCount)
 
   const queryClient = useQueryClient()
 
@@ -602,7 +603,7 @@ export default function AdminHome() {
           <div className="flex items-center gap-1 flex-shrink-0">
             <Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground">
               <Eye />
-              <span className="font-mono text-xs">3</span>
+              <span className="font-mono text-xs">{viewerCount}</span>
             </Button>
             <Button variant="ghost" size="icon-sm" className="rounded-full text-muted-foreground" title="导出">
               <Upload className="size-4" />

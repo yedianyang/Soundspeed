@@ -1,9 +1,11 @@
 import type { Status } from "@/types/take"
 
 export const STATUS_DOT: Record<Status, string> = {
-  keep: "bg-green-500",
+  // #28 配色对调：KEEP=bg-primary（黄/金），PASS=bg-green-500（绿）。
+  // 4.x 把枚举 keeper→keep / hold→pass，沿用 #28 对调后的配色。
+  keep: "bg-primary",
   ng: "bg-destructive",
-  pass: "bg-primary",
+  pass: "bg-green-500",
   tbd: "bg-muted-foreground",
   recording: "bg-destructive animate-pulse",
 }

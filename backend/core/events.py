@@ -1,6 +1,8 @@
 """事件类型常量与 payload dataclass（contract C1 + C3）。
 
-所有 Orchestrator 内部事件在此定义。事件类型字符串值与 contract C1 / WS topic 命名完全一致。
+集中定义所有 WS topic 的事件类型常量与 payload。多数是 Orchestrator 内部事件
+（contract C1）；少数是传输层事件（如 viewer.count，由 ConnectionManager 直接广播、
+不经 orchestrator）。事件类型字符串值与 WS topic 命名完全一致。
 Payload 使用 frozen=True 的 dataclass，防止 handler 间互相篡改。
 """
 from __future__ import annotations
@@ -43,6 +45,9 @@ DEVICE_WARNING = "device.warning"
 
 # 实时 RMS 电平（采集线程每 chunk 推，驱动前端电平条）
 AUDIO_LEVEL = "audio.level"
+
+# 在线观看数（WS 连接建立 / 断开时 ConnectionManager 广播，驱动前端 header 眼睛计数）
+VIEWER_COUNT = "viewer.count"
 
 
 # ── Payload dataclass ─────────────────────────────────────────────────────────
@@ -262,3 +267,14 @@ class AudioLevelPayload:
     """
 
     rms: float
+
+
+@dataclass(frozen=True)
+class ViewerCountPayload:
+    """viewer.count 的 payload（在线观看数）。
+
+    count: 当前连着 /ws 的客户端总数（含场记自己这台）。WS 连接建立 / 断开后由
+           ConnectionManager 广播，前端 header 眼睛据此显示。
+    """
+
+    count: int

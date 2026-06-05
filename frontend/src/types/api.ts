@@ -267,3 +267,9 @@ export interface NoteFailedMsg {
   ts: number
   client_id: string | null // 定位要标失败的 pending；null=异常/旧链路，不误标
 }
+
+// viewer.count：当前连着 /ws 的客户端总数（含场记自己），连接建立 / 断开时后端广播。
+// 驱动 header 眼睛计数。
+export interface ViewerCountMsg {
+  count: number
+}

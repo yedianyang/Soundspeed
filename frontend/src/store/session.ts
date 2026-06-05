@@ -75,6 +75,10 @@ interface SessionState {
   backendLevel: number
   backendLevelTs: number
 
+  // viewer.count：当前连着 /ws 的客户端总数（含自己）。后端在连接建立 / 断开时广播。
+  // 连接断开（onClose）归 0，避免显示陈旧值；重连后服务端首帧重填。
+  viewerCount: number
+
   // ── actions ──
   setToken: (t: string | null) => void
   setConnection: (c: ConnectionState) => void
@@ -89,6 +93,7 @@ interface SessionState {
   setRecording: (recording: boolean) => void
   setDeviceWarning: (message: string | null) => void
   setBackendLevel: (rms: number) => void
+  setViewerCount: (count: number) => void
   resetSegments: () => void
   addPendingNote: (n: PendingNote) => void
   noteProcessed: (m: NoteProcessedMsg) => void
@@ -111,6 +116,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   deviceWarning: null,
   backendLevel: 0,
   backendLevelTs: 0,
+  viewerCount: 0,
 
   setToken: (t) =>
     set(() => ({
@@ -303,6 +309,9 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   // audio.level：每帧同时写 rms 值和到达时间戳，供电平条判断新鲜度后混合。
   setBackendLevel: (rms) => set(() => ({ backendLevel: rms, backendLevelTs: Date.now() })),
+
+  // viewer.count：后端广播的在线观看数；onClose 调 setViewerCount(0) 清陈旧值。
+  setViewerCount: (count) => set(() => ({ viewerCount: count })),
 
   // 清实时转录（REC 开始 / dev 注入开始时调，避免上一条 take 的转录残留）。
   resetSegments: () => set(() => ({ segments: { ch1: [], ch2: [] } })),
