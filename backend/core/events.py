@@ -41,6 +41,9 @@ SCENE_CHANGED = "scene.changed"
 # 音频设备 warning（设备拔走时通知前端）
 DEVICE_WARNING = "device.warning"
 
+# 实时 RMS 电平（采集线程每 chunk 推，驱动前端电平条）
+AUDIO_LEVEL = "audio.level"
+
 
 # ── Payload dataclass ─────────────────────────────────────────────────────────
 
@@ -211,3 +214,14 @@ class DeviceWarningPayload:
 
     message: str
     device_name: str
+
+
+@dataclass(frozen=True)
+class AudioLevelPayload:
+    """audio.level 的 payload（采集线程每 chunk 推，驱动前端电平条）。
+
+    rms: ch1 当前 chunk 的 RMS 电平，归一化到 [0, 1]。
+         计算式：clamp(sqrt(mean((x/32768)^2)), 0, 1)，可乘小增益便于观察。
+    """
+
+    rms: float

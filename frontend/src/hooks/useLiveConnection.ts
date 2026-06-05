@@ -5,6 +5,7 @@ import { LiveSocket } from "@/lib/ws"
 import { useSessionStore } from "@/store/session"
 import type {
   AsrMsg,
+  DeviceWarningMsg,
   LlmStatusMsg,
   SceneChangedMsg,
   TakeChangedMsg,
@@ -91,6 +92,17 @@ export function useLiveConnection(): void {
         }
         if (topic === "llm.status") {
           s.setLlm((payload as LlmStatusMsg).state)
+          return
+        }
+        if (topic === "device.warning") {
+          // 持久化设备被拔走 / 不在场，后端已回落 fallback；存进 store 供头部 amber 提示。
+          s.setDeviceWarning((payload as DeviceWarningMsg).message)
+          return
+        }
+        if (topic === "audio.level") {
+          // 后端实际采集那路音频的归一化 RMS，仅录制时 ~5Hz 推。存值 + 时间戳，电平条按新鲜度
+          // 决定用后端 rms 还是浏览器常驻 micLevel。
+          s.setBackendLevel((payload as { rms: number }).rms)
           return
         }
       },

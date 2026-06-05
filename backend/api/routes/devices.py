@@ -48,19 +48,20 @@ async def get_devices(
       selected_name: str | None — session._device（设备名）；live_asr=None 时为 None
     """
     devices = list_input_devices()
+    device_outs = [
+        DeviceOut(
+            index=d.index,
+            name=d.name,
+            max_input_channels=d.max_input_channels,
+            is_default=d.is_default,
+        )
+        for d in devices
+    ]
     session = getattr(request.app.state, "live_asr", None)
 
     if session is None:
         return {
-            "devices": [
-                DeviceOut(
-                    index=d.index,
-                    name=d.name,
-                    max_input_channels=d.max_input_channels,
-                    is_default=d.is_default,
-                )
-                for d in devices
-            ],
+            "devices": device_outs,
             "selected": None,
             "selected_available": None,
             "selected_name": None,
@@ -71,15 +72,7 @@ async def get_devices(
     selected_index, available = resolve_device_index(name, devices, default_index)
 
     return {
-        "devices": [
-            DeviceOut(
-                index=d.index,
-                name=d.name,
-                max_input_channels=d.max_input_channels,
-                is_default=d.is_default,
-            )
-            for d in devices
-        ],
+        "devices": device_outs,
         "selected": selected_index,
         "selected_available": available,
         "selected_name": name,

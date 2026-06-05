@@ -128,7 +128,7 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
         device=None（零设备退化）→ 退系统默认 index；查不到 → 退第一个可用 / 让 sounddevice 自选。
         device=name（str）→ list_input_devices() 反查当前 index；设备拔走 → 退系统默认 + warning。
         """
-        from backend.audio.device_source import DeviceSource
+        from backend.audio.device_source import DeviceError, DeviceSource, open_device_with_fallback
 
         devices = list_input_devices()
         default_idx = get_default_input_index()
@@ -148,8 +148,16 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
                 ),
             )
 
-        # idx=None（零设备且无默认）→ 传 None 让 sounddevice 自选
-        return DeviceSource(idx, AudioConfig())  # type: ignore[arg-type]
+        # 候选顺序：解析到的 idx → 系统默认 → 所有可用设备（open_device_with_fallback 去重保序）
+        # 探测每个候选是否真能打开（防幽灵设备 PortAudioError），返回首个成功的 index
+        candidates = [idx, default_idx, *(d.index for d in devices)]
+        try:
+            winning = open_device_with_fallback(candidates, AudioConfig())
+        except DeviceError:
+            # 全部失败（零设备或全部幽灵）→ 退到让 sounddevice 自选（传 None）
+            logger.warning("所有候选设备均无法打开，退至 sounddevice 自选")
+            winning = None  # type: ignore[assignment]
+        return DeviceSource(winning, AudioConfig())  # type: ignore[arg-type]
 
     def _detector_factory():
         if vad_kind == "silero":

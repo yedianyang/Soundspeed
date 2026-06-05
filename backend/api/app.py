@@ -38,6 +38,8 @@ from backend.core.events import (
     ASR_FINAL_CH2,
     ASR_PARTIAL_CH1,
     ASR_PARTIAL_CH2,
+    AUDIO_LEVEL,
+    DEVICE_WARNING,
     LLM_STATUS,
     SCENE_CHANGED,
     TAKE_CHANGED,
@@ -77,6 +79,8 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
             LLM_STATUS,
             TAKE_DELETED,
             SCENE_CHANGED,
+            DEVICE_WARNING,
+            AUDIO_LEVEL,
         ):
             # t=topic 默认参数闭包绑定：避免循环变量后期被覆盖，每个 handler 锁定各自
             # topic。用具名函数而非 lambda——带默认参数的 lambda 传给 Callable 时
