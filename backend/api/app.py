@@ -30,6 +30,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.auth import resolve_admin_token
+from backend.api.routes.query import router as query_router
 from backend.api.routes.takes import router as takes_router
 from backend.api.ws import ConnectionManager
 from backend.api.ws import router as ws_router
@@ -128,6 +129,7 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(takes_router)
+    app.include_router(query_router)
     app.include_router(ws_router)
 
     # dev-only：SOUNDSPEED_DEV=1 时挂载合成 ASR 注入端点（1.C 落地前验收 1.J transcript 面板）。

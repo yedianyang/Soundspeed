@@ -280,3 +280,15 @@ class ViewerCountPayload:
     """
 
     count: int
+
+
+# QP 查询管线（Task 10）
+QP_ANSWER = "qp.answer"  # 实际广播 topic 为 f"{QP_ANSWER}.{conn_id}"，客户端按前缀过滤
+
+
+@dataclass(frozen=True)
+class QpAnswerPayload:
+    """qp.answer.{conn_id} 的 payload（QP 完成后广播，客户端按 conn_id 认领）。"""
+
+    connection_id: str
+    answer_text: str
