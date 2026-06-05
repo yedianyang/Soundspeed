@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { Card } from "@/components/ui/card"
-import { getTakeNotes, postNote } from "@/lib/api"
+import { getTakeNotes, postNote, postVoiceNote } from "@/lib/api"
 import { useSessionStore } from "@/store/session"
 import type { NoteDTO, PendingNote } from "@/types/api"
 
@@ -38,10 +38,14 @@ export default function NoteList({ takeId, refreshKey }: NoteListProps) {
   const retryPending = useSessionStore((s) => s.retryPending)
   const noteFailed = useSessionStore((s) => s.noteFailed)
 
-  // 4.I：失败 pending 重试——乐观打回「处理中」，用同 client_id 重投原文；网络层再失败则标回。
+  // 4.I/4.L：失败 pending 重试——乐观打回「处理中」，用同 client_id 重投；网络层再失败则标回。
+  // 语音条目（有 voiceBlob）重传录音 WAV，文本条目重投原文。
   const handleRetry = (pn: PendingNote) => {
     retryPending(pn.client_id)
-    postNote(pn.rawText, undefined, pn.client_id).catch(() => {
+    const resubmit = pn.voiceBlob
+      ? postVoiceNote(pn.voiceBlob, pn.client_id, pn.ts)
+      : postNote(pn.rawText, undefined, pn.client_id)
+    resubmit.catch(() => {
       noteFailed({ reason: "timeout", ts: pn.ts, client_id: pn.client_id })
     })
   }

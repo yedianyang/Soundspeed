@@ -241,6 +241,7 @@ export interface PendingNote {
   content: string
   rawText: string // 提交的原始文字，note.failed 后「重试」据此重投 POST /notes
   failedReason?: string // 置位=NP 失败（4.I），渲染失败态 + 重试；undefined=处理中
+  voiceBlob?: Blob // 语音 note（4.L）：录音 WAV，置位则为语音条目；重试据此重传 POST /notes/voice
 }
 
 // WS note.processed payload

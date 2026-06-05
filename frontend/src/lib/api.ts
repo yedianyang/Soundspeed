@@ -329,6 +329,37 @@ export function getTakeNotes(takeId: number): Promise<NoteListResponse> {
   return request<NoteListResponse>(`/api/v1/takes/${takeId}/notes`)
 }
 
+// 语音 note（4.K/4.L）：浏览器麦 WAV 直传（multipart，POST /notes/voice）。与 enrollSpeaker 同样走
+// FormData（不能用 request 的 JSON Content-Type；浏览器自动设 multipart boundary）。后端 202
+// fire-and-forget，类别/正文由 Gemma 从音频听+判，不在响应里返回（前端乐观 pending 占位）。
+export async function postVoiceNote(
+  blob: Blob,
+  clientId: string,
+  ts?: number,
+): Promise<{ status: string; client_id: string | null }> {
+  const token = useSessionStore.getState().token
+  const fd = new FormData()
+  fd.append("file", blob, "note.wav")
+  fd.append("client_id", clientId)
+  if (ts !== undefined) fd.append("ts", String(ts))
+  const res = await fetch(`${API_BASE}/api/v1/notes/voice`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: fd,
+  })
+  if (!res.ok) {
+    let detail = `voice note → ${res.status}`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = String(j.detail)
+    } catch {
+      /* 忽略非 JSON 错误体 */
+    }
+    throw new ApiError(res.status, detail)
+  }
+  return res.json()
+}
+
 // ── react-query 查询键 + hooks ──
 
 export const scenesQueryKey = () => ["scenes"] as const
