@@ -212,3 +212,9 @@ export interface LlmStatusMsg {
   task_type: string | null
   take_id: number | null
 }
+
+// viewer.count：当前连着 /ws 的客户端总数（含场记自己），连接建立 / 断开时后端广播。
+// 驱动 header 眼睛计数。
+export interface ViewerCountMsg {
+  count: number
+}
