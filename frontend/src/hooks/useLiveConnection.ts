@@ -6,6 +6,7 @@ import { useSessionStore } from "@/store/session"
 import type {
   AsrMsg,
   LlmStatusMsg,
+  NoteFailedMsg,
   NoteProcessedMsg,
   SceneChangedMsg,
   TakeChangedMsg,
@@ -100,6 +101,12 @@ export function useLiveConnection(): void {
           s.noteProcessed(m)
           // 刷新受影响的 take 的 notes + takes 列表
           queryClient.invalidateQueries({ queryKey: ["takes"] })
+          return
+        }
+        if (topic === "note.failed") {
+          // 4.I：NP 失败 → 对应 pending 转失败态（红 + reason + 重试），不再永久卡处理中
+          const m = payload as NoteFailedMsg
+          s.noteFailed(m)
           return
         }
       },

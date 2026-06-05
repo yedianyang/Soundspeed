@@ -10,7 +10,7 @@ import type {
   TranscriptSegmentDTO,
 } from "@/types/api"
 
-import type { NoteProcessedMsg, PendingNote } from "@/types/api"
+import type { NoteFailedMsg, NoteProcessedMsg, PendingNote } from "@/types/api"
 
 export type ConnectionState = "connecting" | "open" | "closed" | "no-token"
 
@@ -81,6 +81,8 @@ interface SessionState {
   resetSegments: () => void
   addPendingNote: (n: PendingNote) => void
   noteProcessed: (m: NoteProcessedMsg) => void
+  noteFailed: (m: NoteFailedMsg) => void
+  retryPending: (clientId: string) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -257,6 +259,25 @@ export const useSessionStore = create<SessionState>((set) => ({
         ? s.pendingNotes.filter((p) => p.client_id !== m.client_id)
         : s.pendingNotes,
       notesVersion: s.notesVersion + 1,
+    })),
+
+  // 4.I：NP 失败 → 按 client_id 把对应 pending 标失败态（保留在列表，渲染红 + reason + 重试），
+  // 而非移除或永久卡「处理中」。client_id 缺失（异常/旧链路）时不误标，仅原样返回。
+  noteFailed: (m) =>
+    set((s) => ({
+      pendingNotes: m.client_id
+        ? s.pendingNotes.map((p) =>
+            p.client_id === m.client_id ? { ...p, failedReason: m.reason } : p,
+          )
+        : s.pendingNotes,
+    })),
+
+  // 重试：把失败 pending 乐观打回「处理中」（清 failedReason），调用方随后用同 client_id 重投。
+  retryPending: (clientId) =>
+    set((s) => ({
+      pendingNotes: s.pendingNotes.map((p) =>
+        p.client_id === clientId ? { ...p, failedReason: undefined } : p,
+      ),
     })),
 
   setRecording: (recording) =>

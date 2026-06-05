@@ -30,6 +30,7 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
         ts: Date.now() / 1000,
         category: resp.category,
         content: resp.content,
+        rawText: trimmed, // 失败重试据此重投同文本
       })
       setText("")
       onNoteAdded?.()

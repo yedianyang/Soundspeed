@@ -239,6 +239,8 @@ export interface PendingNote {
   ts: number
   category: string
   content: string
+  rawText: string // 提交的原始文字，note.failed 后「重试」据此重投 POST /notes
+  failedReason?: string // 置位=NP 失败（4.I），渲染失败态 + 重试；undefined=处理中
 }
 
 // WS note.processed payload
@@ -249,4 +251,11 @@ export interface NoteProcessedMsg {
   content: string
   ts: number
   client_id: string | null // 后端原样回传前端提交时的去重键；null=异常/旧链路
+}
+
+// WS note.failed payload（4.I）：NP 失败兜底，前端据此把对应 pending 转失败态。
+export interface NoteFailedMsg {
+  reason: string // take_not_found / parse_error / timeout（机制可检测的失败）
+  ts: number
+  client_id: string | null // 定位要标失败的 pending；null=异常/旧链路，不误标
 }

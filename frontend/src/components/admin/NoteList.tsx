@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { Card } from "@/components/ui/card"
-import { getTakeNotes } from "@/lib/api"
+import { getTakeNotes, postNote } from "@/lib/api"
 import { useSessionStore } from "@/store/session"
 import type { NoteDTO, PendingNote } from "@/types/api"
 
@@ -9,6 +9,14 @@ const CATEGORY_COLORS: Record<string, string> = {
   ng: "text-red-600",
   issue: "text-yellow-600",
   note: "text-muted-foreground",
+}
+
+// note.failed reason → 场记可读文案（4.I）
+const FAIL_REASON_TEXT: Record<string, string> = {
+  take_not_found: "找不到对应素材",
+  parse_error: "理解失败",
+  timeout: "处理超时",
+  asr_unclear: "没听清",
 }
 
 function formatTime(ts: number): string {
@@ -26,6 +34,16 @@ export default function NoteList({ takeId, refreshKey }: NoteListProps) {
   const pendingNotes = useSessionStore((s) => s.pendingNotes)
   // note.processed 落库后 store bump notesVersion → 触发 resolved refetch（衔接 pending 移除与 resolved 显示）。
   const notesVersion = useSessionStore((s) => s.notesVersion)
+  const retryPending = useSessionStore((s) => s.retryPending)
+  const noteFailed = useSessionStore((s) => s.noteFailed)
+
+  // 4.I：失败 pending 重试——乐观打回「处理中」，用同 client_id 重投原文；网络层再失败则标回。
+  const handleRetry = (pn: PendingNote) => {
+    retryPending(pn.client_id)
+    postNote(pn.rawText, undefined, pn.client_id).catch(() => {
+      noteFailed({ reason: "timeout", ts: pn.ts, client_id: pn.client_id })
+    })
+  }
 
   useEffect(() => {
     if (takeId == null) {
@@ -59,21 +77,44 @@ export default function NoteList({ takeId, refreshKey }: NoteListProps) {
       size="sm"
       className="pointer-events-auto px-3 pt-4 pb-[35px] gap-1 max-h-[40vh] overflow-y-auto bg-background rounded-t-2xl rounded-b-none shadow-[0_-4px_16px_rgba(0,0,0,0.1)] ring-0"
     >
-      {/* Pending notes（处理中） */}
-      {pendingNotes.map((pn: PendingNote, i: number) => (
-        <div key={`pending-${pn.ts}-${i}`} className="flex items-center gap-2 text-xs py-0.5 opacity-60">
-          <span className="text-muted-foreground font-mono whitespace-nowrap">
-            {formatTime(pn.ts)}
-          </span>
-          <span className={`font-semibold whitespace-nowrap ${CATEGORY_COLORS[pn.category] ?? "text-muted-foreground"}`}>
-            @{pn.category}
-          </span>
-          {pn.content && (
-            <span className="text-foreground break-all">{pn.content}</span>
-          )}
-          <span className="text-muted-foreground italic whitespace-nowrap">处理中...</span>
-        </div>
-      ))}
+      {/* Pending notes（处理中 / 失败） */}
+      {pendingNotes.map((pn: PendingNote) => {
+        const failed = pn.failedReason != null
+        return (
+          <div
+            key={`pending-${pn.client_id}`}
+            className={`flex items-center gap-2 text-xs py-0.5 ${failed ? "" : "opacity-60"}`}
+          >
+            <span className="text-muted-foreground font-mono whitespace-nowrap">
+              {formatTime(pn.ts)}
+            </span>
+            <span className={`font-semibold whitespace-nowrap ${CATEGORY_COLORS[pn.category] ?? "text-muted-foreground"}`}>
+              @{pn.category}
+            </span>
+            {pn.content && (
+              <span className={`break-all ${failed ? "text-red-600" : "text-foreground"}`}>
+                {pn.content}
+              </span>
+            )}
+            {failed ? (
+              <>
+                <span className="text-red-600 whitespace-nowrap">
+                  {FAIL_REASON_TEXT[pn.failedReason!] ?? "处理失败"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleRetry(pn)}
+                  className="text-red-600 underline whitespace-nowrap hover:text-red-700"
+                >
+                  重试
+                </button>
+              </>
+            ) : (
+              <span className="text-muted-foreground italic whitespace-nowrap">处理中...</span>
+            )}
+          </div>
+        )
+      })}
       {/* Resolved notes */}
       {sorted.map((n) => (
         <div key={n.event_id} className="flex items-center gap-2 text-xs py-0.5">
