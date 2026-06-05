@@ -316,3 +316,57 @@ def get_or_create_scene(
 - **3.E**（前端导入 UI）：消费 §7 端点。
 - **3.F**（文件上传）：据 §6 汇入解析器同一入口。
 - **3.G/3.H**（拍照）：据 §6 路由，spike 先行定选型。
+
+---
+
+## 11. 与 4.x 多模态 LLM 入口架构对齐（2026-06-05 补）
+
+> **来源：** 4.x `docs/specs/2026-06-05-voice-note-and-np-refinement.md` §5.1 / §5.2（v0.4 架构定调 + v0.5 方案 A）。该 spec 的多模态架构（单实例三入口）是 3.x 与 4.x 共用的地基；本节把它**吸收进 3.x spec**，让 feat/3.x 推给开发者后可照此独立实现、不必另翻 4.x spec。按 **2026-06-05 的 4.x 设计当前形态**对齐（4.x 仍在打磨），定稿后回校一次。
+> **为什么进 3.x spec：** 3.x 有两条 LLM 通路——**3.B 文本解析**、**3.G/3.H 拍照 vision**——它们不是孤立的，而是 4.x 定的「单实例多模态 handler」三入口里的两个。3.B/3.G/3.H 实现必须遵循此架构，**不许各自建模型实例**。
+
+### 11.1 架构（4.x 定调，硬约束）
+
+全后端**只有一份** `Llama`，**不开第二个**。这份实例挂**一个多模态 handler**（`chat_handler=<多模态 handler>` + `mmproj-F16.gguf`，含 gemma4v 视觉 + gemma4a 音频两个投影器），按 content 类型分**三个入口**：
+
+| 入口 | 3.x 这边谁用 | 其他用户 | 投影器 |
+|------|-------------|---------|--------|
+| 文本 | **SP 剧本解析（3.B）** | L2 / 文本 NP | 无 |
+| 图像 | **拍照 OCR（3.G/3.H）** | —— | gemma4v |
+| 音频 | —— | 语音 NP（4.x） | gemma4a |
+
+**SP（剧本导入）是唯一横跨两个入口的业务线**：粘贴 / 上传的剧本文本走**文本入口**（3.B 解析），拍照剧本走**图像入口**（3.G/3.H OCR）——同一条业务、两条 LLM 通路，都挂这一份共享实例。这是 3.x 内部的入口分配，**记在本 spec 即可、不进 4.x**（4.x 只定义架构，不管各业务怎么用入口）。
+
+三入口**共用同一 `CHAT_FORMAT`**（gemma 模板）。L2 / 文本 NP / SP 共用一份模型已是现状（都调 `LLMService.infer`，`_lock` + priority 串行调度）；多模态化后仅多 mmproj 增量，**显存不翻倍**。管线仍平行（各 async 编排互不等待），进模型经 LLMService 序列调度串行喂同一实例。
+
+### 11.2 3.B = 文本入口（对 §4.1「prompt v1 钉死」的限定）
+
+3.B 现状已走统一文本入口（`LLMService.infer`，§4 / §10）。收敛到多模态 handler 后，文本格式化从 **GGUF 默认 chat_template 换成 handler 的 `CHAT_FORMAT`**——典型差异：gemma 无 system role，system 折进 user turn 的方式两套不一致（handler 拼成**两个连续 user turn**，默认模板**合并成一个**），**prompt 字符串会变**。
+
+**限定（重要）：** §4.1 说 v1「性能 OK / 用户确认为主 prompt」，那是在**默认 chat_template 下**实测的。切到统一 `CHAT_FORMAT` 后分场 / 行结构解析可能漂。**SP 须对标 4.x 给 L2 定的 parity 口径**（4.x spec §10-2 / §11）：收敛后跑一遍 `sp_smoke`、确认分场 + 行结构仍合法，漂了重调 prompt / 重盖 smoke 基准；**不追求与旧路径逐字一致**，仅当解析质量真退化才算不过。**此 SP 文本 parity 是 3.x 自己的收敛验收项**（§11.5），留在本 spec、**不进 4.x**——4.x 只定义架构（三入口），SP 用哪个入口、各自验收归 3.x。
+
+### 11.3 3.G/3.H = 图像入口（方案 A：4.J 建实例，3.H 只接调用）
+
+4.x v0.5 **方案 A**：4.J 直接按最终标准化形态建那份 **vision-ready 共享单实例**，构造参数已为 OCR 就位：
+
+```
+Llama(model_path=GGUF, chat_handler=<多模态 handler>,
+      n_ctx=8192, n_batch=2048, n_ubatch=2048, n_gpu_layers=-1, seed=42)
+handler.clip_model_path = <mmproj-F16>
+_init_mtmd_context: image_min_tokens = image_max_tokens = 1120
+```
+
+`n_batch=n_ubatch=2048` + `image_max_tokens=1120` 是 **gemma4 vision OCR 的硬要求**（3.x `scripts/sp_vision_probe.py` 实测：gemma4 vision non-causal，1120 image token 要落单 ubatch；中文小字读清靠 1120 档）。4.J **现在就位**这些参数，目的就是让 3.x vision 合并时**只接调用、不动实例构造、零冲突**。
+
+**3.H 落地口径：** 不自建模型实例，把拍照 vision 调用接进 4.J 建好的多模态实例（共用 `CHAT_FORMAT`、单 mtmd ctx 同挂 vision + audio）。`sp_vision_probe.py` 已实测打通 vision 通路（OCR 转录可用、cast 注入定位专名错根因），是 3.H 的参考原型，**本期仍 spike、不产品化**。
+
+### 11.4 版本 + 依赖统一
+
+- **rebase 红利**：3.x rebase 到 main（`d2cf92f`，含 #16 跨平台依赖迁移）后，`llama-cpp-python` 已是 **`==0.3.25`**，与 4.x 同版本。4.x spec §5.1 写的「3.x 0.3.23 手搓 vs 4.x 0.3.25 内置」版本差**已消失**——两边都用 0.3.25 **内置 `Gemma4ChatHandler`**。
+- `sp_vision_probe.py:49` 现仍 `class Gemma4ChatHandler(Llava15ChatHandler)`（手搓继承 + override vicuna→gemma 模板）是 0.3.23 遗留，收敛时**弃手搓、改继承内置**。
+- mmproj 路径解析 4.x 的 `LLMService` 已落 `resolve_mmproj_path`（env `GEMMA_MMPROJ_PATH` > HF cache `unsloth/gemma-4-E4B-it-GGUF` 的 `mmproj-F16.gguf` > 下载），3.x vision 复用、不另写。
+
+### 11.5 3.x 这边的对齐待办
+
+- **3.B**：收敛后补 SP 文本 parity 重验（对标 L2 口径，§11.2）。3.x 自管验收，**不回传 4.x**。
+- **3.H**：vision 接进 4.J 共享实例（§11.3），不自建实例；`sp_vision_probe.py` 的 0.3.23 注释更新为 0.3.25 现状。
+- **跨线 sequencing**：4.J 建实例（owner 4.x / 经纬）→ 3.H 接调用（owner 3.x），4.J 先落、3.H 后接，开工前与 4.x 对齐（类比 §0 分叉 2 的 2.A→3.C sequencing）。
