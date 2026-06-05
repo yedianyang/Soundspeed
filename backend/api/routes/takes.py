@@ -23,6 +23,7 @@ TakeDTO 有意省略 performer_issues / audio_quality（codex P2）：
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Literal
 
@@ -43,6 +44,8 @@ from backend.core.events import (
     TakeStartPayload,
 )
 from backend.pipelines.note_parse import NoteParseError, parse_note
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["takes"])
 
@@ -347,7 +350,12 @@ async def create_note(
             client_id=body.client_id,
         )
     except RuntimeError:
-        # 不在 event loop 中（如测试环境），fallback 到当前活跃 take
+        # 不在 event loop 中（如同步测试环境），fallback 到当前活跃 take。
+        # 端点是 async def → 生产恒在 loop 内，此路不可达；若哪天被改成 def 触发，
+        # 这里会绕过整条 NP（无 LLM 归类、无 take 消歧、无 note.processed WS），故吼一声。
+        logger.warning(
+            "create_note fallback 命中：无 event loop，绕过 NP 直接落当前活跃 take（仅应出现在同步测试）"
+        )
         dal = request.app.state.orchestrator.dal
         session = request.app.state.orchestrator.session
         if session.take_active and session.take_id is not None:
