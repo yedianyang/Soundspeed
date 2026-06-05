@@ -35,6 +35,19 @@ _NO_EXCLUDE_TAKE_ID = -1
 # (?=\d) 前瞻：前缀只在其后（跨可选分隔符）紧跟数字时才剥，避免误剥 `sce3` 这类。
 _SCENE_PREFIX_RE = re.compile(r"^(?:scene|场|sc|s)[\s_\-]*(?=\d)", re.IGNORECASE)
 
+# 万能笔 authorizer：只放行 SELECT 系动作，其余 DENY（挡 ATTACH/写/非 data_version PRAGMA）。
+# FTS 影子表（_config/_idx/_data/_docsize）按设计可读：MATCH 内部需要 _config/_idx，
+# 且影子表漏不出 script_lines 之外的剧本内容——模型本就能直接读 script_lines 拿全部台词。
+# 真正边界：action 级（只 SELECT 系）+ mode=ro + 单句守卫 + 行数封顶 + 超时。
+_QP_ALLOWED_ACTIONS = frozenset(
+    {
+        sqlite3.SQLITE_SELECT,
+        sqlite3.SQLITE_READ,
+        sqlite3.SQLITE_FUNCTION,
+        sqlite3.SQLITE_RECURSIVE,
+    }
+)
+
 
 def normalize_scene_code(raw: str) -> str:
     """归一场次编号用于读侧匹配（spec §7.2）。
@@ -386,6 +399,67 @@ class DAL:
                     (query,),
                 ).fetchall()
         return [dict(r) for r in rows]
+
+    def query_readonly(
+        self,
+        sql: str,
+        params: tuple = (),
+        *,
+        max_rows: int = 300,
+        timeout_s: float = 3.0,
+    ) -> dict:
+        """万能笔：执行模型现写的只读 SQL（spec §6 安全墙）。
+
+        安全边界（action 级，无表名 deny）：
+        - PRAGMA 分支最先：只放行 FTS MATCH 内部所需的 data_version，其余 PRAGMA 一律 DENY。
+        - _QP_ALLOWED_ACTIONS（SELECT/READ/FUNCTION/RECURSIVE）放行，其余 DENY。
+          这挡住了 ATTACH（SQLITE_ATTACH）、写（INSERT/UPDATE/DELETE）、临时表（CREATE）等。
+        - FTS 影子表（_config/_idx/_data/_docsize）按设计可读：MATCH 内部需要 _config/_idx，
+          且影子表漏不出 script_lines 之外信息（模型本就能直接读 script_lines）。
+        - 额外防线：mode=ro 连接挡物理写；单句守卫（sqlite3.Warning）；行数封顶；超时 abort。
+        错误不抛穿：包成 {"error": ...} 让循环下一跳自纠。
+        成功返回 {"columns": [...], "rows": [...], "row_count": n, "truncated": bool}。
+        """
+        import time
+
+        def _authorizer(
+            action: int, arg1: object, arg2: object, db_name: object, trigger: object
+        ) -> int:
+            # PRAGMA 分支必须在 allowed-actions 检查之前（SQLITE_PRAGMA 不在 allowed 集合）。
+            # 只放行 data_version（FTS MATCH 内部用来检测 DB 并发修改），其余 PRAGMA 全部 DENY。
+            if action == sqlite3.SQLITE_PRAGMA:
+                return sqlite3.SQLITE_OK if arg1 == "data_version" else sqlite3.SQLITE_DENY
+            if action in _QP_ALLOWED_ACTIONS:
+                return sqlite3.SQLITE_OK
+            return sqlite3.SQLITE_DENY
+
+        with self._readonly_conn() as conn:
+            deadline = time.monotonic() + timeout_s
+            conn.set_authorizer(_authorizer)
+            conn.set_progress_handler(
+                lambda: 1 if time.monotonic() > deadline else 0, 1000
+            )
+            try:
+                cur = conn.execute(sql, params)
+                fetched = cur.fetchmany(max_rows + 1)
+                truncated = len(fetched) > max_rows
+                fetched = fetched[:max_rows]
+                columns = [d[0] for d in cur.description] if cur.description else []
+                return {
+                    "columns": columns,
+                    "rows": [dict(r) for r in fetched],
+                    "row_count": len(fetched),
+                    "truncated": truncated,
+                }
+            except sqlite3.Warning as exc:
+                return {"error": f"只能执行单条 SQL 语句：{exc}"}
+            except sqlite3.OperationalError as exc:
+                return {"error": f"查询失败或超时：{exc}"}
+            except sqlite3.DatabaseError as exc:
+                return {"error": f"数据库拒绝该查询（仅允许只读 SELECT）：{exc}"}
+            finally:
+                conn.set_authorizer(None)
+                conn.set_progress_handler(None, 1000)
 
     # ── 资源管理 ──────────────────────────────────────────────────────────────
 

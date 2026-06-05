@@ -168,3 +168,77 @@ def test_get_scene_info_latest_script_version(dal: DAL) -> None:
 
     chars = dal.list_characters(sid)
     assert sorted(chars) == ["丙", "甲"], f"期望 [丙,甲]，得到 {sorted(chars)}（可能 union 了历史版本）"
+
+
+# ---------------------------------------------------------------------------
+# Task 3: query_readonly 万能笔安全墙（D-QP-04）
+# ---------------------------------------------------------------------------
+
+def test_query_readonly_allows_select(dal: DAL) -> None:
+    dal.create_scene("Scene_1")
+    res = dal.query_readonly("SELECT scene_code FROM scenes;")
+    assert res["row_count"] == 1
+    assert res["rows"][0]["scene_code"] == "Scene_1"
+    assert res["truncated"] is False
+
+
+def test_query_readonly_allows_cte(dal: DAL) -> None:
+    dal.create_scene("Scene_1")
+    res = dal.query_readonly(
+        "WITH x AS (SELECT scene_code FROM scenes) SELECT * FROM x;"
+    )
+    assert "error" not in res
+    assert res["row_count"] == 1
+
+
+def test_query_readonly_blocks_write(dal: DAL) -> None:
+    res = dal.query_readonly("INSERT INTO scenes (scene_code) VALUES ('x');")
+    assert "error" in res
+
+
+def test_query_readonly_blocks_attach(dal: DAL) -> None:
+    # mode=ro 拦不住 ATTACH，必须靠 authorizer（spec §6.2 ✅实测）
+    res = dal.query_readonly("ATTACH DATABASE ':memory:' AS evil;")
+    assert "error" in res
+
+
+def test_query_readonly_blocks_pragma(dal: DAL) -> None:
+    res = dal.query_readonly("PRAGMA table_info(scenes);")
+    assert "error" in res
+
+
+def test_query_readonly_blocks_multi_statement(dal: DAL) -> None:
+    res = dal.query_readonly("SELECT 1; SELECT 2;")
+    assert "error" in res  # 单游标只执行一条，多句 raise Warning
+
+
+def test_query_readonly_allows_fts_match(dal: DAL) -> None:
+    # 影子表按设计可读（MATCH 内部需要 _config/_idx，且漏不出 script_lines 之外信息）
+    _seed_scene_with_script(dal)
+    res = dal.query_readonly(
+        "SELECT text FROM script_lines_fts WHERE text MATCH '好久不见';"
+    )
+    assert "error" not in res
+    assert res["row_count"] >= 1
+
+
+def test_query_readonly_truncates_rows(dal: DAL) -> None:
+    sid = dal.create_scene("Scene_1")
+    for i in range(5):
+        dal.start_take(sid, "", 1000.0 + i)
+    res = dal.query_readonly("SELECT take_id FROM takes;", max_rows=3)
+    assert res["row_count"] == 3
+    assert res["truncated"] is True
+
+
+def test_query_readonly_allows_pragma_data_version(dal: DAL) -> None:
+    # scoped PRAGMA 放行：data_version 是 MATCH 内部所需，锁定只放行它
+    res = dal.query_readonly("PRAGMA data_version;")
+    assert "error" not in res
+    assert res["row_count"] == 1
+
+
+def test_query_readonly_blocks_pragma_table_info(dal: DAL) -> None:
+    # scoped PRAGMA：table_info 不是 data_version，仍被 DENY
+    res = dal.query_readonly("PRAGMA table_info(scenes);")
+    assert "error" in res
