@@ -605,6 +605,7 @@ class Orchestrator:
         机制可检测的三类失败（parse/timeout/FK）→ 发 note.failed（带 client_id），前端转失败态；
         未知异常上抛交 _np_done_callback 记 WARNING + idle。
         """
+        from backend.llm.errors import ModelUnavailableError  # noqa: PLC0415
         from backend.pipelines.np_note import NPParseError  # noqa: PLC0415
 
         try:
@@ -618,16 +619,16 @@ class Orchestrator:
                 ts=ts,
             )
         except Exception as exc:
+            # 失败原因在产生地确定（typed domain error），这里只做干净映射，不靠宽泛内建异常类型反推。
             if isinstance(exc, NPParseError):
                 reason = "parse_error"
             elif isinstance(exc, asyncio.TimeoutError):
                 reason = "timeout"
             elif isinstance(exc, sqlite3.IntegrityError):
                 reason = "take_not_found"  # 归到不存在的 take_id，insert_note 撞 FK
-            elif isinstance(exc, (RuntimeError, ValueError, TypeError)):
-                # setup 失败：多模态 client 未就绪（无 handler 的 RuntimeError、mtmd 初始化 ValueError、
-                # audio 非 bytes 的 TypeError）。常见于 mmproj 缺失/下载失败的部署态——必须发 note.failed，
-                # 否则命中 else:raise 静默退出 → 前端 pending 永久卡（复活 4.I 的 bug）。
+            elif isinstance(exc, ModelUnavailableError):
+                # 多模态模型不可用（mmproj 缺失/下载失败 → 退纯文本；或 mtmd 自检失败）。
+                # 必须发 note.failed，否则前端 pending 永久卡（复活 4.I 的 bug）。
                 reason = "model_unavailable"
             else:
                 raise  # 真正未知失败：保留安全网，交 done_callback 处理

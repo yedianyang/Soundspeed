@@ -26,6 +26,8 @@ import llama_cpp
 from llama_cpp._utils import suppress_stdout_stderr
 from llama_cpp.llama_chat_format import Gemma4ChatHandler
 
+from backend.llm.errors import ModelUnavailableError
+
 # 音频哨兵：WAV 字节不进 messages（messages 只放此 URL 占位），由 load_image 在推理时取回。
 # 取一个不会与真实图片 URL 撞的 scheme。
 AUDIO_SENTINEL = "soundspeed://audio/current.wav"
@@ -86,13 +88,13 @@ class MultimodalGemma4Handler(Gemma4ChatHandler):
                 self.clip_model_path.encode(), llama_model.model, ctx_params
             )
             if self.mtmd_ctx is None:
-                raise ValueError(f"Failed to load mtmd context from: {self.clip_model_path}")
+                raise ModelUnavailableError(f"mtmd 上下文加载失败：{self.clip_model_path}")
 
             # 启动自检（spec §5.2）：单实例多模态必须 audio + vision 双支持（mmproj-F16 两投影器）。
             if not self._mtmd_cpp.mtmd_support_audio(self.mtmd_ctx):
-                raise ValueError("mmproj 不支持音频（缺 gemma4a 音频投影器）")
+                raise ModelUnavailableError("mmproj 不支持音频（缺 gemma4a 音频投影器）")
             if not self._mtmd_cpp.mtmd_support_vision(self.mtmd_ctx):
-                raise ValueError("mmproj 不支持视觉（缺 gemma4v 视觉投影器）")
+                raise ModelUnavailableError("mmproj 不支持视觉（缺 gemma4v 视觉投影器）")
 
             def mtmd_free() -> None:
                 with suppress_stdout_stderr(disable=self.verbose):

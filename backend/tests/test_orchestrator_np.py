@@ -297,15 +297,18 @@ async def test_run_np_voice_async_take_not_found_emits_note_failed(tmp_dal: DAL)
 async def test_run_np_voice_async_model_unavailable_emits_note_failed(tmp_dal: DAL) -> None:
     """mmproj 不可用 → 纯文本 client → 音频推理 RuntimeError → note.failed(model_unavailable)。
 
-    安全网：setup 失败（无 handler 的 RuntimeError / mtmd 初始化 ValueError / bytes TypeError）
-    不能命中 _finalize_np 的 `else: raise` 静默退出（否则前端 pending 永久卡，复活 4.I 的 bug）。
+    安全网：setup 失败在源头抛 ModelUnavailableError（client 无 handler / multimodal mtmd 自检失败），
+    _finalize_np 干净映射成 model_unavailable，不能命中 `else: raise` 静默退出（否则前端 pending
+    永久卡，复活 4.I 的 bug）。
     """
+    from backend.llm.errors import ModelUnavailableError  # noqa: PLC0415
+
     scene_id = tmp_dal.create_scene("scene_voice4")
     session = SessionState()
     session.activate_scene(scene_id)
 
     stub_voice = AsyncMock(
-        side_effect=RuntimeError("纯文本 GemmaClient 不支持音频推理（未挂多模态 handler）")
+        side_effect=ModelUnavailableError("纯文本 GemmaClient 不支持音频推理（未挂多模态 handler）")
     )
     orch = create_orchestrator(
         tmp_dal, session, llm_service=MagicMock(), voice_runner=stub_voice

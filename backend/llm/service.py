@@ -41,76 +41,42 @@ _HF_FILENAME = "gemma-4-E4B-it-Q4_K_M.gguf"
 _HF_MMPROJ_FILENAME = "mmproj-F16.gguf"
 
 
-def resolve_model_path(download: bool) -> str | None:
-    """解析可用模型路径，按优先级：本地 env > HF cache > 下载。
+def _resolve_hf_path(env_var: str, filename: str, download: bool) -> str | None:
+    """解析 HF 仓库内某文件的本地路径，优先级：本地 env > HF cache > 下载 > None。
 
-    优先级：
-      1. GEMMA_MODEL_PATH env 设置且文件存在 → 直接返回，不调用任何 HF 函数。
-      2. huggingface_hub.try_to_load_from_cache 命中（返回 str）→ 返回缓存路径。
-         注意：返回值可能是哨兵对象（truthy 非 str），用 isinstance(result, str) 判。
-      3. download=True → huggingface_hub.hf_hub_download 触发下载并返回路径。
-      4. 否则 → None（模型不可用，调用方应发 downloading 再 await ensure_model_ready）。
+    1. `env_var` 指向的文件存在 → 直接返回，不调用任何 HF 函数。
+    2. `try_to_load_from_cache` 命中（返回 str）→ 返回缓存路径。
+       注意：返回值可能是哨兵对象（truthy 非 str），用 isinstance(result, str) 判。
+    3. download=True → `hf_hub_download` 触发下载并返回路径。
+    4. 否则 → None（不可用，调用方应发 downloading 再 await ensure_model_ready）。
 
-    此函数是同步的，在 worker thread 内调用（asyncio.to_thread），不阻塞 event loop。
+    同步函数，在 worker thread 内调用（asyncio.to_thread），不阻塞 event loop。
+    base gguf 与 mmproj 同仓（_HF_REPO_ID），仅 env_var / filename 不同。
     """
-    # 优先级 1：env 显式设置且文件存在（用户当前 run，零 HF 调用）
-    env_path = os.environ.get("GEMMA_MODEL_PATH")
+    env_path = os.environ.get(env_var)
     if env_path and Path(env_path).exists():
         return env_path
 
-    # 优先级 2/3：走 HF 路径（lazy import，GEMMA_MODEL_PATH 分支已 return）
     import huggingface_hub  # noqa: PLC0415
 
-    cache_result = huggingface_hub.try_to_load_from_cache(
-        repo_id=_HF_REPO_ID,
-        filename=_HF_FILENAME,
-    )
+    cache_result = huggingface_hub.try_to_load_from_cache(repo_id=_HF_REPO_ID, filename=filename)
     if isinstance(cache_result, str):
         return cache_result  # 缓存命中
 
-    # 优先级 3：触发下载
     if download:
-        return huggingface_hub.hf_hub_download(
-            repo_id=_HF_REPO_ID,
-            filename=_HF_FILENAME,
-        )
+        return huggingface_hub.hf_hub_download(repo_id=_HF_REPO_ID, filename=filename)
 
     return None
+
+
+def resolve_model_path(download: bool) -> str | None:
+    """解析 base gguf 路径（env GEMMA_MODEL_PATH > HF cache > 下载）。"""
+    return _resolve_hf_path("GEMMA_MODEL_PATH", _HF_FILENAME, download)
 
 
 def resolve_mmproj_path(download: bool) -> str | None:
-    """解析多模态投影器（mmproj-F16.gguf）路径，优先级同 resolve_model_path。
-
-    优先级：
-      1. GEMMA_MMPROJ_PATH env 设置且文件存在 → 直接返回，不调用任何 HF 函数。
-      2. huggingface_hub.try_to_load_from_cache 命中（返回 str）→ 返回缓存路径。
-         返回值可能是哨兵对象（truthy 非 str），用 isinstance(result, str) 判。
-      3. download=True → hf_hub_download 触发下载并返回路径。
-      4. 否则 → None。
-
-    与 base gguf 同仓（_HF_REPO_ID），仅 filename 不同（mmproj-F16.gguf）。
-    同步函数，在 worker thread 内调用，不阻塞 event loop。
-    """
-    env_path = os.environ.get("GEMMA_MMPROJ_PATH")
-    if env_path and Path(env_path).exists():
-        return env_path
-
-    import huggingface_hub  # noqa: PLC0415
-
-    cache_result = huggingface_hub.try_to_load_from_cache(
-        repo_id=_HF_REPO_ID,
-        filename=_HF_MMPROJ_FILENAME,
-    )
-    if isinstance(cache_result, str):
-        return cache_result
-
-    if download:
-        return huggingface_hub.hf_hub_download(
-            repo_id=_HF_REPO_ID,
-            filename=_HF_MMPROJ_FILENAME,
-        )
-
-    return None
+    """解析多模态投影器 mmproj-F16.gguf 路径（env GEMMA_MMPROJ_PATH > HF cache > 下载）。"""
+    return _resolve_hf_path("GEMMA_MMPROJ_PATH", _HF_MMPROJ_FILENAME, download)
 
 
 @dataclass
@@ -208,8 +174,10 @@ class LLMService:
             # **运行时自动下载**（在 worker thread 内，阻塞可接受）——修部署态缺口：base 已缓存而
             # mmproj 未缓存的现存安装（升级路径），首条音频前自动补 mmproj 升多模态，而非静默退纯文本
             # 致语音永久失败。下载失败（离线）→ 退纯文本，音频路径随后由 note.failed(model_unavailable) 兜底。
-            mmproj = self._mmproj_path or resolve_mmproj_path(download=False)
+            mmproj = self._mmproj_path
             if mmproj is None:
+                # resolve_mmproj_path(download=True) 内部先查 env/cache，未命中才真下载，
+                # 故无需先单独探一次 download=False（会多一次 HF cache 查询）。
                 try:
                     mmproj = resolve_mmproj_path(download=True)
                 except Exception:  # noqa: BLE001  下载失败容错：退纯文本，不崩

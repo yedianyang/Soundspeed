@@ -13,6 +13,8 @@ import os
 import time
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from backend.llm.errors import ModelUnavailableError
+
 if TYPE_CHECKING:
     from backend.llm.multimodal import MultimodalGemma4Handler
 
@@ -109,7 +111,7 @@ class GemmaClient:
         audio = kwargs.pop("audio", None)
         if audio is not None:
             if self._handler is None:
-                raise RuntimeError("纯文本 GemmaClient 不支持音频推理（未挂多模态 handler）")
+                raise ModelUnavailableError("纯文本 GemmaClient 不支持音频推理（未挂多模态 handler）")
             if not isinstance(audio, (bytes, bytearray)):
                 raise TypeError(f"audio 必须是 bytes，收到 {type(audio).__name__}")
             # _lock 串行下设置该次请求音频，handler.load_image(哨兵) 取回；推理后必复位避免串号。

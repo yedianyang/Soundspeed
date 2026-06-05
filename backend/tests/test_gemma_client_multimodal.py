@@ -88,8 +88,9 @@ def test_create_chat_completion_audio_stashes_and_clears(tmp_path, monkeypatch) 
 
 
 def test_text_client_rejects_audio(tmp_path, monkeypatch) -> None:
-    """纯文本 client（无 handler）收到 audio → RuntimeError（不能跑音频推理）。"""
+    """纯文本 client（无 handler）收到 audio → ModelUnavailableError（不能跑音频推理）。"""
     from backend.llm.client import GemmaClient  # noqa: PLC0415
+    from backend.llm.errors import ModelUnavailableError  # noqa: PLC0415
 
     class FakeLlama:
         def __init__(self, **kwargs: object) -> None:
@@ -101,7 +102,7 @@ def test_text_client_rejects_audio(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(llama_cpp, "Llama", FakeLlama)
 
     client = GemmaClient(model_path=_fake_model(tmp_path))
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ModelUnavailableError):
         client.create_chat_completion(
             messages=[{"role": "user", "content": "x"}], audio=b"x"
         )

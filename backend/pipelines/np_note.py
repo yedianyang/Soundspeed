@@ -49,6 +49,15 @@ class NPOutput:
     content: str
 
 
+# NP 输出契约（文本/语音 system prompt 共用，单一真源）：严格 JSON、无 markdown。
+# 与 _parse_llm_output 的字段（take_id/category/content）对齐，改格式时一处改两路同步。
+_NP_OUTPUT_FORMAT = (
+    "输出格式（严格遵守）：\n"
+    "只输出合法 JSON，不要 markdown 代码块，不要注释。\n"
+    '{"take_id": <int>, "category": "<str>", "content": "<str>"}'
+)
+
+
 def _build_system_prompt() -> str:
     return (
         "你是场记助手，负责归置录音师的文字备注。\n\n"
@@ -62,9 +71,7 @@ def _build_system_prompt() -> str:
         "- 无明确指代 → 默认当前活跃 take，若无则最近一条\n"
         "- category 取值：note（一般备注）、issue（问题记录）、keeper（保留）、ng（NG）、hold（待定）\n"
         "- content 是去掉指代词和类别标记后的纯净正文\n\n"
-        "输出格式（严格遵守）：\n"
-        "只输出合法 JSON，不要 markdown 代码块，不要注释。\n"
-        '{"take_id": <int>, "category": "<str>", "content": "<str>"}'
+        + _NP_OUTPUT_FORMAT
     )
 
 
@@ -195,9 +202,7 @@ def _build_voice_system_prompt() -> str:
         "- 无明确指代 → 默认当前活跃 take，若无则最近一条\n"
         "- category 取值：note（一般备注）、issue（问题记录）、keeper（保留、可以用）、ng（NG）、hold（待定）\n"
         "- content 是去掉指代词和编号后的纯净正文\n\n"
-        "输出格式（严格遵守）：\n"
-        "只输出合法 JSON，不要 markdown 代码块，不要注释。\n"
-        '{"take_id": <int>, "category": "<str>", "content": "<str>"}'
+        + _NP_OUTPUT_FORMAT
     )
 
 

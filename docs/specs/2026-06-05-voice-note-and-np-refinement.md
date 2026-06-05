@@ -236,7 +236,7 @@ reason 取值（**只列机制上可检测的**）：
 - `take_not_found` —— LLM 返回的 take_id 不存在（`insert_note` 撞 FK，可捕获）。
 - `parse_error` —— LLM 输出非合法 JSON / 字段缺失（解析时可捕获）。
 - `timeout` —— infer 超时（可捕获）。
-- `model_unavailable` —— 多模态 client 未就绪：mmproj 缺失且自动下载失败（离线）→ 单实例退纯文本 → 音频推理撞 `RuntimeError`（无 handler）/ mtmd 初始化 `ValueError` / audio 非 bytes `TypeError`。`_finalize_np` 归类发此 reason，**否则命中 `else: raise` 静默退出 → 前端 pending 永久卡（复活 4.I 的 bug）**。前端文案「模型未就绪」+ 重试。
+- `model_unavailable` —— 多模态 client 未就绪：mmproj 缺失且自动下载失败（离线）→ 单实例退纯文本。**源头抛 typed `ModelUnavailableError`**（`client.py` 无 handler 却收到 audio / `multimodal.py::_init_mtmd_context` mtmd 自检失败），`_finalize_np` 干净映射成此 reason（与 `NPParseError → parse_error` 对称，不靠 isinstance 嗅探宽泛内建异常反推），**否则命中 `else: raise` 静默退出 → 前端 pending 永久卡（复活 4.I 的 bug）**。前端文案「模型未就绪」+ 重试。
 - `asr_unclear` —— **仅当采用模型自报机制时才发**。NP 拿到的是模型吐的 JSON，模型听岔了也是吐合法 JSON，后端**无法直接判定「音频不清」**。要支持这个 reason，需在音频 prompt 约定：没听清时输出特定标记（如 `{"take_id": null, "category": "", "content": ""}` 或 `unclear: true`），后端检出该标记 → 映射成 `asr_unclear`。**MVP 可不实现 asr_unclear**，听岔就归成普通 note（内容可能错，由场记肉眼发现并改）；要做再按此机制加。
 
 发射点：`_run_np_async` / `run_np_voice_async` 的失败路径（捕获 FK / 解析 / 超时；asr_unclear 走模型自报检出）→ `publish(NOTE_FAILED, ...)`，随后照常 idle。成功路径不变（发 `note.processed`）。文本/语音两路共用（文本无 asr_unclear）。
