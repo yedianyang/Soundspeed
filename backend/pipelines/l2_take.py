@@ -361,10 +361,14 @@ def _validate_data_dict(data: dict, *, strict: bool = True) -> L2Output:
     )
 
 
-def _parse_llm_output(raw_text: str) -> L2Output:
+def _parse_llm_output(raw_text: str, *, strict: bool = True) -> L2Output:
     """解析 LLM 输出文本为 L2Output（旧文本路径，保留供回退/测试）。
 
     解析流程：strip_markdown_fence → json.loads → _validate_data_dict → L2Output。
+
+    strict 参数透传给 _validate_data_dict：
+    - strict=True（默认）：有剧本路径，三字段必须存在。
+    - strict=False：无剧本路径，script_diff_summary/line_matches 缺失时给默认值。
 
     Raises:
         L2ParseError: 空响应 / JSON 解析失败 / 字段缺失 / 枚举值非法 / line_no 非整数。
@@ -379,7 +383,7 @@ def _parse_llm_output(raw_text: str) -> L2Output:
     except json.JSONDecodeError as exc:
         raise L2ParseError("LLM response is not valid JSON", cause=exc) from exc
 
-    return _validate_data_dict(data)
+    return _validate_data_dict(data, strict=strict)
 
 
 # ---------------------------------------------------------------------------

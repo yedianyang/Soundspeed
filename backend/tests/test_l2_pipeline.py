@@ -758,7 +758,8 @@ async def test_no_script_correction_smoke() -> None:
     """spec §6.2 smoke gate：4B Gemma 在精简 tool 下不编造 summary/insertion。
 
     构造无剧本输入，transcript_segments 故意混入繁体 + 错别字：
-    - 段 0：繁体「你覺得這樣怎麼樣」（繁简转换后为「你觉得这样怎么样」）
+    - 段 0：繁体「你覺得這樣怎麼樣」（繁简转换在 ASR 侧 stream_driver._emit 完成，
+      L2 直接收到转录原文，模型是否对繁体段纠错不做强断言）
     - 段 1：明显同音错别字「那我就在这等候你的好消心」（心→息）
     - 段 2：正常文本「好的没问题」
 
@@ -788,7 +789,7 @@ async def test_no_script_correction_smoke() -> None:
             transcript_segments=[
                 {
                     "speaker": "SPEAKER_00",
-                    "text": "你覺得這樣怎麼樣",   # 繁体，繁简转换后「你觉得这样怎么样」
+                    "text": "你覺得這樣怎麼樣",   # 繁体原文，繁简转换在 ASR 侧做，L2 直接收到此值
                     "start_frame": 0,
                     "end_frame": 16000,
                 },
