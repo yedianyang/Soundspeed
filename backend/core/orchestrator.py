@@ -537,9 +537,14 @@ class Orchestrator:
             LlmStatusPayload(state=_state, task_type="note_struct", take_id=None),
         )
 
-        # 构建 take_context
+        # 构建 take_context（4.H：带完整 场-镜-次）
         scene_id = self.session.scene_id
         current_take_id = self.session.take_id if self.session.take_active else None
+
+        # scene_id → scene_code 映射（一次查询，替代旧版循环内 N+1 的 list_scenes）
+        scene_code_by_id = {
+            s.get("scene_id"): s.get("scene_code", "") for s in self.dal.list_scenes()
+        }
 
         take_context: list[dict] = []
         if scene_id is not None:
@@ -549,15 +554,10 @@ class Orchestrator:
                 summary = ""
                 if t.script_diff and isinstance(t.script_diff, dict):
                     summary = t.script_diff.get("script_diff_summary", "") or ""
-                scenes = self.dal.list_scenes()
-                sc = ""
-                for s in scenes:
-                    if s.get("scene_id") == t.scene_id:
-                        sc = s.get("scene_code", "")
-                        break
                 take_context.append({
                     "take_id": t.take_id,
-                    "scene_code": sc,
+                    "scene_code": scene_code_by_id.get(t.scene_id, ""),
+                    "shot": t.shot,
                     "take_number": t.take_number,
                     "summary": summary,
                 })
@@ -571,6 +571,13 @@ class Orchestrator:
             current_take_id=current_take_id,
             take_context=take_context,
             ts=ts,
+            current_scene_code=(
+                scene_code_by_id.get(scene_id) if scene_id is not None else None
+            ),
+            current_shot=self.session.shot if current_take_id is not None else None,
+            current_take_number=(
+                self.session.take_number if current_take_id is not None else None
+            ),
         )
 
         output = await np_runner(input_data, svc)

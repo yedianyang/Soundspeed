@@ -34,8 +34,12 @@ class NPInput:
     parsed_category: str  # 规则解析的类别，默认 "note"
     current_scene_id: int | None
     current_take_id: int | None  # 当前活跃 take，None 表示不在录制中
-    take_context: list[dict]  # [{"take_id":1, "scene_code":"Scene_1", "take_number":1, "summary":""}, ...]
+    take_context: list[dict]  # [{"take_id", "scene_code", "shot", "take_number", "summary"}, ...]
     ts: float
+    # 4.H 场镜次补全：当前活跃 take 的人类可读 场/镜/次（current_take_id 为 None 时全 None）
+    current_scene_code: str | None = None
+    current_shot: str | None = None
+    current_take_number: int | None = None
 
 
 @dataclass(frozen=True)
@@ -54,7 +58,7 @@ def _build_system_prompt() -> str:
         "规则：\n"
         "- \"这条\"/\"这个\"/\"本条\" → 当前活跃 take（current take）\n"
         "- \"上一条\"/\"上一个\"/\"前一条\" → 最近一条已完成的 take\n"
-        "- 明确的场镜次编号（如\"3A 2\"\"Scene_1 #3\"） → 精确匹配\n"
+        "- \"第N条\"（如\"第三条\"）→ 当前场当前镜的第 N 条 take；跨镜/跨场时备注须显式带镜次/场次，否则按当前场当前镜解析\n"
         "- 无明确指代 → 默认当前活跃 take，若无则最近一条\n"
         "- category 取值：note（一般备注）、issue（问题记录）、keeper（保留）、ng（NG）、hold（待定）\n"
         "- content 是去掉指代词和类别标记后的纯净正文\n\n"
@@ -67,23 +71,32 @@ def _build_system_prompt() -> str:
 def _build_user_message(input_data: NPInput) -> str:
     parts: list[str] = []
 
-    parts.append("=== 上下文 ===")
+    parts.append("=== 当前拍摄上下文 ===")
+    scene = input_data.current_scene_code or (
+        f"场 id {input_data.current_scene_id}"
+        if input_data.current_scene_id is not None
+        else "未知场"
+    )
     if input_data.current_take_id is not None:
-        parts.append(f"当前活跃 take ID: {input_data.current_take_id}")
+        shot = input_data.current_shot or "无镜"
+        parts.append(
+            f"当前场={scene}  当前镜={shot}  "
+            f"当前活跃 take={scene}/{shot}/第{input_data.current_take_number}条"
+        )
     else:
-        parts.append("当前无活跃 take（未在录制中）")
-
-    if input_data.current_scene_id is not None:
-        parts.append(f"当前场次 ID: {input_data.current_scene_id}")
+        parts.append(f"当前场={scene}  当前无活跃录制")
 
     if input_data.take_context:
-        parts.append("\n最近 take 列表：")
+        parts.append("\n本场已有 take：")
         for t in input_data.take_context:
+            sc = t.get("scene_code") or "?"
+            sh = t.get("shot") or "无镜"
+            num = t.get("take_number", "?")
             summary = t.get("summary", "") or ""
-            parts.append(
-                f"  Take #{t['take_id']} [{t.get('scene_code','?')} #{t.get('take_number','?')}]"
-                + (f" 摘要: {summary}" if summary else "")
-            )
+            line = f"  take_id={t['take_id']}  {sc}/{sh}/第{num}条"
+            if summary:
+                line += f"  [{summary}]"
+            parts.append(line)
     else:
         parts.append("\n（无历史 take）")
 

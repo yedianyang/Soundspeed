@@ -89,3 +89,28 @@ async def test_run_np_async_client_id_none_when_omitted(tmp_dal: DAL) -> None:
 
     assert len(captured) == 1
     assert captured[0].client_id is None
+
+
+@pytest.mark.asyncio
+async def test_run_np_async_threads_shot_and_scene_code(tmp_dal: DAL) -> None:
+    """4.H：take_context 每条带 shot，当前场 scene_code 解析进 NPInput（场镜次 prompt 补全）。"""
+    scene_id = tmp_dal.create_scene("Scene_1")
+    # 一条历史 take（shot=A），无活跃 take → take_context 不排除它
+    hist_id, _ = tmp_dal.start_take(scene_id=scene_id, shot="A", start_ts=1.0)
+    session = SessionState()
+    session.activate_scene(scene_id)
+
+    stub_np = AsyncMock()
+    orch = create_orchestrator(
+        tmp_dal, session, llm_service=MagicMock(), np_runner=stub_np
+    )
+    stub_np.return_value = NPOutput(take_id=hist_id, category="note", content="x")
+
+    orch.run_np_async(raw_text="备注", parsed_category="note", ts=1.0)
+    assert orch._np_task is not None  # type: ignore[attr-defined]
+    await orch._np_task  # type: ignore[attr-defined]
+
+    np_input = stub_np.call_args.args[0]
+    assert np_input.current_scene_code == "Scene_1"  # scene_id → scene_code 已解析
+    ctx_by_id = {t["take_id"]: t for t in np_input.take_context}
+    assert ctx_by_id[hist_id]["shot"] == "A"  # shot 从 DAL 透传进上下文
