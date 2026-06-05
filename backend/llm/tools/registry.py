@@ -80,7 +80,9 @@ def list_tools(domain: str | None = None) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# 模块级注册：report_script_analysis（L2）、structure_note（文本 NP）（Tier 1）
+# 模块级注册：Tier 1（L2 report_script_analysis + note structure_note，executor=None）
+#             + Tier 2 QP 5 工具（count_takes/get_scene_info/list_characters/
+#               search_script_lines/query_database，真实 executor）
 # ---------------------------------------------------------------------------
 
 def _bootstrap() -> None:
