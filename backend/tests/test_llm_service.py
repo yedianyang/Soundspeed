@@ -1124,6 +1124,8 @@ async def test_infer_tool_tool_choice_override_forwarded() -> None:
     )
     # 覆盖值透传给 client，盖掉 config 的 "auto"
     assert client.last_kwargs.get("tool_choice") == forced
+    # 不变量：只改 tool_choice，config 其他 gen_kwargs（tools/max_tokens 等）还在
+    assert "tools" in client.last_kwargs
     await svc.aclose()
 
 

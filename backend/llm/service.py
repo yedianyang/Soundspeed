@@ -197,7 +197,7 @@ class LLMService:
         timeout: float | None,
         want_tool_call: bool,
         audio: bytes | None = None,
-        tool_choice: object | None = None,
+        tool_choice: str | dict | None = None,
     ) -> asyncio.Future:
         """infer / infer_tool / infer_voice 共享：校验入参、组装 payload、入队、启动 worker。
 
@@ -254,7 +254,7 @@ class LLMService:
         task_type: str,
         priority: int | None = None,
         timeout: float | None = 30.0,
-        tool_choice: object | None = None,
+        tool_choice: str | dict | None = None,
     ) -> str:
         """统一推理入口。
 
@@ -302,6 +302,9 @@ class LLMService:
 
         Raises 与 infer 一致；另若 client 非多模态（未挂 handler）会在推理时抛 ModelUnavailableError
         （经 Future 回传）。
+
+        tool_choice 固定来自 TASK_CONFIG（note_struct 静态 forced），
+        不参与 QP 动态循环、不支持按调用覆盖。
         """
         fut = await self._submit(
             messages, task_type, priority, timeout, want_tool_call=False, audio=audio
@@ -314,7 +317,7 @@ class LLMService:
         task_type: str,
         priority: int | None = None,
         timeout: float | None = 30.0,
-        tool_choice: object | None = None,
+        tool_choice: str | dict | None = None,
     ) -> dict:
         """tool-call 推理入口。
 
@@ -358,6 +361,8 @@ class LLMService:
         want_tool_call=True（两者正交）。多模态 handler 在 __call__ 里先把音频 eval 进 KV，
         再按 forced tool_choice 的 schema grammar 约束生成（输入/输出两阶段不冲突，源码实证）。
         messages 须含音频哨兵（run_np_voice 组装）。返回 tool_calls[0] dict。
+        tool_choice 固定来自 TASK_CONFIG（note_struct 静态 forced），
+        不参与 QP 动态循环、不支持按调用覆盖。
         """
         fut = await self._submit(
             messages, task_type, priority, timeout, want_tool_call=True, audio=audio
