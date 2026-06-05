@@ -236,12 +236,13 @@ export interface NoteCreateResponse {
 // 前端 pending note（已提交、等待 LLM 归置）
 export interface PendingNote {
   client_id: string // 乐观去重键（crypto.randomUUID），note.processed 原样回传后据此精确移除
+  kind: "text" | "voice" // 显式区分文本/语音 pending（渲染与重试据此分支，不靠 voiceBlob 在场反推）
   ts: number
-  category: string
+  category: string // 语音 pending 时类别未知（模型判），不渲染；text 时为 @语法解析结果
   content: string
-  rawText: string // 提交的原始文字，note.failed 后「重试」据此重投 POST /notes
+  rawText: string // 提交的原始文字，note.failed 后「重试」据此重投 POST /notes（语音为空）
   failedReason?: string // 置位=NP 失败（4.I），渲染失败态 + 重试；undefined=处理中
-  voiceBlob?: Blob // 语音 note（4.L）：录音 WAV，置位则为语音条目；重试据此重传 POST /notes/voice
+  voiceBlob?: Blob // 语音 note（4.L）：录音 WAV，重试据此重传 POST /notes/voice
 }
 
 // WS note.processed payload

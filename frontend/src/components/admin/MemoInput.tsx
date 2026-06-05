@@ -31,6 +31,7 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
       const resp: NoteCreateResponse = await postNote(trimmed, undefined, clientId)
       addPendingNote({
         client_id: clientId,
+        kind: "text",
         ts: Date.now() / 1000,
         category: resp.category,
         content: resp.content,
@@ -58,9 +59,11 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
   const uploadVoice = async (wav: Blob) => {
     const clientId = crypto.randomUUID()
     const ts = Date.now() / 1000
-    // 乐观 pending：语音的类别/正文 202 时未知（由模型从音频判），占位显示；voiceBlob 供失败重试重传。
+    // 乐观 pending：语音的类别/正文 202 时未知（由模型从音频判）。kind=voice → 渲染只显 🎤 不显
+    // @category（避免伪造类别）；voiceBlob 供失败重试重传。
     addPendingNote({
       client_id: clientId,
+      kind: "voice",
       ts,
       category: "note",
       content: "🎤 语音备注",

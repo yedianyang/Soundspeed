@@ -43,6 +43,29 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T
 }
 
+// multipart/form-data 上传共用（enrollSpeaker / postVoiceNote）：token + fetch（不设 JSON
+// Content-Type，浏览器自动补 multipart boundary）+ 统一 !res.ok → 解析 detail → ApiError。
+async function requestMultipart<T>(path: string, fd: FormData): Promise<T> {
+  const token = useSessionStore.getState().token
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: fd,
+  })
+  if (!res.ok) {
+    let detail = `POST ${path} → ${res.status}`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = String(j.detail)
+    } catch {
+      /* 忽略非 JSON 错误体 */
+    }
+    throw new ApiError(res.status, detail)
+  }
+  const text = await res.text()
+  return (text ? JSON.parse(text) : undefined) as T
+}
+
 // ── REST ──
 
 export async function getScenes(): Promise<SceneDTO[]> {
@@ -110,26 +133,11 @@ export function deleteSpeaker(speakerId: number): Promise<void> {
   return request<void>(`/api/v1/speakers/${speakerId}`, { method: "DELETE" })
 }
 
-// enroll 走 multipart/form-data（不能用 request 的 JSON Content-Type）。
-// file 建议 WAV 16kHz 单声道；后端自动重采样、≥2s。返回更新后的 SpeakerDTO。
-export async function enrollSpeaker(speakerId: number, file: File): Promise<SpeakerDTO> {
-  const token = useSessionStore.getState().token
+// enroll 走 multipart/form-data。file 建议 WAV 16kHz 单声道；后端自动重采样、≥2s。返回更新后的 SpeakerDTO。
+export function enrollSpeaker(speakerId: number, file: File): Promise<SpeakerDTO> {
   const fd = new FormData()
   fd.append("file", file)
-  const res = await fetch(`${API_BASE}/api/v1/speakers/${speakerId}/enroll`, {
-    method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    body: fd,
-  })
-  if (!res.ok) {
-    let detail = `enroll → ${res.status}`
-    try {
-      const j = await res.json()
-      if (j?.detail) detail = String(j.detail)
-    } catch { /* 忽略非 JSON 错误体 */ }
-    throw new ApiError(res.status, detail)
-  }
-  return res.json()
+  return requestMultipart<SpeakerDTO>(`/api/v1/speakers/${speakerId}/enroll`, fd)
 }
 
 export function endTake(): Promise<void> {
@@ -329,35 +337,15 @@ export function getTakeNotes(takeId: number): Promise<NoteListResponse> {
   return request<NoteListResponse>(`/api/v1/takes/${takeId}/notes`)
 }
 
-// 语音 note（4.K/4.L）：浏览器麦 WAV 直传（multipart，POST /notes/voice）。与 enrollSpeaker 同样走
-// FormData（不能用 request 的 JSON Content-Type；浏览器自动设 multipart boundary）。后端 202
-// fire-and-forget，类别/正文由 Gemma 从音频听+判，不在响应里返回（前端乐观 pending 占位）。
-export async function postVoiceNote(
-  blob: Blob,
-  clientId: string,
-  ts?: number,
-): Promise<{ status: string; client_id: string | null }> {
-  const token = useSessionStore.getState().token
+// 语音 note（4.K/4.L）：浏览器麦 WAV 直传（multipart，POST /notes/voice）。后端 202
+// fire-and-forget，类别/正文由 Gemma 从音频听+判，不在响应里返回——故返回值无用（Promise<void>）：
+// 前端乐观 pending 占位，结果经 WS note.processed / note.failed 回灌。
+export function postVoiceNote(blob: Blob, clientId: string, ts?: number): Promise<void> {
   const fd = new FormData()
   fd.append("file", blob, "note.wav")
   fd.append("client_id", clientId)
   if (ts !== undefined) fd.append("ts", String(ts))
-  const res = await fetch(`${API_BASE}/api/v1/notes/voice`, {
-    method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    body: fd,
-  })
-  if (!res.ok) {
-    let detail = `voice note → ${res.status}`
-    try {
-      const j = await res.json()
-      if (j?.detail) detail = String(j.detail)
-    } catch {
-      /* 忽略非 JSON 错误体 */
-    }
-    throw new ApiError(res.status, detail)
-  }
-  return res.json()
+  return requestMultipart<void>(`/api/v1/notes/voice`, fd)
 }
 
 // ── react-query 查询键 + hooks ──

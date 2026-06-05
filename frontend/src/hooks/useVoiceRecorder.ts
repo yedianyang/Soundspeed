@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { blobToWav16kMono } from "@/lib/wav"
 
 // 按住说话录音器（4.L）：getUserMedia + MediaRecorder → blobToWav16kMono（复用 enroll 同款编码：
@@ -28,6 +28,14 @@ export function useVoiceRecorder(minDurationMs = 500): VoiceRecorder {
     recRef.current = null
     chunksRef.current = []
   }
+
+  // 卸载时释放麦克风：按住录音中途组件卸载（未走 stop/cancel）→ 停轨，不留热麦。
+  useEffect(
+    () => () => {
+      streamRef.current?.getTracks().forEach((t) => t.stop())
+    },
+    [],
+  )
 
   const start = async () => {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })

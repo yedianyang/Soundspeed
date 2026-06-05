@@ -93,9 +93,12 @@ export default function NoteList({ takeId, refreshKey }: NoteListProps) {
             <span className="text-muted-foreground font-mono whitespace-nowrap">
               {formatTime(pn.ts)}
             </span>
-            <span className={`font-semibold whitespace-nowrap ${CATEGORY_COLORS[pn.category] ?? "text-muted-foreground"}`}>
-              @{pn.category}
-            </span>
+            {/* 语音 pending 类别由模型判，未知 → 不渲染 @category（避免伪造 @note）；文本才显类别。 */}
+            {pn.kind !== "voice" && (
+              <span className={`font-semibold whitespace-nowrap ${CATEGORY_COLORS[pn.category] ?? "text-muted-foreground"}`}>
+                @{pn.category}
+              </span>
+            )}
             {pn.content && (
               <span className={`break-all ${failed ? "text-red-600" : "text-foreground"}`}>
                 {pn.content}
