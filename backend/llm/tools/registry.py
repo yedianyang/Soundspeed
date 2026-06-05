@@ -1,4 +1,4 @@
-"""LLM 工具注册表（Tier 2 脚手架，当前无生产消费者）。
+"""LLM 工具注册表（QP 是 executor 槽首个真实消费者）。
 
 轻量名字 → (schema, executor) 映射。
 Tier 1 工具只有 schema，executor 留 None 占位（Tier 2 接入时填充）。
@@ -84,12 +84,32 @@ def list_tools(domain: str | None = None) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _bootstrap() -> None:
-    """在 module 导入时注册所有 Tier 1 工具。"""
+    """在 module 导入时注册所有工具。"""
     from backend.llm.tools.note import NOTE_TOOL_NAME, build_note_tool  # noqa: PLC0415
     from backend.llm.tools.script import build_l2_tool  # noqa: PLC0415
 
     register("report_script_analysis", build_l2_tool(), executor=None)
-    register(NOTE_TOOL_NAME, build_note_tool(), executor=None)
+    register(NOTE_TOOL_NAME, build_note_tool(), executor=None)  # 4.x note 工具，保留勿删
+
+    # QP 工具家（Tier 2，executor!=None 首个真实消费者；note/script 仍是 None）
+    from backend.llm.tools.transcript import (  # noqa: PLC0415
+        build_count_takes_tool,
+        build_get_scene_info_tool,
+        build_list_characters_tool,
+        build_query_database_tool,
+        build_search_script_lines_tool,
+        count_takes_executor,
+        get_scene_info_executor,
+        list_characters_executor,
+        query_database_executor,
+        search_script_lines_executor,
+    )
+
+    register("count_takes", build_count_takes_tool(), executor=count_takes_executor)
+    register("get_scene_info", build_get_scene_info_tool(), executor=get_scene_info_executor)
+    register("list_characters", build_list_characters_tool(), executor=list_characters_executor)
+    register("search_script_lines", build_search_script_lines_tool(), executor=search_script_lines_executor)
+    register("query_database", build_query_database_tool(), executor=query_database_executor)
 
 
 _bootstrap()
