@@ -1,7 +1,13 @@
-"""LLM 工具注册表。
+"""LLM 工具注册表（Tier 2 脚手架，当前无生产消费者）。
 
 轻量名字 → (schema, executor) 映射。
 Tier 1 工具只有 schema，executor 留 None 占位（Tier 2 接入时填充）。
+
+接线状态：Tier 1 的 L2 路径**不经过本注册表**——
+config.py 直接调 `tools.script.build_l2_tool()` 拿 schema。本模块及其
+`_bootstrap()` 只在被 import 时才注册（生产路径目前无人 import），
+留作 Tier 2 多工具 auto 路由（spec §3.3 / §4.2）接入时的落点。
+改 Tier 1 工具 schema 时改 build_l2_tool，不要只改这里。
 
 公共 API：
   register(name, schema, executor=None)  注册工具

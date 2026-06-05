@@ -62,7 +62,10 @@ def build_l2_tool() -> dict:
                                     "description": "具体差异描述，substitution 时写出实际说的内容",
                                 },
                             },
-                            "required": ["line_no", "diff_type", "detail"],
+                            # detail 不入 required：match 行无差异可省略，避免 grammar
+                            # 逼模型给每行都生成填充文本。validator 用 .get("detail")
+                            # 容忍缺失（None）。
+                            "required": ["line_no", "diff_type"],
                         },
                     },
                     "corrected_segments": {

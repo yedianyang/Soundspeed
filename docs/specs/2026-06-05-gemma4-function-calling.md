@@ -161,7 +161,7 @@ REPORT_SCRIPT_ANALYSIS_SCHEMA = {
                                 "description": "具体差异描述，substitution 时写出实际说的内容"
                             }
                         },
-                        "required": ["line_no", "diff_type", "detail"]
+                        "required": ["line_no", "diff_type"]
                     }
                 },
                 "corrected_segments": {
@@ -194,6 +194,8 @@ REPORT_SCRIPT_ANALYSIS_SCHEMA = {
 ```
 
 `diff_type` 的 enum 值（match/missing/substitution/insertion）必须与 `backend/pipelines/l2_take.py` 里的 `_VALID_DIFF_TYPES` 集合保持严格同源，不单独维护。
+
+`line_matches.items` 的 `required` 只含 `line_no`/`diff_type`，`detail` 故意不入 required：`match` 行无差异可省略，避免 grammar 逼模型给每行都生成填充文本；validator 用 `.get("detail")` 容忍缺失（`None`）。`script_diff_summary` 仍保留为必填（摘要恒应产出）。
 
 ### 4.2 Tier 2 工具路由（远景，本次不实现）
 
