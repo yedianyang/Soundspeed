@@ -1756,3 +1756,95 @@ def test_debug_reset_db_wrong_token_returns_401(tmp_dal: DAL, monkeypatch) -> No
         headers={"Authorization": "Bearer wrong-token"},
     )
     assert resp.status_code == 401
+
+
+# ── POST /notes/voice 语音 note 端点（4.K）──────────────────────────────────────
+
+
+def _auth() -> dict:
+    return {"Authorization": f"Bearer {_TOKEN}"}
+
+
+def test_notes_voice_without_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
+    """无 Authorization → 401。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("note.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        data={"client_id": "cid-1"},
+    )
+    assert resp.status_code == 401
+
+
+def test_notes_voice_happy_returns_202_and_calls_orchestrator(tmp_dal: DAL, monkeypatch) -> None:
+    """合法 multipart（file + client_id + ts）→ 202 {status:processing, client_id}，
+    且 orchestrator.run_np_voice_async 收到 audio 字节 + client_id + ts。"""
+    orch = create_orchestrator(tmp_dal)
+    captured: dict = {}
+    orch.run_np_voice_async = lambda **kw: captured.update(kw)  # type: ignore[method-assign]
+    client = _make_client(orch, monkeypatch)
+
+    wav = b"RIFF\x00\x00\x00\x00WAVEfmt fake-pcm16-mono"
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("note.wav", wav, "audio/wav")},
+        data={"client_id": "cid-voice-1", "ts": "123.5"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["status"] == "processing"
+    assert body["client_id"] == "cid-voice-1"
+    assert captured["audio"] == wav
+    assert captured["client_id"] == "cid-voice-1"
+    assert captured["ts"] == 123.5
+
+
+def test_notes_voice_empty_file_returns_400(tmp_dal: DAL, monkeypatch) -> None:
+    """空音频 → 400（不进 NP）。"""
+    orch = create_orchestrator(tmp_dal)
+    called: list = []
+    orch.run_np_voice_async = lambda **kw: called.append(kw)  # type: ignore[method-assign]
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("note.wav", b"", "audio/wav")},
+        data={"client_id": "cid-2"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 400
+    assert called == []
+
+
+def test_notes_voice_oversized_returns_400(tmp_dal: DAL, monkeypatch) -> None:
+    """音频超限 → 400（不进 NP）。"""
+    orch = create_orchestrator(tmp_dal)
+    called: list = []
+    orch.run_np_voice_async = lambda **kw: called.append(kw)  # type: ignore[method-assign]
+    client = _make_client(orch, monkeypatch)
+
+    big = b"RIFF" + b"\x00" * (11 * 1024 * 1024)  # 11MB > 10MB 上限
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("big.wav", big, "audio/wav")},
+        data={"client_id": "cid-3"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 400
+    assert called == []
+
+
+def test_notes_voice_missing_client_id_returns_422(tmp_dal: DAL, monkeypatch) -> None:
+    """client_id 必填，缺失 → 422（FastAPI Form 校验）。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("note.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        headers=_auth(),
+    )
+    assert resp.status_code == 422

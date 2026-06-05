@@ -26,7 +26,7 @@ from __future__ import annotations
 import time
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.api.auth import require_admin
@@ -372,6 +372,45 @@ async def create_note(
         "category": note.category,
         "content": note.content,
     }
+
+
+# 后端语音上限：48kHz/30s mono PCM16 ≈ 2.9MB，给到 10MB 安全冗余（前端另有 30s/2MB 限制，§3.2）。
+_MAX_VOICE_BYTES = 10 * 1024 * 1024
+
+
+@router.post("/notes/voice", status_code=202)
+async def create_voice_note(
+    request: Request,
+    file: UploadFile = File(...),
+    client_id: str = Form(...),
+    ts: float | None = Form(None),
+    _: None = Depends(require_admin),
+) -> dict:
+    """提交语音 note（4.K）：浏览器麦 WAV 直传 → fire-and-forget 语音 NP → 返回 202。
+
+    与 POST /notes（文本）对称：均 202，归置走后台异步 NP，结果经 WS（note.processed /
+    note.failed）回灌。差异：multipart + 音频字节；类别/编号由 Gemma 从语音里听+判（无 parse_note）。
+    音频来源是前端浏览器麦（getUserMedia，#19），非后端现场录音。
+    """
+    audio = await file.read()
+    if not audio:
+        raise HTTPException(status_code=400, detail="音频为空")
+    if len(audio) > _MAX_VOICE_BYTES:
+        raise HTTPException(status_code=400, detail="音频超限（>10MB）")
+
+    orchestrator = request.app.state.orchestrator
+    resolved_ts = ts if ts is not None else time.time()
+    try:
+        orchestrator.run_np_voice_async(
+            audio=audio,
+            ts=resolved_ts,
+            client_id=client_id,
+        )
+    except RuntimeError:
+        # 不在 event loop 中（如同步测试环境）：语音必须经多模态推理，无直接落库 fallback。
+        raise HTTPException(status_code=503, detail="语音 NP 需在 event loop 中运行")
+
+    return {"status": "processing", "client_id": client_id}
 
 
 @router.get("/takes/{take_id}/notes")
