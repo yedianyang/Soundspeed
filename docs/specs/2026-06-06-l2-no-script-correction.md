@@ -297,7 +297,7 @@ take.end
 | `backend/llm/config.py` | 新增 `"l2_take_no_script"` task_type 条目 | backend-agent |
 | `backend/pipelines/l2_take.py` | `run_l2_take` task_type 分叉、`_build_user_message` 分叉、`_validate_data_dict` 放宽（缺失字段给默认）+ original==corrected 过滤 + detail 归一化 | backend-agent |
 | `backend/asr/stream_driver.py` | `_emit` 加繁→简转换（幻觉过滤前）、新增 `_normalize_to_simplified` 函数 | backend-asr（本 spec 定设计，实现交 backend-asr 或 Lead 协调） |
-| `pyproject.toml` | 加 `opencc-python-reimplemented` 依赖 | Lead / backend-agent |
+| `pyproject.toml` | 加 `OpenCC==1.3.1` 依赖 | Lead / backend-agent |
 | `uv.lock` | 随依赖更新自动生成 | 自动 |
 | `backend/tests/test_l2_pipeline.py` | 新增无剧本分支单测（见第 6 节）| backend-agent |
 | `backend/tests/test_stream_driver.py` | 新增繁→简集成单测（见第 6 节）| backend-asr |
