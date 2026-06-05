@@ -7,21 +7,24 @@ pending 永久卡「处理中」。修复要求后端把前端传入的 client_i
 
 from __future__ import annotations
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from backend.core.events import (
+    NOTE_FAILED,
     NOTE_PROCESSED,
     TAKE_START,
+    NoteFailedPayload,
     NoteProcessedPayload,
     TakeStartPayload,
 )
 from backend.core.orchestrator import create_orchestrator
 from backend.core.session import SessionState
 from backend.db.dal import DAL
-from backend.pipelines.np_note import NPOutput
+from backend.pipelines.np_note import NPOutput, NPParseError
 
 
 @pytest.mark.asyncio
@@ -114,3 +117,83 @@ async def test_run_np_async_threads_shot_and_scene_code(tmp_dal: DAL) -> None:
     assert np_input.current_scene_code == "Scene_1"  # scene_id → scene_code 已解析
     ctx_by_id = {t["take_id"]: t for t in np_input.take_context}
     assert ctx_by_id[hist_id]["shot"] == "A"  # shot 从 DAL 透传进上下文
+
+
+# ---- 4.I：NP 失败兜底 note.failed ----
+# 失败时不发 note.processed，改发 note.failed（带 client_id + 机制可检测的 reason），
+# 让前端把对应 pending 从「处理中」转失败态，而非永久卡死。
+
+
+@pytest.mark.asyncio
+async def test_run_np_async_take_not_found_emits_note_failed(tmp_dal: DAL) -> None:
+    """LLM 归到不存在的 take_id → insert_note 撞 FK → note.failed(take_not_found)，不发 processed。"""
+    scene_id = tmp_dal.create_scene("scene_fail1")
+    session = SessionState()
+    session.activate_scene(scene_id)
+
+    stub_np = AsyncMock()
+    orch = create_orchestrator(
+        tmp_dal, session, llm_service=MagicMock(), np_runner=stub_np
+    )
+    stub_np.return_value = NPOutput(take_id=999999, category="note", content="x")
+
+    failed: list[NoteFailedPayload] = []
+    processed: list[NoteProcessedPayload] = []
+    orch.subscribe(NOTE_FAILED, lambda p: failed.append(p))  # type: ignore[arg-type]
+    orch.subscribe(NOTE_PROCESSED, lambda p: processed.append(p))  # type: ignore[arg-type]
+
+    orch.run_np_async(raw_text="备注", parsed_category="note", ts=7.0, client_id="cid-x")
+    assert orch._np_task is not None  # type: ignore[attr-defined]
+    await orch._np_task  # type: ignore[attr-defined]
+
+    assert len(processed) == 0  # 失败不落库、不发 processed
+    assert len(failed) == 1
+    assert failed[0].reason == "take_not_found"
+    assert failed[0].client_id == "cid-x"  # 原样透传供前端精确定位
+    assert failed[0].ts == 7.0
+
+
+@pytest.mark.asyncio
+async def test_run_np_async_parse_error_emits_note_failed(tmp_dal: DAL) -> None:
+    """np_runner 抛 NPParseError（LLM 输出非法 JSON）→ note.failed(parse_error)。"""
+    scene_id = tmp_dal.create_scene("scene_fail2")
+    session = SessionState()
+    session.activate_scene(scene_id)
+
+    stub_np = AsyncMock(side_effect=NPParseError("bad json"))
+    orch = create_orchestrator(
+        tmp_dal, session, llm_service=MagicMock(), np_runner=stub_np
+    )
+    failed: list[NoteFailedPayload] = []
+    orch.subscribe(NOTE_FAILED, lambda p: failed.append(p))  # type: ignore[arg-type]
+
+    orch.run_np_async(raw_text="备注", parsed_category="note", ts=1.0, client_id="cid-y")
+    assert orch._np_task is not None  # type: ignore[attr-defined]
+    await orch._np_task  # type: ignore[attr-defined]
+
+    assert len(failed) == 1
+    assert failed[0].reason == "parse_error"
+    assert failed[0].client_id == "cid-y"
+
+
+@pytest.mark.asyncio
+async def test_run_np_async_timeout_emits_note_failed(tmp_dal: DAL) -> None:
+    """np_runner 抛 asyncio.TimeoutError（infer 超时）→ note.failed(timeout)，client_id 缺省为 None。"""
+    scene_id = tmp_dal.create_scene("scene_fail3")
+    session = SessionState()
+    session.activate_scene(scene_id)
+
+    stub_np = AsyncMock(side_effect=asyncio.TimeoutError())
+    orch = create_orchestrator(
+        tmp_dal, session, llm_service=MagicMock(), np_runner=stub_np
+    )
+    failed: list[NoteFailedPayload] = []
+    orch.subscribe(NOTE_FAILED, lambda p: failed.append(p))  # type: ignore[arg-type]
+
+    orch.run_np_async(raw_text="备注", parsed_category="note", ts=1.0)
+    assert orch._np_task is not None  # type: ignore[attr-defined]
+    await orch._np_task  # type: ignore[attr-defined]
+
+    assert len(failed) == 1
+    assert failed[0].reason == "timeout"
+    assert failed[0].client_id is None

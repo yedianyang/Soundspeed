@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -19,6 +20,7 @@ from backend.core.events import (
     ASR_FINAL_CH1,
     ASR_FINAL_CH2,
     LLM_STATUS,
+    NOTE_FAILED,
     NOTE_PROCESSED,
     TAKE_CHANGED,
     TAKE_END,
@@ -26,6 +28,7 @@ from backend.core.events import (
     TAKE_START,
     AsrFinalPayload,
     LlmStatusPayload,
+    NoteFailedPayload,
     NoteProcessedPayload,
     TakeChangedPayload,
     TakeEndPayload,
@@ -562,7 +565,7 @@ class Orchestrator:
                     "summary": summary,
                 })
 
-        from backend.pipelines.np_note import NPInput
+        from backend.pipelines.np_note import NPInput, NPParseError
 
         input_data = NPInput(
             raw_text=raw_text,
@@ -580,18 +583,36 @@ class Orchestrator:
             ),
         )
 
-        output = await np_runner(input_data, svc)
+        # 4.I：失败兜底。机制可检测的三类失败 → 发 note.failed（带 client_id），前端把对应
+        # pending 转失败态而非永久卡死；未知异常仍上抛交 _np_done_callback 记 WARNING + idle。
+        try:
+            output = await np_runner(input_data, svc)
+            event_id = self.dal.insert_note(
+                take_id=output.take_id,
+                category=output.category,
+                content=output.content,
+                raw_text=raw_text,
+                ts=ts,
+            )
+        except Exception as exc:
+            if isinstance(exc, NPParseError):
+                reason = "parse_error"
+            elif isinstance(exc, asyncio.TimeoutError):
+                reason = "timeout"
+            elif isinstance(exc, sqlite3.IntegrityError):
+                reason = "take_not_found"  # LLM 归到不存在的 take_id，insert_note 撞 FK
+            else:
+                raise  # 未知失败：保留安全网，交 done_callback 处理
+            logger.warning(
+                "NP Pipeline failed (%s) for text=%r: %s", reason, raw_text[:80], exc
+            )
+            self.publish(
+                NOTE_FAILED,
+                NoteFailedPayload(reason=reason, ts=ts, client_id=client_id),
+            )
+            return
 
-        # 写库
-        event_id = self.dal.insert_note(
-            take_id=output.take_id,
-            category=output.category,
-            content=output.content,
-            raw_text=raw_text,
-            ts=ts,
-        )
-
-        # WS 推送
+        # WS 推送（成功路径）
         self.publish(
             NOTE_PROCESSED,
             NoteProcessedPayload(
