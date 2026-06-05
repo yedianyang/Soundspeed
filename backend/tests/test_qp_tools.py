@@ -137,3 +137,34 @@ def test_query_database_executor(seeded_dal: DAL) -> None:
 def test_query_database_executor_blocks_write(seeded_dal: DAL) -> None:
     res = query_database_executor({"sql": "DELETE FROM scenes;"}, seeded_dal)
     assert "error" in res
+
+
+# ---------------------------------------------------------------------------
+# 健壮性补测（必修 1/2 + minor 3/4）
+# ---------------------------------------------------------------------------
+
+
+def test_search_script_lines_executor_empty_query(seeded_dal: DAL) -> None:
+    # 空 query 返 error，不抛穿
+    res = search_script_lines_executor({"query": ""}, seeded_dal)
+    assert "error" in res
+
+
+def test_search_script_lines_executor_fts_syntax(seeded_dal: DAL) -> None:
+    # FTS 保留字触发 OperationalError，被 try/except 包成 error，不抛穿
+    res = search_script_lines_executor({"query": "AND"}, seeded_dal)
+    assert "error" in res
+
+
+def test_list_characters_executor_missing_scene(seeded_dal: DAL) -> None:
+    # 找不到场次返 error，不返空列表
+    res = list_characters_executor({"scene_ref": "999"}, seeded_dal)
+    assert "error" in res
+
+
+def test_scene_ref_accepts_int(seeded_dal: DAL) -> None:
+    # 模型可能吐整数 {scene_ref: 7}，强转后不抛 AttributeError
+    res = count_takes_executor({"scene_ref": 7}, seeded_dal)
+    # 要么正常解析到场次，要么返 error；无论哪种都不能抛异常
+    assert isinstance(res, dict)
+    assert "count" in res or "error" in res
