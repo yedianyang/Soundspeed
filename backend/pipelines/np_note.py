@@ -49,6 +49,11 @@ class NPOutput:
     content: str
 
 
+# note 合法类别（单一真源）：_validate_data_dict 校验 + tools/note.py 的 schema enum 同取它，
+# 改类别一处改两路同步（与 L2 的 _VALID_DIFF_TYPES 同思路）。
+_VALID_NOTE_CATEGORIES = ("note", "issue", "keeper", "ng", "hold")
+
+
 # NP 输出契约（文本/语音 system prompt 共用，单一真源）：严格 JSON、无 markdown。
 # 与 _parse_llm_output 的字段（take_id/category/content）对齐，改格式时一处改两路同步。
 _NP_OUTPUT_FORMAT = (
@@ -128,7 +133,31 @@ def _build_voice_user_message(input_data: NPInput) -> str:
     return "\n".join(parts)
 
 
+def _validate_data_dict(data: dict) -> NPOutput:
+    """校验已解析 dict（FC tool_call arguments 或语音裸 JSON 通路共用）→ NPOutput。
+
+    字段：take_id（int，非 bool）、category（5 类枚举）、content（str）。
+    """
+    if not isinstance(data, dict):
+        raise NPParseError(f"LLM output is not a JSON object: {str(data)[:200]}")
+
+    take_id = data.get("take_id")
+    if not isinstance(take_id, int) or isinstance(take_id, bool):
+        raise NPParseError(f"take_id is not an integer: {take_id!r}")
+
+    category = data.get("category", "note")
+    if not isinstance(category, str) or category not in _VALID_NOTE_CATEGORIES:
+        raise NPParseError(f"category invalid: {category!r}")
+
+    content = data.get("content", "")
+    if not isinstance(content, str):
+        raise NPParseError(f"content is not a string: {content!r}")
+
+    return NPOutput(take_id=take_id, category=category, content=content)
+
+
 def _parse_llm_output(raw_text: str) -> NPOutput:
+    """裸文本 JSON 通路（语音 NP，Tier 2）：strip markdown → json.loads → _validate_data_dict。"""
     if not raw_text or not raw_text.strip():
         raise NPParseError("LLM returned empty response")
 
@@ -146,22 +175,7 @@ def _parse_llm_output(raw_text: str) -> NPOutput:
     except json.JSONDecodeError as e:
         raise NPParseError(f"Failed to parse LLM output as JSON: {text[:200]}", cause=e)
 
-    if not isinstance(data, dict):
-        raise NPParseError(f"LLM output is not a JSON object: {text[:200]}")
-
-    take_id = data.get("take_id")
-    if not isinstance(take_id, int) or isinstance(take_id, bool):
-        raise NPParseError(f"take_id is not an integer: {take_id!r}")
-
-    category = data.get("category", "note")
-    if not isinstance(category, str) or category not in ("note", "issue", "keeper", "ng", "hold"):
-        raise NPParseError(f"category invalid: {category!r}")
-
-    content = data.get("content", "")
-    if not isinstance(content, str):
-        raise NPParseError(f"content is not a string: {content!r}")
-
-    return NPOutput(take_id=take_id, category=category, content=content)
+    return _validate_data_dict(data)
 
 
 async def run_np_note(
@@ -169,6 +183,11 @@ async def run_np_note(
     llm_service: "LLMService",
     timeout: float = 30.0,
 ) -> NPOutput:
+    """文本 NP：forced tool-call（对标 L2 #25）。note_struct 配 tools + 强制 tool_choice →
+    infer_tool 取 tool_calls[0] → 解析 arguments JSON → _validate_data_dict → NPOutput。
+
+    asyncio.TimeoutError 从 infer_tool 透出（不吞，orchestrator 4.I 兜底为 timeout）。
+    """
     system_prompt = _build_system_prompt()
     user_message = _build_user_message(input_data)
 
@@ -177,14 +196,24 @@ async def run_np_note(
         {"role": "user", "content": user_message},
     ]
 
-    raw_text = await llm_service.infer(
-        messages,
-        task_type="note_struct",
-        priority=2,
-        timeout=timeout,
-    )
+    # FC 路径：调 infer_tool，取 tool_calls[0]，解析 arguments JSON（镜像 run_l2_take）。
+    try:
+        tool_call: dict = await llm_service.infer_tool(
+            messages,
+            task_type="note_struct",
+            priority=2,
+            timeout=timeout,
+        )
+    except LookupError as exc:
+        raise NPParseError("tool_calls 缺失或为空，模型未走 function calling 路径", cause=exc)
 
-    return _parse_llm_output(raw_text)
+    try:
+        args_json: str = tool_call["function"]["arguments"]
+        data = json.loads(args_json)
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise NPParseError("tool_call arguments 解析失败", cause=exc)
+
+    return _validate_data_dict(data)
 
 
 def _build_voice_system_prompt() -> str:

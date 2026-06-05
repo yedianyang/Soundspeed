@@ -59,6 +59,27 @@ def _build_l2_task_config() -> dict:
     }
 
 
+def _build_note_task_config() -> dict:
+    """构造 note_struct 配置，含 tools/tool_choice（文本 NP forced tool-call，对标 l2_take）。
+
+    note 短（512 token 够）；system 仅参考模板，真 system prompt 由 run_np_note 组装。
+    """
+    from backend.llm.tools.note import NOTE_TOOL_NAME, build_note_tool  # noqa: PLC0415
+
+    return {
+        "max_tokens": 512,
+        "temperature": 0.2,
+        "priority": 2,
+        "system": "将录音师备注归置到正确 take 并结构化为 take_id/category/content。",
+        # Tier 1 function calling：强制走 structure_note 工具
+        "tools": [build_note_tool()],
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": NOTE_TOOL_NAME},
+        },
+    }
+
+
 # task_type -> 配置字典
 # 字段：max_tokens, temperature, priority, system, _reserved（可选）
 # l2_take 含 tools/tool_choice，由 _build_l2_task_config() 在首次访问时构造。
@@ -78,13 +99,7 @@ TASK_CONFIG: dict[str, dict] = {
         # TODO(1.G): 接入时按剧本结构化需求细化 system prompt
         "system": "将剧本解析为结构化 JSON。",
     },
-    "note_struct": {
-        "max_tokens": 512,
-        "temperature": 0.2,
-        "priority": 2,
-        # TODO(1.G): 接入时按备注结构化需求细化 system prompt
-        "system": "将录音师备注解析为结构化字段。",
-    },
+    "note_struct": _build_note_task_config(),
     "agent_init": {
         "_reserved": True,
         "max_tokens": 1024,
