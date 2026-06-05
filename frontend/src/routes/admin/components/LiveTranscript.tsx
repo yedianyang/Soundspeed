@@ -1,7 +1,11 @@
+import { useMemo } from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import { AlertCircle, Loader2 } from "lucide-react"
 import { speakerColor } from "@/lib/constants"
 import { cn, formatTakeLabel } from "@/lib/utils"
 import { useSessionStore, type LiveSeg } from "@/store/session"
+import { correctSegmentSpeaker, takeQueryKey, useSpeakers, useTake } from "@/lib/api"
+import { SpeakerLabel } from "./SpeakerLabel"
 import { TakeDivider } from "./TakeDivider"
 
 // take.end 后处理状态条：分离说话人 / 生成摘要(Gemma) / 出错。
@@ -30,30 +34,83 @@ function ProcessingBanner() {
   )
 }
 
-// 渲染用条目：合并两声道后按 start_frame 升序。
-// key 用「声道内位置」idx：每个声道 append-only + 仅替换末尾 partial，索引不会平移/收缩，
-// 故 ch-idx 唯一且稳定——interleave 插入中段不影响（key 与合并后位置无关），
-// partial→final 同 key 原地更新（去光标 + italic→黑，不 remount）。
-interface RenderSeg extends LiveSeg {
+// 统一渲染行：实时流（store，无 segment_id）与权威数据（useTake，含 segment_id）共用一个形状。
+// segmentId 存在 → ch1 人名可点纠正；不存在（实时流）→ 纯文本。
+interface Row {
+  key: string
   ch: 1 | 2
-  idx: number
+  speaker: string | null
+  text: string
+  isPartial: boolean
+  segmentId?: number
 }
 
 export function LiveTranscript() {
   const segments = useSessionStore((s) => s.segments)
-  // 当前 take 从 currentTakeId + takes Map 派生（编号 + 后缀），录制态读 isRecording。
   const currentTakeId = useSessionStore((s) => s.currentTakeId)
   const isRecording = useSessionStore((s) => s.isRecording)
   const currentTake = useSessionStore((s) =>
     currentTakeId != null ? s.takes.get(currentTakeId) : undefined,
   )
+  const queryClient = useQueryClient()
 
-  const merged: RenderSeg[] = [
-    ...segments.ch1.map((s, i) => ({ ...s, ch: 1 as const, idx: i })),
-    ...segments.ch2.map((s, i) => ({ ...s, ch: 2 as const, idx: i })),
-  ].sort((a, b) => a.start_frame - b.start_frame)
+  // take 结束后拉权威 segment（带 segment_id + speaker），与 History 同源 → 编辑天然同步。
+  // 录制中不拉：用 store 实时流低延迟显示，避免和实时帧打架。
+  const showFinal = !isRecording && currentTakeId != null
+  const { data: takeDetail } = useTake(currentTakeId ?? -1, showFinal)
+  const finalSegs = showFinal ? takeDetail?.segments : undefined
 
-  const hasContent = merged.length > 0
+  // 候选演员（同 History）：全部注册演员 ∪ 本 take 现有标签 ∪ 未知。
+  const { data: registeredSpeakers } = useSpeakers()
+  const candidates = useMemo<(string | null)[]>(() => {
+    const names = new Set<string>()
+    for (const s of registeredSpeakers ?? []) names.add(s.display_name)
+    for (const seg of finalSegs ?? []) if (seg.speaker) names.add(seg.speaker)
+    return [...names, null]
+  }, [registeredSpeakers, finalSegs])
+
+  async function handleCorrect(
+    segmentId: number,
+    currentSpeaker: string | null,
+    next: string | null,
+  ) {
+    if (next === currentSpeaker || currentTakeId == null) return
+    try {
+      await correctSegmentSpeaker(currentTakeId, segmentId, next)
+      // 失效该 take query：本框 + History 同读 useTake，一起刷新（单一数据源同步）。
+      await queryClient.invalidateQueries({ queryKey: takeQueryKey(currentTakeId) })
+    } catch (err) {
+      console.error("纠正说话人失败", err)
+    }
+  }
+
+  // 渲染源：take 结束且权威数据已到 → 用它（可编辑）；否则用 store 实时流（纯文本，兜底防闪空）。
+  const useFinal = finalSegs != null && finalSegs.length > 0
+  const rows: Row[] = useFinal
+    ? [...finalSegs]
+        .sort((a, b) => a.start_frame - b.start_frame)
+        .map((s) => ({
+          key: `seg-${s.segment_id}`,
+          ch: s.ch as 1 | 2,
+          speaker: s.speaker,
+          text: s.text,
+          isPartial: false,
+          segmentId: s.segment_id,
+        }))
+    : [
+        ...segments.ch1.map((s: LiveSeg, i: number) => ({ ...s, ch: 1 as const, idx: i })),
+        ...segments.ch2.map((s: LiveSeg, i: number) => ({ ...s, ch: 2 as const, idx: i })),
+      ]
+        .sort((a, b) => a.start_frame - b.start_frame)
+        .map((s) => ({
+          key: `${s.ch}-${s.idx}`,
+          ch: s.ch,
+          speaker: s.speaker,
+          text: s.text,
+          isPartial: s.isPartial,
+        }))
+
+  const hasContent = rows.length > 0
 
   return (
     <div className="px-4 py-4 space-y-4">
@@ -61,25 +118,33 @@ export function LiveTranscript() {
         <TakeDivider label={formatTakeLabel(currentTake)} />
       )}
 
-      <ProcessingBanner />
-
       {hasContent ? (
         <div className="space-y-1.5 leading-relaxed">
-          {merged.map((seg) => (
+          {rows.map((r) => (
             <p
-              key={`${seg.ch}-${seg.idx}`}
+              key={r.key}
               className={cn(
                 "text-sm",
-                seg.isPartial ? "text-muted-foreground italic" : "text-foreground"
+                r.isPartial ? "text-muted-foreground italic" : "text-foreground",
               )}
             >
-              {seg.speaker && (
-                <span className={cn("font-medium mr-1", speakerColor(seg.speaker))}>
-                  {seg.speaker}：
-                </span>
-              )}
-              {seg.text}
-              {seg.isPartial && (
+              {r.segmentId != null && r.ch === 1 ? (
+                // 权威 ch1 段：人名可点，从全部注册演员里改（落库 + 同步 History）。
+                <SpeakerLabel
+                  key={String(r.speaker)}
+                  speaker={r.speaker}
+                  options={candidates}
+                  onChange={(next) => handleCorrect(r.segmentId!, r.speaker, next)}
+                />
+              ) : (
+                r.speaker && (
+                  <span className={cn("font-medium mr-1", speakerColor(r.speaker))}>
+                    {r.speaker}：
+                  </span>
+                )
+              )}{" "}
+              {r.text}
+              {r.isPartial && (
                 <span className="inline-block w-0.5 h-4 bg-muted-foreground ml-0.5 align-middle animate-pulse" />
               )}
             </p>
@@ -90,6 +155,9 @@ export function LiveTranscript() {
           {isRecording ? "等待转录…" : "未在录制"}
         </p>
       )}
+
+      {/* take.end 后处理状态条：放在对白下方，跟随文本末尾显示 */}
+      <ProcessingBanner />
     </div>
   )
 }
