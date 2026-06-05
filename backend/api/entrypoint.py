@@ -88,7 +88,8 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
 
     env：
       SOUNDSPEED_LIVE_ASR=0      显式关闭（默认启用）
-      SOUNDSPEED_ASR_MODEL=medium  whisper.cpp 模型大小（默认 medium）
+      SOUNDSPEED_ASR_MODEL       whisper.cpp 模型大小（默认 medium-q8_0 量化版；
+                                 切回 fp16 基线：SOUNDSPEED_ASR_MODEL=medium）
       SOUNDSPEED_AUDIO_DEVICE    设备名或索引（首次引导用；UI 选过后持久化优先）
       SOUNDSPEED_VAD=energy      VAD 探测器：energy（默认，零依赖）| silero（需 torch venv）
       SOUNDSPEED_MODELS_DIR      Whisper 模型存放目录（默认 ./models/whisper/）
@@ -101,7 +102,7 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
     if os.environ.get("SOUNDSPEED_LIVE_ASR") == "0":
         return None
 
-    from backend.asr import ASRConfig, WhisperRunner
+    from backend.asr import DEFAULT_ASR_MODEL, ASRConfig, WhisperRunner
     from backend.asr.live_session import LiveAsrSession
     from backend.audio.device_resolve import resolve_device_index, resolve_device_name
     from backend.audio.devices import get_default_input_index, list_input_devices
@@ -109,7 +110,9 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
     from backend.core.events import TAKE_END, TAKE_START
     from backend.vad.models import VadConfig
 
-    model_size = os.environ.get("SOUNDSPEED_ASR_MODEL", "medium")
+    # 生效的默认 ASR 模型在此（entrypoint 总是显式传 model_size，config.py 的 dataclass
+    # 默认在生产路径上不生效）。两处都引用 DEFAULT_ASR_MODEL，防默认值漂移。
+    model_size = os.environ.get("SOUNDSPEED_ASR_MODEL", DEFAULT_ASR_MODEL)
     vad_kind = os.environ.get("SOUNDSPEED_VAD", "silero")
     # 项目默认转录语言（zh/en/auto…）；运行时可在设置面板切换（POST /asr/language 覆盖本次）。
     language = os.environ.get("SOUNDSPEED_ASR_LANGUAGE", "zh")
