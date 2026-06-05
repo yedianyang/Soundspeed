@@ -158,6 +158,56 @@ class LLMService:
             self._client = GemmaClient(model_path=path)
         return self._client
 
+    async def _submit(
+        self,
+        messages: list[dict],
+        task_type: str,
+        priority: int | None,
+        timeout: float | None,
+        want_tool_call: bool,
+    ) -> asyncio.Future:
+        """infer / infer_tool 共享：校验入参、组装 payload、入队、启动 worker。
+
+        返回尚未 await 的 Future；调用方负责 asyncio.wait_for(fut, timeout)。
+        校验逻辑两条路径完全相同，唯一区别是 payload.want_tool_call。
+
+        Raises:
+            ValueError: task_type 不在 TASK_CONFIG，或 priority/timeout 非法。
+            NotImplementedError: task_type 标 _reserved=True。
+        """
+        if task_type not in TASK_CONFIG:
+            raise ValueError(f"未知的 task_type: {task_type!r}，合法值: {list(TASK_CONFIG)}")
+        cfg = TASK_CONFIG[task_type]
+        if cfg.get("_reserved"):
+            raise NotImplementedError(
+                f"task_type={task_type!r} 标记为 _reserved=True，MVP 阶段不可用"
+            )
+        # priority 为 None 时从 TASK_CONFIG 取默认值
+        if priority is None:
+            priority = cfg["priority"]
+        if priority not in (1, 2, 3):
+            raise ValueError(f"priority 必须为 1/2/3，收到: {priority!r}")
+        if timeout is not None and timeout <= 0:
+            raise ValueError(f"timeout 必须为正数或 None，收到: {timeout!r}")
+
+        # 从 TASK_CONFIG 提取 gen_kwargs，过滤掉元字段
+        gen_kwargs = {k: v for k, v in cfg.items() if k not in _META_KEYS}
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        payload = _InferPayload(
+            messages=messages,
+            task_type=task_type,
+            gen_kwargs=gen_kwargs,
+            want_tool_call=want_tool_call,
+        )
+        counter = next(self._counter)
+        await self._queue.put((priority, counter, fut, payload))
+
+        # 确保 worker 已启动（lazy）
+        self._ensure_worker()
+        return fut
+
     async def infer(
         self,
         messages: list[dict],
@@ -185,35 +235,9 @@ class LLMService:
             RuntimeError: client.create_chat_completion 内部崩溃时通过 Future 回传。
             LookupError: client 返回 dict 缺少 choices[0]["message"]["content"]。
         """
-        # 入参校验（不合法立即抛，不入队）
-        if task_type not in TASK_CONFIG:
-            raise ValueError(f"未知的 task_type: {task_type!r}，合法值: {list(TASK_CONFIG)}")
-        cfg = TASK_CONFIG[task_type]
-        if cfg.get("_reserved"):
-            raise NotImplementedError(
-                f"task_type={task_type!r} 标记为 _reserved=True，MVP 阶段不可用"
-            )
-        # priority 为 None 时从 TASK_CONFIG 取默认值
-        if priority is None:
-            priority = cfg["priority"]
-        if priority not in (1, 2, 3):
-            raise ValueError(f"priority 必须为 1/2/3，收到: {priority!r}")
-        if timeout is not None and timeout <= 0:
-            raise ValueError(f"timeout 必须为正数或 None，收到: {timeout!r}")
-
-        # 从 TASK_CONFIG 提取 gen_kwargs，过滤掉元字段
-        gen_kwargs = {k: v for k, v in cfg.items() if k not in _META_KEYS}
-
-        # 入队
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future[str] = loop.create_future()
-        payload = _InferPayload(messages=messages, task_type=task_type, gen_kwargs=gen_kwargs)
-        counter = next(self._counter)
-        await self._queue.put((priority, counter, fut, payload))
-
-        # 确保 worker 已启动（lazy）
-        self._ensure_worker()
-
+        fut = await self._submit(
+            messages, task_type, priority, timeout, want_tool_call=False
+        )
         # 等待结果，支持超时。
         # 不用 shield：超时后 wait_for 自动 cancel(fut)，
         # worker 下一轮取出时 fut.cancelled() 为 True，直接跳过，节省推理资源。
@@ -247,35 +271,9 @@ class LLMService:
             asyncio.TimeoutError: 超时。
             LookupError: client 返回的 tool_calls 缺失或为空。
         """
-        if task_type not in TASK_CONFIG:
-            raise ValueError(f"未知的 task_type: {task_type!r}，合法值: {list(TASK_CONFIG)}")
-        cfg = TASK_CONFIG[task_type]
-        if cfg.get("_reserved"):
-            raise NotImplementedError(
-                f"task_type={task_type!r} 标记为 _reserved=True，MVP 阶段不可用"
-            )
-        if priority is None:
-            priority = cfg["priority"]
-        if priority not in (1, 2, 3):
-            raise ValueError(f"priority 必须为 1/2/3，收到: {priority!r}")
-        if timeout is not None and timeout <= 0:
-            raise ValueError(f"timeout 必须为正数或 None，收到: {timeout!r}")
-
-        gen_kwargs = {k: v for k, v in cfg.items() if k not in _META_KEYS}
-
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future[dict] = loop.create_future()
-        payload = _InferPayload(
-            messages=messages,
-            task_type=task_type,
-            gen_kwargs=gen_kwargs,
-            want_tool_call=True,
+        fut = await self._submit(
+            messages, task_type, priority, timeout, want_tool_call=True
         )
-        counter = next(self._counter)
-        await self._queue.put((priority, counter, fut, payload))
-
-        self._ensure_worker()
-
         return await asyncio.wait_for(fut, timeout=timeout)
 
     async def aclose(self) -> None:
@@ -332,22 +330,20 @@ class LLMService:
                     )
                 if payload.want_tool_call:
                     # tool_call 路径：取 choices[0]["message"]["tool_calls"][0]
+                    # 显式 raise 的 LookupError 不被下面 (KeyError, IndexError, TypeError)
+                    # 捕获（它们都是 LookupError 子类，反向不成立），直接穿透到 set_exception。
                     try:
-                        msg = result_dict["choices"][0]["message"]
-                        tool_calls = msg.get("tool_calls")
-                        if not tool_calls:
-                            raise LookupError(
-                                "client 返回 dict 缺少 tool_calls 或 tool_calls 为空列表"
-                            )
-                        tool_call: dict = tool_calls[0]
-                    except LookupError:
-                        raise
+                        tool_calls = result_dict["choices"][0]["message"].get("tool_calls")
                     except (KeyError, IndexError, TypeError) as e:
                         raise LookupError(
                             f"client 返回 dict 格式异常，缺少 tool_calls: {e}"
                         ) from e
+                    if not tool_calls:
+                        raise LookupError(
+                            "client 返回 dict 缺少 tool_calls 或 tool_calls 为空列表"
+                        )
                     if not fut.done():
-                        fut.set_result(tool_call)
+                        fut.set_result(tool_calls[0])
                 else:
                     # content 路径（原有逻辑，不变）
                     try:

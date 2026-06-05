@@ -33,15 +33,20 @@ def register(
     _REGISTRY[name] = (schema, executor)
 
 
+def _require(name: str) -> tuple[dict, Callable | None]:
+    """取注册项，未注册抛 KeyError。get_tool_schema / get_executor 共用。"""
+    if name not in _REGISTRY:
+        raise KeyError(f"工具 {name!r} 未注册，已注册工具: {list(_REGISTRY)}")
+    return _REGISTRY[name]
+
+
 def get_tool_schema(name: str) -> dict:
     """按名取工具 schema。
 
     Raises:
         KeyError: 工具名未注册。
     """
-    if name not in _REGISTRY:
-        raise KeyError(f"工具 {name!r} 未注册，已注册工具: {list(_REGISTRY)}")
-    return _REGISTRY[name][0]
+    return _require(name)[0]
 
 
 def get_executor(name: str) -> Callable | None:
@@ -50,9 +55,7 @@ def get_executor(name: str) -> Callable | None:
     Raises:
         KeyError: 工具名未注册。
     """
-    if name not in _REGISTRY:
-        raise KeyError(f"工具 {name!r} 未注册，已注册工具: {list(_REGISTRY)}")
-    return _REGISTRY[name][1]
+    return _require(name)[1]
 
 
 def list_tools(domain: str | None = None) -> list[str]:
