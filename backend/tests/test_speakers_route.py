@@ -90,8 +90,14 @@ def test_requires_auth(tmp_dal: DAL, monkeypatch):
 # ── enroll ───────────────────────────────────────────────────────────────────────
 
 
-def _pcm_bytes(seconds: float) -> bytes:
+def _silent_pcm_bytes(seconds: float) -> bytes:
     return np.zeros(int(16000 * seconds), dtype=np.int16).tobytes()
+
+
+def _audible_pcm_bytes(seconds: float, amp: int = 2000) -> bytes:
+    # 恒定幅度方波，RMS=amp，远高于静音守卫阈值
+    n = int(16000 * seconds)
+    return np.full(n, amp, dtype=np.int16).tobytes()
 
 
 def test_enroll_without_engine_503(tmp_dal: DAL, monkeypatch):
@@ -99,7 +105,7 @@ def test_enroll_without_engine_503(tmp_dal: DAL, monkeypatch):
         sid = c.post("/api/v1/speakers", json={"display_name": "张三"}, headers=_HEADERS).json()["speaker_id"]
         r = c.post(
             f"/api/v1/speakers/{sid}/enroll",
-            files={"file": ("a.pcm", _pcm_bytes(3), "application/octet-stream")},
+            files={"file": ("a.pcm", _silent_pcm_bytes(3), "application/octet-stream")},  # 内容无关：engine=None 在 finalize 守卫之前就 503
             params={"sample_rate": 16000},
             headers=_HEADERS,
         )
@@ -111,7 +117,7 @@ def test_enroll_too_short_400(tmp_dal: DAL, monkeypatch):
         sid = c.post("/api/v1/speakers", json={"display_name": "张三"}, headers=_HEADERS).json()["speaker_id"]
         r = c.post(
             f"/api/v1/speakers/{sid}/enroll",
-            files={"file": ("a.pcm", _pcm_bytes(1.0), "application/octet-stream")},  # < 2s
+            files={"file": ("a.pcm", _audible_pcm_bytes(1.0), "application/octet-stream")},  # 有声但 < 2s
             params={"sample_rate": 16000},
             headers=_HEADERS,
         )
@@ -124,7 +130,7 @@ def test_enroll_success_sets_embedding(tmp_dal: DAL, monkeypatch):
         sid = c.post("/api/v1/speakers", json={"display_name": "张三"}, headers=_HEADERS).json()["speaker_id"]
         r = c.post(
             f"/api/v1/speakers/{sid}/enroll",
-            files={"file": ("a.pcm", _pcm_bytes(3), "application/octet-stream")},
+            files={"file": ("a.pcm", _audible_pcm_bytes(3), "application/octet-stream")},
             params={"sample_rate": 16000},
             headers=_HEADERS,
         )
@@ -133,6 +139,18 @@ def test_enroll_success_sets_embedding(tmp_dal: DAL, monkeypatch):
         assert body["has_enrollment"] is True
         assert body["sample_count"] == 1
         assert engine.calls == [16000 * 3]
+
+
+def test_enroll_silent_400(tmp_dal: DAL, monkeypatch):
+    with _client(tmp_dal, monkeypatch, engine=_FakeEngine()) as c:
+        sid = c.post("/api/v1/speakers", json={"display_name": "张三"}, headers=_HEADERS).json()["speaker_id"]
+        r = c.post(
+            f"/api/v1/speakers/{sid}/enroll",
+            files={"file": ("a.pcm", _silent_pcm_bytes(3), "application/octet-stream")},  # 够长但静音
+            params={"sample_rate": 16000},
+            headers=_HEADERS,
+        )
+        assert r.status_code == 400
 
 
 def test_enroll_empty_file_400(tmp_dal: DAL, monkeypatch):
@@ -150,7 +168,7 @@ def test_enroll_missing_speaker_404(tmp_dal: DAL, monkeypatch):
     with _client(tmp_dal, monkeypatch, engine=_FakeEngine()) as c:
         r = c.post(
             "/api/v1/speakers/999/enroll",
-            files={"file": ("a.pcm", _pcm_bytes(3), "application/octet-stream")},
+            files={"file": ("a.pcm", _audible_pcm_bytes(3), "application/octet-stream")},
             params={"sample_rate": 16000},
             headers=_HEADERS,
         )
