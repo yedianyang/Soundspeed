@@ -906,9 +906,7 @@ class DAL:
 
             notes_text = "\n".join(lines) if lines else None
             conn.execute(
-                "UPDATE takes SET notes = ?, updated_at = {} WHERE take_id = ?;".format(
-                    _NOW_TS_SQL
-                ),
+                f"UPDATE takes SET notes = ?, updated_at = {_NOW_TS_SQL} WHERE take_id = ?;",
                 (notes_text, take_id),
             )
         return event_id  # type: ignore[return-value]
