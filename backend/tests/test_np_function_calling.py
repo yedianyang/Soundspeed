@@ -36,6 +36,11 @@ from backend.llm.service import LLMService
 _CATEGORIES = ["note", "issue", "keeper", "ng", "hold"]
 # 工具名（build_note_tool / config tool_choice / registry 三处须一致）
 _NOTE_TOOL_NAME = "structure_note"
+# 文本 FC 用 note_struct_tool（带 tools）；语音 NP 仍用 note_struct（无 tool，Tier 2）。
+# 两个 key 必须分开：tools/tool_choice 不在 _META_KEYS，共享同一 task_type 会让 infer_voice
+# 也吃到强制 tool_choice → content=None → 语音 note 全挂（见 test_voice_task_type_is_tool_free）。
+_TEXT_TASK = "note_struct_tool"
+_VOICE_TASK = "note_struct"
 
 
 # ---------------------------------------------------------------------------
@@ -125,22 +130,58 @@ def test_build_note_tool_category_enum_matches_validator() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_note_struct_config_has_tools() -> None:
+def test_text_task_config_has_tools() -> None:
     from backend.llm.config import TASK_CONFIG
 
-    cfg = TASK_CONFIG["note_struct"]
+    cfg = TASK_CONFIG[_TEXT_TASK]
     assert "tools" in cfg
     assert cfg["tools"][0]["function"]["name"] == _NOTE_TOOL_NAME
 
 
-def test_note_struct_config_forces_tool_choice() -> None:
+def test_text_task_config_forces_tool_choice() -> None:
     from backend.llm.config import TASK_CONFIG
 
-    cfg = TASK_CONFIG["note_struct"]
+    cfg = TASK_CONFIG[_TEXT_TASK]
     assert cfg["tool_choice"] == {
         "type": "function",
         "function": {"name": _NOTE_TOOL_NAME},
     }
+
+
+def test_voice_task_type_is_tool_free() -> None:
+    """语音 NP 用的 note_struct 必须无 tools/tool_choice（守卫：共享 key 会让 infer_voice
+    吃到强制 tool_choice → content=None → 语音全挂）。run_np_voice 仍走它（Tier 2，不碰）。"""
+    from backend.llm.config import TASK_CONFIG
+
+    cfg = TASK_CONFIG[_VOICE_TASK]
+    assert "tools" not in cfg
+    assert "tool_choice" not in cfg
+
+
+@pytest.mark.asyncio
+async def test_infer_voice_does_not_leak_tool_choice() -> None:
+    """实证守卫：infer_voice(task_type=note_struct) 不把 tool_choice/tools 漏给 client。"""
+    from backend.llm.service import _reset_service, get_service
+
+    class _Cap:
+        def __init__(self) -> None:
+            self.kw: dict = {}
+
+        def create_chat_completion(self, messages: list[dict], **kwargs: object) -> dict:
+            self.kw.update(kwargs)
+            return {"choices": [{"message": {"content": "{}"}}]}
+
+    _reset_service()
+    svc = get_service()
+    cap = _Cap()
+    svc._client = cap  # type: ignore[assignment]
+    try:
+        await svc.infer_voice([{"role": "user", "content": "hi"}], b"AUDIO",
+                              task_type=_VOICE_TASK, timeout=5.0)
+    finally:
+        _reset_service()
+    assert "tool_choice" not in cap.kw
+    assert "tools" not in cap.kw
 
 
 def test_note_tool_registered() -> None:
@@ -164,7 +205,7 @@ async def test_run_np_note_uses_infer_tool() -> None:
 
     svc.infer_tool.assert_awaited_once()
     _, kwargs = svc.infer_tool.call_args
-    assert kwargs.get("task_type") == "note_struct"
+    assert kwargs.get("task_type") == _TEXT_TASK
 
 
 @pytest.mark.asyncio

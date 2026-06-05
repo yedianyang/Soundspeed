@@ -197,10 +197,11 @@ async def run_np_note(
     ]
 
     # FC 路径：调 infer_tool，取 tool_calls[0]，解析 arguments JSON（镜像 run_l2_take）。
+    # task_type=note_struct_tool（带 tools）；语音 run_np_voice 仍用无 tool 的 note_struct。
     try:
         tool_call: dict = await llm_service.infer_tool(
             messages,
-            task_type="note_struct",
+            task_type="note_struct_tool",
             priority=2,
             timeout=timeout,
         )
