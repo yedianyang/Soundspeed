@@ -75,10 +75,25 @@ def l2_input(stub_segments: list[dict], stub_script_lines: list[dict]) -> L2Inpu
     )
 
 
+def _make_tool_call(arguments_json: str) -> dict:
+    """把 JSON 字符串包装成 tool_call dict（infer_tool 的返回格式）。"""
+    return {
+        "id": "call_stub_test",
+        "type": "function",
+        "function": {
+            "name": "report_script_analysis",
+            "arguments": arguments_json,
+        },
+    }
+
+
 def _mock_llm(response: str) -> MagicMock:
-    """创建注入 AsyncMock.infer 的 LLMService mock。"""
+    """创建注入 AsyncMock.infer_tool 的 LLMService mock。
+
+    response: JSON 字符串（直接作为 tool_call.function.arguments）。
+    """
     svc = MagicMock(spec=LLMService)
-    svc.infer = AsyncMock(return_value=response)
+    svc.infer_tool = AsyncMock(return_value=_make_tool_call(response))
     return svc
 
 
@@ -174,9 +189,12 @@ async def test_run_l2_take_invalid_json_raises(l2_input: L2Input) -> None:
 
 @pytest.mark.asyncio
 async def test_run_l2_take_markdown_wrapped_json(l2_input: L2Input) -> None:
-    """LLM 返回 ```json ... ``` 包裹的 JSON，pipeline 能成功解析。"""
-    wrapped = "```json\n" + _normal_response() + "\n```"
-    svc = _mock_llm(wrapped)
+    """FC 路径：tool_call.arguments 是纯 JSON（grammar 保证无 markdown fence），pipeline 能成功解析。
+
+    原旧路径测试「markdown fence → _strip → json.loads」，FC 路径 grammar 约束下不会产生 markdown 包裹，
+    改为直接验证纯 JSON arguments 成功解析。
+    """
+    svc = _mock_llm(_normal_response())
     result = await run_l2_take(l2_input, svc)
 
     assert isinstance(result, L2Output)
@@ -236,9 +254,9 @@ async def test_run_l2_take_transcript_truncated(stub_script_lines: list[dict]) -
     result = await run_l2_take(inp, svc)
 
     assert isinstance(result, L2Output)
-    # 验证 infer 被调用，且 messages[1]["content"] 含截断警告
-    assert svc.infer.called
-    call_args = svc.infer.call_args
+    # 验证 infer_tool 被调用，且 messages[1]["content"] 含截断警告
+    assert svc.infer_tool.called
+    call_args = svc.infer_tool.call_args
     messages = call_args[0][0]  # positional 第一个参数是 messages
     user_message = next(m["content"] for m in messages if m["role"] == "user")
     assert "WARNING: transcript truncated" in user_message
@@ -282,7 +300,7 @@ async def test_run_l2_take_previous_notes_in_prompt(
     svc = _mock_llm(_normal_response())
     await run_l2_take(inp, svc)
 
-    call_args = svc.infer.call_args
+    call_args = svc.infer_tool.call_args
     messages = call_args[0][0]
     user_message = next(m["content"] for m in messages if m["role"] == "user")
     assert "历史偏差参考" in user_message
@@ -304,7 +322,7 @@ async def test_run_l2_take_no_previous_notes_section_absent(
     svc = _mock_llm(_normal_response())
     await run_l2_take(inp, svc)
 
-    call_args = svc.infer.call_args
+    call_args = svc.infer_tool.call_args
     messages = call_args[0][0]
     user_message = next(m["content"] for m in messages if m["role"] == "user")
     assert "历史偏差参考" not in user_message
@@ -320,21 +338,21 @@ async def test_run_l2_take_empty_llm_response_raises(l2_input: L2Input) -> None:
 
 @pytest.mark.asyncio
 async def test_run_l2_take_timeout_propagated(l2_input: L2Input) -> None:
-    """LLMService.infer 抛 asyncio.TimeoutError，pipeline 不吞，让其穿透到 caller。"""
+    """LLMService.infer_tool 抛 asyncio.TimeoutError，pipeline 不吞，让其穿透到 caller。"""
     svc = MagicMock(spec=LLMService)
-    svc.infer = AsyncMock(side_effect=asyncio.TimeoutError())
+    svc.infer_tool = AsyncMock(side_effect=asyncio.TimeoutError())
     with pytest.raises(asyncio.TimeoutError):
         await run_l2_take(l2_input, svc, timeout=0.1)
 
 
 @pytest.mark.asyncio
 async def test_run_l2_take_uses_priority_2(l2_input: L2Input) -> None:
-    """run_l2_take 调用 llm_service.infer 时 priority=2 且 task_type="l2_take"。"""
+    """run_l2_take 调用 llm_service.infer_tool 时 priority=2 且 task_type="l2_take"。"""
     svc = _mock_llm(_normal_response())
     await run_l2_take(l2_input, svc)
 
-    svc.infer.assert_called_once()
-    call_kwargs = svc.infer.call_args
+    svc.infer_tool.assert_called_once()
+    call_kwargs = svc.infer_tool.call_args
     # 检查 keyword 参数
     assert call_kwargs.kwargs.get("task_type") == "l2_take" or call_kwargs[1].get(
         "task_type"
@@ -480,7 +498,7 @@ async def test_user_message_includes_transcript_indices(l2_input: L2Input) -> No
     svc = _mock_llm(_normal_response())
     await run_l2_take(l2_input, svc)
 
-    call_args = svc.infer.call_args
+    call_args = svc.infer_tool.call_args
     messages = call_args[0][0]
     user_message = next(m["content"] for m in messages if m["role"] == "user")
 
