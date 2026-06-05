@@ -215,7 +215,12 @@ export interface InputDeviceDTO {
 
 export interface DevicesResponse {
   devices: InputDeviceDTO[]
+  // 后端权威「实际会采集的 index」（持久化设备不在场时已是 fallback 设备的 index）。
   selected: number | null
+  // 持久化设备当前在不在场；未启用 live ASR 时 null。
+  selected_available: boolean | null
+  // 当前选中设备名；未启用 live ASR 时 null。
+  selected_name: string | null
 }
 
 export function getDevices(): Promise<DevicesResponse> {

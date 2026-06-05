@@ -38,6 +38,12 @@ SCRIPT_UPLOAD = "script.upload"
 TAKE_DELETED = "take.deleted"
 SCENE_CHANGED = "scene.changed"
 
+# 音频设备 warning（设备拔走时通知前端）
+DEVICE_WARNING = "device.warning"
+
+# 实时 RMS 电平（采集线程每 chunk 推，驱动前端电平条）
+AUDIO_LEVEL = "audio.level"
+
 
 # ── Payload dataclass ─────────────────────────────────────────────────────────
 
@@ -233,3 +239,26 @@ class SceneChangedPayload:
     scene_id: int
     scene_code: str
     is_active: bool
+
+
+@dataclass(frozen=True)
+class DeviceWarningPayload:
+    """device.warning 的 payload（设备拔走 fallback 通知前端）。
+
+    message: 人类可读描述。
+    device_name: 保存的设备名（已不在场）。
+    """
+
+    message: str
+    device_name: str
+
+
+@dataclass(frozen=True)
+class AudioLevelPayload:
+    """audio.level 的 payload（采集线程每 chunk 推，驱动前端电平条）。
+
+    rms: ch1 当前 chunk 的 RMS 电平，归一化到 [0, 1]。
+         计算式：clamp(sqrt(mean((x/32768)^2)), 0, 1)，可乘小增益便于观察。
+    """
+
+    rms: float

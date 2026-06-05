@@ -5,6 +5,7 @@ import { LiveSocket } from "@/lib/ws"
 import { useSessionStore } from "@/store/session"
 import type {
   AsrMsg,
+  DeviceWarningMsg,
   LlmStatusMsg,
   NoteFailedMsg,
   NoteProcessedMsg,
@@ -107,6 +108,17 @@ export function useLiveConnection(): void {
           // 4.I：NP 失败 → 对应 pending 转失败态（红 + reason + 重试），不再永久卡处理中
           const m = payload as NoteFailedMsg
           s.noteFailed(m)
+          return
+        }
+        if (topic === "device.warning") {
+          // 持久化设备被拔走 / 不在场，后端已回落 fallback；存进 store 供头部 amber 提示。
+          s.setDeviceWarning((payload as DeviceWarningMsg).message)
+          return
+        }
+        if (topic === "audio.level") {
+          // 后端实际采集那路音频的归一化 RMS，仅录制时 ~5Hz 推。存值 + 时间戳，电平条按新鲜度
+          // 决定用后端 rms 还是浏览器常驻 micLevel。
+          s.setBackendLevel((payload as { rms: number }).rms)
           return
         }
       },

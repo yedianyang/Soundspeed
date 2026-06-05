@@ -66,6 +66,15 @@ interface SessionState {
   // take.end 后处理状态条（diarization + Gemma）；done 清空，error 保留到下次录制。null=不显示。
   processing: { phase: TakeProcessingPhase; detail: string | null } | null
 
+  // device.warning：持久化设备被拔走 / 不在场（后端已回落 fallback）的提示文案。null=不显示。
+  deviceWarning: string | null
+
+  // audio.level：后端实际采集那路音频的归一化 RMS [0,1]，仅录制时 ~5Hz 推送。
+  // backendLevelTs 记最近一帧到达的本地时间戳（Date.now()）用于判断新鲜度——停录后后端不再推，
+  // 过阈值即视为陈旧，电平条回落到浏览器常驻 micLevel。
+  backendLevel: number
+  backendLevelTs: number
+
   // ── actions ──
   setToken: (t: string | null) => void
   setConnection: (c: ConnectionState) => void
@@ -78,6 +87,8 @@ interface SessionState {
   setTakeProcessing: (m: TakeProcessingMsg) => void
   setCurrentTakeId: (id: number | null) => void
   setRecording: (recording: boolean) => void
+  setDeviceWarning: (message: string | null) => void
+  setBackendLevel: (rms: number) => void
   resetSegments: () => void
   addPendingNote: (n: PendingNote) => void
   noteProcessed: (m: NoteProcessedMsg) => void
@@ -97,6 +108,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   pendingNotes: [],
   notesVersion: 0,
   processing: null,
+  deviceWarning: null,
+  backendLevel: 0,
+  backendLevelTs: 0,
 
   setToken: (t) =>
     set(() => ({
@@ -282,6 +296,13 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setRecording: (recording) =>
     set((state) => (state.isRecording === recording ? {} : { isRecording: recording })),
+
+  // device.warning：设备拔走提示；null=清空（手动 dismiss）。
+  setDeviceWarning: (message) =>
+    set((state) => (state.deviceWarning === message ? {} : { deviceWarning: message })),
+
+  // audio.level：每帧同时写 rms 值和到达时间戳，供电平条判断新鲜度后混合。
+  setBackendLevel: (rms) => set(() => ({ backendLevel: rms, backendLevelTs: Date.now() })),
 
   // 清实时转录（REC 开始 / dev 注入开始时调，避免上一条 take 的转录残留）。
   resetSegments: () => set(() => ({ segments: { ch1: [], ch2: [] } })),

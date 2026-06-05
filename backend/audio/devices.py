@@ -20,17 +20,32 @@ class InputDevice:
     is_default: bool
 
 
-def _default_input_index(default_device: object) -> int | None:
-    """从 sd.default.device 解析默认输入索引。
+def parse_default_input_index(default_device: object) -> int | None:
+    """从 sd.default.device 值解析默认输入索引。
 
-    sounddevice 的 default.device 可能是 (input, output) 或单值；-1/None 表示未设。
+    sounddevice 的 default.device 实际类型是 _InputOutputPair（可索引但非 list/tuple）。
+    也兼容 list/tuple/int/None 形式。-1 是 sounddevice 的「未设」哨兵，返回 None。
     """
-    di = default_device
-    if isinstance(di, (list, tuple)):
-        di = di[0] if di else None
+    di: object = default_device
+    if not isinstance(di, int):
+        try:
+            di = di[0]  # type: ignore[index]  # list/tuple/_InputOutputPair 都支持 []
+        except (TypeError, IndexError, KeyError):
+            di = None
     if isinstance(di, int) and di >= 0:
         return di
     return None
+
+
+# 保留旧名作为别名，避免项目内部其他引用（如测试）直接用私有名的代码受影响
+_default_input_index = parse_default_input_index
+
+
+def get_default_input_index() -> int | None:
+    """读取当前 sounddevice 系统默认输入 index。无参便捷版，供路由/entrypoint 使用。"""
+    import sounddevice as sd
+
+    return parse_default_input_index(sd.default.device)
 
 
 def list_input_devices(

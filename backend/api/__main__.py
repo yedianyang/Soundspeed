@@ -7,7 +7,7 @@
   PORT                监听端口（默认 8000）
   SOUNDSPEED_DEV      dev 模式（=1 时挂载 /api/v1/debug/asr + 自动播种 active scene）
   SOUNDSPEED_LIVE_ASR 实时 ASR 开关（默认启用；=0 显式关闭）
-  SOUNDSPEED_ASR_MODEL  Whisper 模型大小（默认 "medium"）
+  SOUNDSPEED_ASR_MODEL  Whisper 模型大小（默认 "medium-q8_0" 量化版；fp16 基线设 "medium"）
   SOUNDSPEED_MODELS_DIR   Whisper 模型存放目录（默认 ./models/whisper/）
   SOUNDSPEED_HF_TOKEN     HuggingFace access token（pyannote 等 gated 模型必须）
   SOUNDSPEED_HF_CACHE_DIR pyannote 等 HF 模型缓存目录（默认 ./models/huggingface/）

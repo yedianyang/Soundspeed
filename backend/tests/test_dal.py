@@ -1357,3 +1357,84 @@ def test_reset_all_clears_all_business_tables(tmp_dal: DAL) -> None:
     assert conn.execute("SELECT count(*) FROM active_observers").fetchone()[0] == 0
     # FTS 影子表：content table 模式下用 count(*) 读取
     assert conn.execute("SELECT count(*) FROM script_lines_fts").fetchone()[0] == 0
+
+
+# ── app_settings KV（v8）────────────────────────────────────────────────────────
+
+
+def test_v8_migration_creates_app_settings_table(tmp_path: Path) -> None:
+    """v8 迁移后 app_settings 表存在。"""
+    db_path = tmp_path / "test.db"
+    apply_migrations(db_path)
+    conn = _raw_conn(db_path)
+    names = {
+        r["name"]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table';"
+        ).fetchall()
+    }
+    assert "app_settings" in names
+    conn.close()
+
+
+def test_get_setting_missing_returns_none(tmp_dal: DAL) -> None:
+    """不存在的 key 返回 None。"""
+    assert tmp_dal.get_setting("nonexistent") is None
+
+
+def test_set_and_get_setting(tmp_dal: DAL) -> None:
+    """set_setting 后 get_setting 能读回。"""
+    tmp_dal.set_setting("audio_input_device", "MacBook Pro Microphone")
+    assert tmp_dal.get_setting("audio_input_device") == "MacBook Pro Microphone"
+
+
+def test_set_setting_upsert(tmp_dal: DAL) -> None:
+    """同一 key 多次 set_setting 覆盖上一次，get_setting 返回最新值。"""
+    tmp_dal.set_setting("audio_input_device", "Old Device")
+    tmp_dal.set_setting("audio_input_device", "New Device")
+    assert tmp_dal.get_setting("audio_input_device") == "New Device"
+
+
+def test_set_setting_multiple_keys(tmp_dal: DAL) -> None:
+    """多个不同 key 独立存储，互不干扰。"""
+    tmp_dal.set_setting("key_a", "val_a")
+    tmp_dal.set_setting("key_b", "val_b")
+    assert tmp_dal.get_setting("key_a") == "val_a"
+    assert tmp_dal.get_setting("key_b") == "val_b"
+
+
+def test_v8_incremental_upgrade_from_v7(tmp_path: Path) -> None:
+    """既有 v7 库平滑升级到 v8：user_version=8，app_settings 表存在且可读写。"""
+    import sqlite3 as _sql
+
+    db_path = tmp_path / "v7_to_v8.db"
+
+    # 模拟 v7 库：只设 user_version，不建任何表（v8 migration 不依赖前置表）
+    conn = _sql.connect(str(db_path))
+    conn.execute("PRAGMA user_version = 7;")
+    conn.commit()
+    conn.close()
+
+    # 增量迁移
+    apply_migrations(db_path)
+
+    # 断言版本号
+    conn = _raw_conn(db_path)
+    version = conn.execute("PRAGMA user_version;").fetchone()[0]
+    assert version == 8
+
+    # 断言表存在
+    names = {
+        r["name"]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table';"
+        ).fetchall()
+    }
+    assert "app_settings" in names
+    conn.close()
+
+    # 断言可通过 DAL 读写（DAL 自行调用 apply_migrations，已在 v8 → 幂等）
+    dal = DAL(db_path)
+    dal.set_setting("audio_input_device", "USB Mic")
+    assert dal.get_setting("audio_input_device") == "USB Mic"
+    dal.close()

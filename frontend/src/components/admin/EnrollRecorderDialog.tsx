@@ -57,7 +57,16 @@ export default function EnrollRecorderDialog({ open, onOpenChange, speaker, onEn
     if (!speaker) return
     setErrorMsg(null)
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      // 声纹采集必须拿"原始"麦克风音频：关掉浏览器默认的语音通话 DSP
+      // （回声消除/降噪/自动增益）——它们会抹掉说话人辨识依赖的频谱细节，
+      // 导致不同人的声纹互相靠拢、识别塌成一个人。
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      })
       streamRef.current = stream
       const rec = new MediaRecorder(stream)
       chunksRef.current = []

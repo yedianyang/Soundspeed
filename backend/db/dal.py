@@ -1429,3 +1429,22 @@ class DAL:
                 f"VALUES ('user', 'take.restore', ?, {_NOW_TS_SQL});",
                 (audit_payload,),
             )
+
+    # ── app_settings KV（v8）──────────────────────────────────────────────────
+
+    def get_setting(self, key: str) -> str | None:
+        """读取应用级 KV 设置。key 不存在返回 None。"""
+        row = self._conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?;",
+            (key,),
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        """写入（UPSERT）应用级 KV 设置。"""
+        with self._write_tx() as conn:
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+                (key, value),
+            )

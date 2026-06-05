@@ -86,7 +86,9 @@ class _InferPayload:
     messages: list[dict]
     task_type: str
     gen_kwargs: dict
-    # 语音 NP（4.J）：非 None 时随 messages 一并喂多模态 client；文本路径恒为 None。
+    # function calling（main #25）：True 时 worker 取 tool_calls[0] 而非 content。
+    want_tool_call: bool = False
+    # 语音 NP（4.J）：非 None 时随 messages 一并喂多模态 client；文本/tool 路径恒为 None。
     audio: bytes | None = None
 
 
@@ -106,7 +108,7 @@ class LLMService:
 
     def __init__(self) -> None:
         self._queue: asyncio.PriorityQueue[
-            tuple[int, int, asyncio.Future[str], _InferPayload]
+            tuple[int, int, asyncio.Future, _InferPayload]
         ] = asyncio.PriorityQueue()
         self._lock: asyncio.Lock = asyncio.Lock()
         self._worker_task: asyncio.Task[None] | None = None
@@ -187,6 +189,59 @@ class LLMService:
             self._client = GemmaClient(model_path=path, mmproj_path=mmproj)
         return self._client
 
+    async def _submit(
+        self,
+        messages: list[dict],
+        task_type: str,
+        priority: int | None,
+        timeout: float | None,
+        want_tool_call: bool,
+        audio: bytes | None = None,
+    ) -> asyncio.Future:
+        """infer / infer_tool / infer_voice 共享：校验入参、组装 payload、入队、启动 worker。
+
+        返回尚未 await 的 Future；调用方负责 asyncio.wait_for(fut, timeout)。
+        三条路径校验完全相同，区别仅在 payload.want_tool_call（取 content vs tool_calls）
+        与 payload.audio（语音 NP 随 messages 一并喂多模态 client，文本/tool 恒为 None）。
+
+        Raises:
+            ValueError: task_type 不在 TASK_CONFIG，或 priority/timeout 非法。
+            NotImplementedError: task_type 标 _reserved=True。
+        """
+        if task_type not in TASK_CONFIG:
+            raise ValueError(f"未知的 task_type: {task_type!r}，合法值: {list(TASK_CONFIG)}")
+        cfg = TASK_CONFIG[task_type]
+        if cfg.get("_reserved"):
+            raise NotImplementedError(
+                f"task_type={task_type!r} 标记为 _reserved=True，MVP 阶段不可用"
+            )
+        # priority 为 None 时从 TASK_CONFIG 取默认值
+        if priority is None:
+            priority = cfg["priority"]
+        if priority not in (1, 2, 3):
+            raise ValueError(f"priority 必须为 1/2/3，收到: {priority!r}")
+        if timeout is not None and timeout <= 0:
+            raise ValueError(f"timeout 必须为正数或 None，收到: {timeout!r}")
+
+        # 从 TASK_CONFIG 提取 gen_kwargs，过滤掉元字段
+        gen_kwargs = {k: v for k, v in cfg.items() if k not in _META_KEYS}
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        payload = _InferPayload(
+            messages=messages,
+            task_type=task_type,
+            gen_kwargs=gen_kwargs,
+            want_tool_call=want_tool_call,
+            audio=audio,
+        )
+        counter = next(self._counter)
+        await self._queue.put((priority, counter, fut, payload))
+
+        # 确保 worker 已启动（lazy）
+        self._ensure_worker()
+        return fut
+
     async def infer(
         self,
         messages: list[dict],
@@ -214,7 +269,13 @@ class LLMService:
             RuntimeError: client.create_chat_completion 内部崩溃时通过 Future 回传。
             LookupError: client 返回 dict 缺少 choices[0]["message"]["content"]。
         """
-        return await self._infer_impl(messages, task_type, priority, timeout, audio=None)
+        fut = await self._submit(
+            messages, task_type, priority, timeout, want_tool_call=False, audio=None
+        )
+        # 等待结果，支持超时。
+        # 不用 shield：超时后 wait_for 自动 cancel(fut)，
+        # worker 下一轮取出时 fut.cancelled() 为 True，直接跳过，节省推理资源。
+        return await asyncio.wait_for(fut, timeout=timeout)
 
     async def infer_voice(
         self,
@@ -226,58 +287,49 @@ class LLMService:
     ) -> str:
         """音频推理入口（语音 NP，4.J）。
 
-        与 infer 共用 _client + _lock + priority 队列、同一调度（不开第二实例）。
-        audio 字节随 payload 透传给多模态 client，由 handler 从音频哨兵取回；messages 内
-        须含音频哨兵 content（np_note 组装，§5.3）。音频编码 + 推理略慢，默认 timeout 放宽到 60s。
+        与 infer 共用 _client + _lock + priority 队列、同一调度（不开第二实例），仅多透 audio：
+        字节随 payload 喂多模态 client，由 handler 从音频哨兵取回；messages 内须含音频哨兵
+        content（np_note 组装，§5.3）。音频编码 + 推理略慢，默认 timeout 放宽到 60s。
 
-        Raises 与 infer 一致；另若 client 非多模态（未挂 handler）会在推理时抛 RuntimeError
+        Raises 与 infer 一致；另若 client 非多模态（未挂 handler）会在推理时抛 ModelUnavailableError
         （经 Future 回传）。
         """
-        return await self._infer_impl(messages, task_type, priority, timeout, audio=audio)
+        fut = await self._submit(
+            messages, task_type, priority, timeout, want_tool_call=False, audio=audio
+        )
+        return await asyncio.wait_for(fut, timeout=timeout)
 
-    async def _infer_impl(
+    async def infer_tool(
         self,
         messages: list[dict],
         task_type: str,
-        priority: int | None,
-        timeout: float | None,
-        audio: bytes | None,
-    ) -> str:
-        """infer / infer_voice 共用实现：校验 → 入队 → 等待。audio 仅语音路径非 None。"""
-        # 入参校验（不合法立即抛，不入队）
-        if task_type not in TASK_CONFIG:
-            raise ValueError(f"未知的 task_type: {task_type!r}，合法值: {list(TASK_CONFIG)}")
-        cfg = TASK_CONFIG[task_type]
-        if cfg.get("_reserved"):
-            raise NotImplementedError(
-                f"task_type={task_type!r} 标记为 _reserved=True，MVP 阶段不可用"
-            )
-        # priority 为 None 时从 TASK_CONFIG 取默认值
-        if priority is None:
-            priority = cfg["priority"]
-        if priority not in (1, 2, 3):
-            raise ValueError(f"priority 必须为 1/2/3，收到: {priority!r}")
-        if timeout is not None and timeout <= 0:
-            raise ValueError(f"timeout 必须为正数或 None，收到: {timeout!r}")
+        priority: int | None = None,
+        timeout: float | None = 30.0,
+    ) -> dict:
+        """tool-call 推理入口。
 
-        # 从 TASK_CONFIG 提取 gen_kwargs，过滤掉元字段
-        gen_kwargs = {k: v for k, v in cfg.items() if k not in _META_KEYS}
+        走与 infer 相同的 PriorityQueue / Lock / worker，区别在于：
+        - payload.want_tool_call=True，worker 取 tool_calls[0] 而非 content
+        - 返回 tool_calls[0] 字典，包含 type/function/id 字段
 
-        # 入队
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future[str] = loop.create_future()
-        payload = _InferPayload(
-            messages=messages, task_type=task_type, gen_kwargs=gen_kwargs, audio=audio
+        Args:
+            messages: 标准 chat 消息列表。
+            task_type: TASK_CONFIG 中的合法 key（须含 tools/tool_choice 字段）。
+            priority: 同 infer，None 时从 TASK_CONFIG 取默认值。
+            timeout: 最大等待时间（含排队 + 推理）秒数。
+
+        Returns:
+            tool_calls[0] 字典，含 type、function（name + arguments JSON 字符串）。
+
+        Raises:
+            ValueError: task_type 不在 TASK_CONFIG，或 priority/timeout 非法。
+            NotImplementedError: task_type 标 _reserved=True。
+            asyncio.TimeoutError: 超时。
+            LookupError: client 返回的 tool_calls 缺失或为空。
+        """
+        fut = await self._submit(
+            messages, task_type, priority, timeout, want_tool_call=True
         )
-        counter = next(self._counter)
-        await self._queue.put((priority, counter, fut, payload))
-
-        # 确保 worker 已启动（lazy）
-        self._ensure_worker()
-
-        # 等待结果，支持超时。
-        # 不用 shield：超时后 wait_for 自动 cancel(fut)，
-        # worker 下一轮取出时 fut.cancelled() 为 True，直接跳过，节省推理资源。
         return await asyncio.wait_for(fut, timeout=timeout)
 
     async def aclose(self) -> None:
@@ -335,14 +387,32 @@ class LLMService:
                         **audio_kwarg,
                         **payload.gen_kwargs,
                     )
-                try:
-                    text: str = result_dict["choices"][0]["message"]["content"]
-                except (KeyError, IndexError, TypeError) as e:
-                    raise LookupError(
-                        f"client 返回 dict 格式异常，缺少 choices[0]['message']['content']: {e}"
-                    ) from e
-                if not fut.done():
-                    fut.set_result(text)
+                if payload.want_tool_call:
+                    # tool_call 路径：取 choices[0]["message"]["tool_calls"][0]
+                    # 显式 raise 的 LookupError 不被下面 (KeyError, IndexError, TypeError)
+                    # 捕获（它们都是 LookupError 子类，反向不成立），直接穿透到 set_exception。
+                    try:
+                        tool_calls = result_dict["choices"][0]["message"].get("tool_calls")
+                    except (KeyError, IndexError, TypeError) as e:
+                        raise LookupError(
+                            f"client 返回 dict 格式异常，缺少 tool_calls: {e}"
+                        ) from e
+                    if not tool_calls:
+                        raise LookupError(
+                            "client 返回 dict 缺少 tool_calls 或 tool_calls 为空列表"
+                        )
+                    if not fut.done():
+                        fut.set_result(tool_calls[0])
+                else:
+                    # content 路径（原有逻辑，不变）
+                    try:
+                        text: str = result_dict["choices"][0]["message"]["content"]
+                    except (KeyError, IndexError, TypeError) as e:
+                        raise LookupError(
+                            f"client 返回 dict 格式异常，缺少 choices[0]['message']['content']: {e}"
+                        ) from e
+                    if not fut.done():
+                        fut.set_result(text)
             except asyncio.CancelledError:
                 # worker 被取消，清理后退出
                 if not fut.done():

@@ -1848,3 +1848,56 @@ def test_notes_voice_missing_client_id_returns_422(tmp_dal: DAL, monkeypatch) ->
         headers=_auth(),
     )
     assert resp.status_code == 422
+
+
+# ── DEVICE_WARNING / AUDIO_LEVEL WS 转发测试 ─────────────────────────────────
+
+
+def test_device_warning_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
+    """publish device.warning → 已连 WS 收到 {"topic":"device.warning",...}。
+
+    DEVICE_WARNING / DeviceWarningPayload 导入放函数体内（RED 阶段常量或转发注册
+    尚未到位时，顶层 import 不炸，分得清「feature-missing」还是「import 错」）。
+    """
+    from backend.core.events import DEVICE_WARNING, DeviceWarningPayload  # noqa: PLC0415
+
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws:
+            payload = DeviceWarningPayload(
+                message="设备已断开", device_name="MacBook Pro 麦克风"
+            )
+            t = threading.Thread(target=lambda: orch.publish(DEVICE_WARNING, payload))
+            t.start()
+            t.join()
+
+            msg = ws.receive_json()
+            assert msg["topic"] == "device.warning"
+            assert msg["payload"]["message"] == "设备已断开"
+            assert msg["payload"]["device_name"] == "MacBook Pro 麦克风"
+
+
+def test_audio_level_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
+    """publish audio.level → 已连 WS 收到 {"topic":"audio.level","payload":{"rms":...}}。
+
+    AUDIO_LEVEL / AudioLevelPayload 导入放函数体内（RED 阶段两者尚不存在）。
+    """
+    from backend.core.events import AUDIO_LEVEL, AudioLevelPayload  # noqa: PLC0415
+
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    orch = create_orchestrator(tmp_dal)
+    app = create_app(orch)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws:
+            payload = AudioLevelPayload(rms=0.42)
+            t = threading.Thread(target=lambda: orch.publish(AUDIO_LEVEL, payload))
+            t.start()
+            t.join()
+
+            msg = ws.receive_json()
+            assert msg["topic"] == "audio.level"
+            assert abs(msg["payload"]["rms"] - 0.42) < 1e-6

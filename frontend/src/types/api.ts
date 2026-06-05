@@ -199,6 +199,12 @@ export interface SceneChangedMsg {
   is_active: number // SQLite 0 | 1，与 SceneDTO.is_active 对齐
 }
 
+// device.warning：持久化设备被拔走 / 不在场，后端已回落到 fallback 设备，通知前端提示。
+export interface DeviceWarningMsg {
+  message: string
+  device_name: string
+}
+
 export type LlmState = "idle" | "loading" | "running" | "downloading"
 
 export interface LlmStatusMsg {
