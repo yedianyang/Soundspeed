@@ -32,7 +32,8 @@ _MAX_SUFFIX_ITER = 1000
 _NO_EXCLUDE_TAKE_ID = -1
 
 # QP 场次编号归一：剥 Scene/场/Sc/S 前缀 + 分隔符，保留数字+后缀，统一大写。
-_SCENE_PREFIX_RE = re.compile(r"^(?:scene|场|sc|s)[\s_\-]*", re.IGNORECASE)
+# (?=\d) 前瞻：前缀只在其后（跨可选分隔符）紧跟数字时才剥，避免误剥 `sce3` 这类。
+_SCENE_PREFIX_RE = re.compile(r"^(?:scene|场|sc|s)[\s_\-]*(?=\d)", re.IGNORECASE)
 
 
 def normalize_scene_code(raw: str) -> str:
@@ -42,6 +43,7 @@ def normalize_scene_code(raw: str) -> str:
     例：'Scene_3A'→'3A'，'s72'→'72'，'场3'→'3'，'3'→'3'，''→''。
     读、写两侧都过一遍再精确比对，覆盖「同号不同前缀」的常见变体；
     剥不掉前缀的原样大写返回（不破坏纯中文/特殊编号）。
+    前缀只在其后（跨可选分隔符）紧跟数字时才剥，避免误剥 `sce3` 这类。
     """
     s = raw.strip()
     if not s:
@@ -281,7 +283,11 @@ class DAL:
             conn.close()
 
     def list_scenes_readonly(self) -> list[dict]:
-        """QP 场次目录用：按创建序返回全部场次（只读连接）。"""
+        """QP 场次目录用：按创建序返回全部场次（只读连接）。
+
+        只返 QP 场次目录所需最小列集合（scene_id/scene_code/location/int_ext/
+        time_of_day/shoot_date），不是 list_scenes 的全列只读版。
+        """
         with self._readonly_conn() as conn:
             rows = conn.execute(
                 "SELECT scene_id, scene_code, location, int_ext, time_of_day, shoot_date "
@@ -298,6 +304,7 @@ class DAL:
         target = normalize_scene_code(scene_ref)
         if not target:
             return None
+        # 全表扫：场次量级 O(10¹)，不加 index 可接受，别误当遗漏优化去改。
         for s in self.list_scenes_readonly():
             if normalize_scene_code(s["scene_code"]) == target:
                 return int(s["scene_id"])
