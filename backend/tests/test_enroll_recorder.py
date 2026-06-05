@@ -74,7 +74,13 @@ def test_start_stop_accumulates_channel0():
     src = _FiniteSource(n_chunks=3, value=1000, chunk_frames=1600)
     rec = EnrollRecorder(make_source=lambda: src)
     rec.start()
-    # 源有限，线程会自己跑完；stop 内 join 即是屏障
+    # 有限源会自行耗尽。等线程跑完再 stop —— 否则 stop 可能在消费完前就置停止标志，
+    # 导致循环提前 break、buffer 不全（之前的 sleep 只是侥幸掩盖了这个竞态）。
+    for _ in range(200):
+        if not rec.running:
+            break
+        time.sleep(0.01)
+    assert not rec.running
     pcm = rec.stop()
     assert pcm.dtype == np.int16
     assert len(pcm) == 3 * 1600
