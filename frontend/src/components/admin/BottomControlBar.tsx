@@ -413,7 +413,7 @@ export default function BottomControlBar({
           title={recDisabled ? recHint ?? "无法录制" : isRecording ? "停止录制" : "开始录制"}
         >
           <span className="text-xs font-mono tracking-wider font-semibold">
-            {isRecording ? formatElapsed(elapsed) : "REC"}
+            {isRecording ? formatElapsed(elapsed) : "Capture"}
           </span>
         </Button>
 
