@@ -102,6 +102,46 @@ class GemmaClient:
         # Response | Iterator）泄漏到本层（否则 result: dict 赋值处处需 cast/ignore）。
         self._llm: Any = Llama(model_path=resolved_path, **params)  # type: ignore[arg-type]
 
+        # 多模态 handler 的 CHAT_FORMAT（继承 Gemma4ChatHandler）**不渲染工具声明**（无 FunctionGemma
+        # <|tool> 宏），带 tools 的请求模型看不到工具 → auto 路径不调工具、forced 路径靠 grammar 兜。
+        # 为「文本 + tools」请求另建 GGUF 内嵌的原生 FunctionGemma Jinja formatter（会渲染 tools），
+        # create_chat_completion 按需临时换上（_lock 串行下无竞态）。音频/图像仍走多模态 handler。
+        # 纯文本 GemmaClient（无 mmproj）的 Llama 本就用内嵌模板渲染 tools，无需此 handler，留 None。
+        self._text_tool_handler: Any = None
+        if self._handler is not None:
+            self._text_tool_handler = self._build_native_tool_handler()
+
+    def _build_native_tool_handler(self) -> Any:
+        """从 GGUF 内嵌 chat_template 建原生 FunctionGemma Jinja formatter（渲染 tools 声明）。
+
+        多模态 handler 装上后 Llama 用其 CHAT_FORMAT（不含工具宏），故文本 + tools 请求需换回此
+        原生 formatter。无内嵌模板（理论不该发生）返回 None，create_chat_completion 退回原 handler。
+        """
+        from llama_cpp.llama_chat_format import Jinja2ChatFormatter  # noqa: PLC0415
+
+        # 整体兜底：取不到内嵌模板 / token（如测试用 FakeLlama，或非 gemma 模型）→ 返回 None，
+        # create_chat_completion 退回原 handler（多模态/默认），不因此构造失败。
+        try:
+            template = self._llm.metadata.get("tokenizer.chat_template")
+            if not template:
+                return None
+
+            # bos/eos 取自模型自身 token。必须 special=True：默认 detokenize 剥特殊 token 会返回空串，
+            # 导致 Jinja 模板不 prepend <bos> → prompt 坏 → 模型立即吐 EOS（空输出）。空则兜底字面量。
+            def _tok_text(token_id: int) -> str:
+                try:
+                    return self._llm.detokenize([token_id], special=True).decode("utf-8", "ignore")
+                except Exception:  # noqa: BLE001
+                    return ""
+
+            bos = _tok_text(self._llm.token_bos()) or "<bos>"
+            eos = _tok_text(self._llm.token_eos()) or "<eos>"
+            return Jinja2ChatFormatter(
+                template=template, bos_token=bos, eos_token=eos
+            ).to_chat_handler()
+        except Exception:  # noqa: BLE001
+            return None
+
     def create_chat_completion(
         self,
         messages: list[dict],
@@ -114,15 +154,24 @@ class GemmaClient:
                 raise ModelUnavailableError("纯文本 GemmaClient 不支持音频推理（未挂多模态 handler）")
             if not isinstance(audio, (bytes, bytearray)):
                 raise TypeError(f"audio 必须是 bytes，收到 {type(audio).__name__}")
-            # _lock 串行下设置该次请求音频，handler.load_image(哨兵) 取回；推理后必复位避免串号。
+            # 音频必须走多模态 handler（mtmd 上下文）；其 CHAT_FORMAT 不渲染 tools 但 voice NP
+            # 走 forced tool_choice，grammar 兜工具，无碍。_lock 串行下设音频，推理后必复位避免串号。
             self._handler.set_pending_audio(bytes(audio))
             try:
                 result: dict = self._llm.create_chat_completion(messages=messages, **kwargs)
             finally:
                 self._handler.set_pending_audio(None)
             return result
-        result = self._llm.create_chat_completion(messages=messages, **kwargs)
-        return result
+        # 文本 + tools：多模态 handler 不渲染工具声明 → 临时换 GGUF 原生 FunctionGemma formatter。
+        # _lock（LLMService 层）串行化所有 client 调用，故 chat_handler 的临时换/还原无竞态。
+        if self._text_tool_handler is not None and kwargs.get("tools"):
+            prev = self._llm.chat_handler
+            self._llm.chat_handler = self._text_tool_handler
+            try:
+                return self._llm.create_chat_completion(messages=messages, **kwargs)
+            finally:
+                self._llm.chat_handler = prev
+        return self._llm.create_chat_completion(messages=messages, **kwargs)
 
 
 class StubClient:
