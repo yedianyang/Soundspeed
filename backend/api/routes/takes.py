@@ -23,6 +23,7 @@ TakeDTO 有意省略 performer_issues / audio_quality（codex P2）：
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Literal
@@ -31,6 +32,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.api.auth import require_admin
+from backend.api.routes.query import run_qp_and_broadcast
 from backend.core.events import (
     SCENE_CHANGED,
     TAKE_CHANGED,
@@ -43,6 +45,7 @@ from backend.core.events import (
     TakeEndPayload,
     TakeStartPayload,
 )
+from backend.pipelines.memo_route import classify_memo
 from backend.pipelines.note_parse import NoteParseError, parse_note
 
 logger = logging.getLogger(__name__)
@@ -299,6 +302,8 @@ class NoteCreateBody(BaseModel):
     ts: float | None = None
     # 前端生成的乐观 pending 去重键（crypto.randomUUID），原样回传到 note.processed。
     client_id: str | None = None
+    # WS 连接标识：query 分支据此把答案广播到 qp.answer.{conn_id}（前端按前缀认领）。
+    conn_id: str | None = None
 
 
 class NoteOut(BaseModel):
@@ -322,6 +327,23 @@ class NoteListOut(BaseModel):
     events: list[NoteOut]
 
 
+# query 分支 fire-and-forget task 持有集：防 asyncio.create_task 结果被 GC（Python 文档建议）。
+_qp_tasks: set[asyncio.Task] = set()
+
+
+def _qp_task_done(task: asyncio.Task) -> None:
+    _qp_tasks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("qp 调度 task 异常: %r", task.exception())
+
+
+def _schedule_qp(text: str, conn_id: str, **kwargs) -> None:
+    """调度 run_qp_and_broadcast 为 fire-and-forget task（kwargs: dal/service/cm）。"""
+    task = asyncio.create_task(run_qp_and_broadcast(text, conn_id, **kwargs))
+    _qp_tasks.add(task)
+    task.add_done_callback(_qp_task_done)
+
+
 @router.post("/notes", status_code=202)
 async def create_note(
     body: NoteCreateBody,
@@ -340,6 +362,23 @@ async def create_note(
         note = parse_note(body.text, ts)
     except NoteParseError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # 入口调度器（块③）：query → QP fire-and-forget 广播；note/任何失败 → 现有 NP。
+    # 仅当有 conn_id（query 答案要广播到 qp.answer.{conn_id}）且 LLM 就绪、且非 @显式类别时分类。
+    # classify 有意留在 202 关键路径（route 须在 202 时知道 kind 才能告诉前端 query/note，
+    # 决定要不要撤掉乐观 pending）；其延迟由前端乐观 pending 提前到 await 前藏掉，故后端保持简单。
+    service = getattr(request.app.state, "llm_service", None)
+    if service is not None and body.conn_id and not body.text.lstrip().startswith("@"):
+        kind = await classify_memo(note.raw_text, service)
+        if kind == "query":
+            _schedule_qp(
+                note.raw_text,
+                body.conn_id,
+                dal=orchestrator.dal,
+                service=service,
+                cm=request.app.state.connection_manager,
+            )
+            return {"status": "processing", "kind": "query"}
 
     # 2. fire-and-forget NP Pipeline
     try:
