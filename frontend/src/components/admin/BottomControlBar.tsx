@@ -392,6 +392,19 @@ export default function BottomControlBar({
             >
               <Undo2 className="size-5" />
             </Button>
+
+            {/* LLM 历史一级入口：紧跟撤销按钮右侧。淡主题色 pill + 未读点描背景边，无装饰图标。 */}
+            <Button
+              variant="ghost"
+              onClick={onOpenArchive}
+              className="relative gap-1.5 h-10 px-4 rounded-full bg-primary/10 hover:bg-primary/15 text-primary text-sm font-medium active:scale-95 transition-all"
+              title="LLM 反馈历史：QP 问答 + L2 推送全历史"
+            >
+              LLM 历史
+              {archiveUnread > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-primary ring-2 ring-background" />
+              )}
+            </Button>
           </div>
         </div>
 
@@ -421,28 +434,12 @@ export default function BottomControlBar({
         )}
       </div>
 
-      {/* Log 行 + LLM 反馈一级入口 */}
+      {/* Log */}
       <div className="px-4 pb-1.5 pt-0.5 border-t">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            {/* LLM 反馈一级入口（带未读点）：点开 QP 问答 + L2 推送全历史档案 Sheet。
-                常驻淡主题色 pill 提升可见性，未读点描背景色浮出，无装饰图标。 */}
-            <button
-              type="button"
-              onClick={onOpenArchive}
-              className="relative flex items-center h-7 px-3 rounded-full text-[11px] font-medium text-primary bg-primary/10 hover:bg-primary/20 transition-colors"
-              title="LLM 反馈历史：QP 问答 + L2 推送全历史"
-            >
-              LLM 历史
-              {archiveUnread > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-primary ring-2 ring-background" />
-              )}
-            </button>
-            <span className="text-muted-foreground/30 text-[11px]">·</span>
-            <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap py-1">
-              <span className="size-1.5 rounded-full bg-green-500 flex-shrink-0" />
-              <span>debug log</span>
-            </div>
+          <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap py-1">
+            <span className="size-1.5 rounded-full bg-green-500 flex-shrink-0" />
+            <span>debug log</span>
           </div>
           <span className="text-[10px] font-mono text-muted-foreground/50">
             powered by Gemma 4
