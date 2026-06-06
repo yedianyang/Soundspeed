@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 # 默认模型路径，由环境变量覆盖
 _DEFAULT_MODEL_PATH = "models/gemma-4-E4B-it-Q4_K_M.gguf"
 
+# Gemma 上 GPU 的显存需求估计（_resolve_gpu_layers 用，查可用显存决定 GPU/CPU）：
+# 权重 = gguf 大小 × 膨胀系数；再加 KV/计算缓冲余量。经验值（8GB 实测），
+# 随 n_ctx / 模型更换需复核——这是个 advisory 启发式，不是精确账。
+_VRAM_WEIGHT_FACTOR = 1.15
+_VRAM_RUNTIME_RESERVE_BYTES = 1 << 30  # 1GB：KV cache + 计算缓冲余量
+
 # llama-cpp-python 加载参数（来自 0.C spike 选型，llm-backend-selection v0.4 §11.3）
 # n_ctx=8192：从 v0.3 的 4096 升一倍，支持长 take 场景（剧本 100+ 行 / 5+ 分钟转录），
 # Q4_K_M @ 8192 实测 RSS ~6.5 GB（M1 Max 16 GB 余量充足，见 llm-backend-selection §3.3）。
@@ -152,7 +158,7 @@ class GemmaClient:
             if not torch.cuda.is_available():
                 return wanted
             free, _total = torch.cuda.mem_get_info()
-            need = os.path.getsize(model_path) * 1.15 + (1 << 30)
+            need = os.path.getsize(model_path) * _VRAM_WEIGHT_FACTOR + _VRAM_RUNTIME_RESERVE_BYTES
             if free < need:
                 logger.warning(
                     "可用显存 %.1fGB < Gemma 估计需求 %.1fGB → 走 CPU（GPU 已被 whisper/pyannote 占）",

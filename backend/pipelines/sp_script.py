@@ -413,6 +413,14 @@ def _normalize_characters(lines: list[ParsedLine]) -> list[ParsedLine]:
     ]
 
 
+def _finalize_lines(lines: list[ParsedLine]) -> list[ParsedLine]:
+    """解析输出落库前的统一收尾：括号语气并入下一行 → 角色名归一。
+
+    parse_scene_block / parse_scene_block_fc（含兜底）三条出口共用，避免重复拼接。
+    """
+    return _normalize_characters(_merge_parentheticals(lines))
+
+
 def _parse_slugline(header: str) -> tuple[str | None, Slugline]:
     """从场头行抽 scene_code + slugline 三要素（best-effort 正则，仅供展示/去重）。"""
     s = header.strip()
@@ -575,9 +583,7 @@ async def parse_scene_block(
         priority=3,
         timeout=timeout,
     )
-    parsed_lines = _normalize_characters(
-        _merge_parentheticals(_parse_lines_output(raw_output, body))
-    )  # 永不抛
+    parsed_lines = _finalize_lines(_parse_lines_output(raw_output, body))  # 永不抛
     return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=parsed_lines)]
 
 
@@ -613,12 +619,10 @@ async def parse_scene_block_fc(
             timeout=timeout,
         )
     except LookupError:  # 模型没走 FC（tool_calls 缺失）→ 兜底，不崩
-        fallback = _normalize_characters(_merge_parentheticals(_fallback_lines(body)))
+        fallback = _finalize_lines(_fallback_lines(body))
         return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=fallback)]
 
-    parsed_lines = _normalize_characters(
-        _merge_parentheticals(_parse_fc_lines(tool_call, body))
-    )  # 永不抛
+    parsed_lines = _finalize_lines(_parse_fc_lines(tool_call, body))  # 永不抛
     return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=parsed_lines)]
 
 

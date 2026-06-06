@@ -262,12 +262,8 @@ async def list_all_characters(
     from backend.pipelines.sp_script import normalize_character
 
     dal = request.app.state.orchestrator.dal
-    seen: dict[str, None] = {}
-    for raw in dal.list_all_characters():
-        norm = normalize_character(raw)
-        if norm:
-            seen.setdefault(norm, None)
-    return {"characters": sorted(seen)}
+    norms = {normalize_character(raw) for raw in dal.list_all_characters()}
+    return {"characters": sorted(n for n in norms if n)}
 
 
 # ── 读剧本端点（scene heading 票加，2026-06-01）────────────────────────────────
@@ -368,14 +364,15 @@ async def update_scene_script(
 
     from backend.pipelines.sp_script import normalize_character
 
+    # insert_script 取 MAX(version)+1，故新版本即 latest.version+1（无旧版则首版=1）。
+    new_version = latest["version"] + 1 if latest is not None else 1
     script_id = dal.insert_script(scene_id, body.raw_text)
     for line_no, ln in enumerate(body.lines, start=1):
         dal.insert_script_line(script_id, line_no, normalize_character(ln.character), ln.text)
-    new = dal.get_latest_script(scene_id)
     return ScriptCommitOut(
         scene_id=scene_id,
         script_id=script_id,
-        version=new["version"] if new else 1,
+        version=new_version,
         line_count=len(body.lines),
         skipped=False,
     )
