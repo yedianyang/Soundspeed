@@ -10,7 +10,7 @@ import type {
   TranscriptSegmentDTO,
 } from "@/types/api"
 
-import type { NoteFailedMsg, NoteProcessedMsg, PendingNote } from "@/types/api"
+import type { FeedReceipt, NoteFailedMsg, NoteProcessedMsg, PendingNote } from "@/types/api"
 
 export type ConnectionState = "connecting" | "open" | "closed" | "no-token"
 
@@ -59,6 +59,9 @@ interface SessionState {
   // pending notes: 已提交、等待 NP Pipeline 归置
   pendingNotes: PendingNote[]
 
+  // 就地队列的 note 回执（done 态，note.processed 派生，3s 由组件 dismissReceipt 自走）
+  feedReceipts: FeedReceipt[]
+
   // note 队列版本号：note.processed 落库后递增，NoteList 据此 refetch resolved（让落定的 note 及时显示，
   // 不只移除 pending）。提交时不 bump——那时 note 未落库，refetch 拿不到，pending 已由 store 直接显示。
   notesVersion: number
@@ -99,6 +102,7 @@ interface SessionState {
   noteProcessed: (m: NoteProcessedMsg) => void
   noteFailed: (m: NoteFailedMsg) => void
   retryPending: (clientId: string) => void
+  dismissReceipt: (clientId: string) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -111,6 +115,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   takes: new Map(),
   llm: { state: "idle", taskType: null },
   pendingNotes: [],
+  feedReceipts: [],
   notesVersion: 0,
   processing: null,
   deviceWarning: null,
@@ -279,6 +284,10 @@ export const useSessionStore = create<SessionState>((set) => ({
         ? s.pendingNotes.filter((p) => p.client_id !== m.client_id)
         : s.pendingNotes,
       notesVersion: s.notesVersion + 1,
+      // 就地队列：落定时推一条 note 回执（done 态，组件 3s 后 dismissReceipt 自走）。
+      feedReceipts: m.client_id
+        ? [...s.feedReceipts, { client_id: m.client_id, category: m.category, content: m.content, ts: m.ts }]
+        : s.feedReceipts,
     })),
 
   // 4.I：NP 失败 → 按 client_id 把对应 pending 标失败态（保留在列表，渲染红 + reason + 重试），
@@ -300,6 +309,10 @@ export const useSessionStore = create<SessionState>((set) => ({
       ),
     })),
 
+  // 就地回执 3s 后由组件调用，按 client_id 移除（让回执飘走，不长期占席）。
+  dismissReceipt: (clientId) =>
+    set((s) => ({ feedReceipts: s.feedReceipts.filter((r) => r.client_id !== clientId) })),
+
   setRecording: (recording) =>
     set((state) => (state.isRecording === recording ? {} : { isRecording: recording })),
 
@@ -316,3 +329,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   // 清实时转录（REC 开始 / dev 注入开始时调，避免上一条 take 的转录残留）。
   resetSegments: () => set(() => ({ segments: { ch1: [], ch2: [] } })),
 }))
+
+// ⚠ 仅 dev：暴露 store 句柄供无后端时 Playwright 注入状态做视觉验证（P2–P5）。P6 删。
+if (import.meta.env.DEV) {
+  ;(window as unknown as { __session?: typeof useSessionStore }).__session = useSessionStore
+}

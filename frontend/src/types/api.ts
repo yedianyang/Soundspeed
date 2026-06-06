@@ -269,6 +269,14 @@ export interface NoteFailedMsg {
   client_id: string | null // 定位要标失败的 pending；null=异常/旧链路，不误标
 }
 
+// 就地队列的 note 回执（done 态，3s 自走）。由 note.processed 派生（P4 加 rawText 供「其实是提问」改判）。
+export interface FeedReceipt {
+  client_id: string
+  category: string // keep/pass/ng/issue/note
+  content: string
+  ts: number
+}
+
 // viewer.count：当前连着 /ws 的客户端总数（含场记自己），连接建立 / 断开时后端广播。
 // 驱动 header 眼睛计数。
 export interface ViewerCountMsg {

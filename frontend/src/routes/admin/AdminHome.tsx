@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import BottomControlBar from "@/components/admin/BottomControlBar"
-import NoteList from "@/components/admin/NoteList"
+import InlineFeedbackQueue from "@/components/admin/InlineFeedbackQueue"
 import { MARK_ORDER } from "@/lib/constants"
 import { cn, formatTakeLabel } from "@/lib/utils"
 import type { Status } from "@/types/take"
@@ -715,7 +715,7 @@ export default function AdminHome() {
             盖住，形成从输入框背后弹出。该距离恒定，不随控制行/REC 高度变。无 note 时 NoteList 返回 null。
             pointer-events-none 让浮层 padding 区穿透到 main；NoteList 的 Card 自带 pointer-events-auto 可滚。 */}
         <div className="pointer-events-none absolute inset-x-0 bottom-[calc(100%-26px)] z-20 px-4">
-          <NoteList takeId={currentTakeId} refreshKey={noteRefresh} />
+          <InlineFeedbackQueue />
         </div>
 
         <BottomControlBar
