@@ -57,7 +57,12 @@ class EnrollRecorder:
         return self._capped
 
     def start(self) -> None:
-        """起后台录音线程。capture 进行中 → CaptureActiveError；已在录 → EnrollBusyError。"""
+        """起后台录音线程。capture 进行中 → CaptureActiveError；已在录 → EnrollBusyError。
+
+        设备打开（make_source → 真实 PortAudio 探测/开流）在录音线程里做，不在 start()
+        的调用方阻塞 —— enroll_start 端点在 asyncio 事件循环上同步调 start()，慢/卡的
+        设备一旦在这里阻塞就会冻住整个事件循环。与 LiveAsrSession 一致（设备在采集线程开）。
+        """
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise EnrollBusyError("已有一段声纹录音在进行")
@@ -66,16 +71,16 @@ class EnrollRecorder:
             self._stop_event.clear()
             self._chunks = []
             self._capped = False
-            source = self._make_source()
             self._thread = threading.Thread(
-                target=self._run, args=(source,), name="enroll-rec", daemon=True
+                target=self._run, name="enroll-rec", daemon=True
             )
             self._thread.start()
 
-    def _run(self, source: object) -> None:
+    def _run(self) -> None:
         max_frames = int(self._max_seconds * self._sample_rate)
         total = 0
         try:
+            source = self._make_source()  # 设备探测/开流在采集线程里做，不阻塞事件循环
             with source as s:  # type: ignore[attr-defined]
                 for chunk in s:
                     if self._stop_event.is_set():

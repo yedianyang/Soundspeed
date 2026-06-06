@@ -148,3 +148,25 @@ def test_abort_discards_buffer_and_releases():
     assert not rec.running
     # abort 后再 stop 返回空（buffer 已弃）
     assert len(rec.stop()) == 0
+
+
+def test_start_does_not_block_on_slow_make_source():
+    """make_source（真实设备探测/开流可能慢甚至卡）必须在录音线程里调用，不能阻塞
+    start() 的调用方 —— enroll_start 端点在 asyncio 事件循环上同步调 start()，一旦
+    被设备打开阻塞，整个后端事件循环就冻住，前端卡在「正在启动现场麦」。
+    """
+    gate = threading.Event()
+
+    def slow_source():
+        gate.wait(timeout=2.0)  # 模拟慢/卡的设备打开
+        return _InfiniteSource()
+
+    rec = EnrollRecorder(make_source=slow_source)
+    t0 = time.monotonic()
+    try:
+        rec.start()  # 不应被 make_source 阻塞
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.5, f"start() 被 make_source 阻塞了 {elapsed:.2f}s（设备打开没移到录音线程）"
+    finally:
+        gate.set()  # 放行线程，让 stop 能收束
+        rec.stop()
