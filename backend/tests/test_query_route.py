@@ -66,3 +66,25 @@ def test_run_qp_and_broadcast_client_id_defaults_none(monkeypatch):
     cm = _StubCM()
     asyncio.run(run_qp_and_broadcast("q", "conn-9", dal=None, service=_StubService(), cm=cm))
     assert cm.calls[0][1].client_id is None
+
+
+def test_schedule_qp_broadcast_forwards_client_id(monkeypatch):
+    """schedule_qp_broadcast 把 client_id 透传进 run_qp_and_broadcast → payload。
+
+    覆盖 fire-and-forget 转发缝：上面两测直接调内层 fn，这测走调度入口（/notes 文本 query 分支实际走它）。
+    """
+    import backend.api.routes.query as q
+
+    async def _fake_query(*, text, dal, service, timeout=30.0):
+        return "答案"
+
+    monkeypatch.setattr("backend.api.routes.query.run_qp_query", _fake_query)
+    cm = _StubCM()
+
+    async def _run():
+        q.schedule_qp_broadcast("x", "c2", dal=None, service=_StubService(), cm=cm, client_id="cid-9")
+        # 等 fire-and-forget task 跑完（schedule 后立刻快照持有集，await 前任务尚未运行）。
+        await asyncio.gather(*list(q._qp_tasks))
+
+    asyncio.run(_run())
+    assert cm.calls[0][1].client_id == "cid-9"
