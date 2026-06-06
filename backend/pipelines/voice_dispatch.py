@@ -74,6 +74,8 @@ async def run_voice_dispatch(
     service: "LLMService",
     cm: Any,
     scene_context: str = "",
+    np_input: Any = None,
+    voice_runner: Any = None,
 ) -> dict:
     """语音调度器入口。返回 {"kind": "note"|"query"|"error"}。
 
@@ -89,6 +91,10 @@ async def run_voice_dispatch(
         service:      LLMService 实例（须支持 infer_voice + infer_voice_tool）。
         cm:           ConnectionManager，广播用。
         scene_context: 场次目录文本（_build_scene_catalog 输出），注入 system。
+        np_input:     NPInput 实例（含 current_take_id/take_context），由 orchestrator 构建传入。
+                      note 分支用此确保 take 上下文正确，不靠模型猜 take_id（修 FK 失败）。
+        voice_runner: 语音 NP runner，签名 (NPInput, bytes, LLMService) -> Awaitable[NPOutput]。
+                      有 np_input + voice_runner 时 note 分支委托它而非 _parse_tool_call。
     """
     # ── 组装 hop A messages ──────────────────────────────────────────────────
     from backend.llm.multimodal import AUDIO_SENTINEL  # noqa: PLC0415  延迟导入避免顶层拉 llama_cpp
@@ -149,7 +155,15 @@ async def run_voice_dispatch(
 
     # ── 分流 ──────────────────────────────────────────────────────────────────
     if is_note:
-        return await _handle_note_branch(hop_b_result, ts=ts, client_id=client_id)
+        return await _handle_note_branch(
+            hop_b_result,
+            ts=ts,
+            client_id=client_id,
+            audio=audio,
+            np_input=np_input,
+            service=service,
+            voice_runner=voice_runner,
+        )
 
     return await _handle_query_branch(
         hop_b_result,
@@ -170,20 +184,44 @@ async def _handle_note_branch(
     *,
     ts: float,
     client_id: str | None,
+    audio: bytes | None = None,
+    np_input: Any = None,
+    service: Any = None,
+    voice_runner: Any = None,
 ) -> dict:
-    """note 分支：_parse_tool_call → _persist_np_output_callable。
+    """note 分支：委托 voice_runner（有 np_input 时）或 _parse_tool_call（fallback）。
 
-    _persist_np_output_callable 由 Part C 入口接线注入。
-    接线注意：orchestrator._finalize_np 收 awaitable runner，与此处签名不同，
-    Part C 须包 adapter（await _finalize_np(coroutine_returning_NPOutput, ...)）。
+    委托路径（np_input + voice_runner 均非 None）：
+      voice_runner(np_input, audio, service) → awaitable → _persist_np_output_callable。
+      _persist_np_output_callable adapter = orchestrator._finalize_np（接 awaitable）。
+      这条路径用 _build_voice_user_message(np_input) 的 take 上下文，不靠模型猜 take_id，
+      修 FK 失败（B 集成暴露的缺口）。
+
+    Fallback 路径（np_input 或 voice_runner 为 None，通常是测试 / 无 LLM 环境）：
+      _parse_tool_call(hop_b_result) → NPOutput，包成 awaitable 再传给 callable。
+      注意：此路径 take_id 来自 hop_b_result（模型生成），可能猜错，仅测试兜底。
+
+    _persist_np_output_callable 统一接收 awaitable（返回 NPOutput），由 Part C 接线赋值
+    （adapter = orchestrator._finalize_np，接 awaitable 调 insert_note + publish）。
     """
-    from backend.pipelines.np_note import _parse_tool_call  # noqa: PLC0415
-
     try:
-        np_output = _parse_tool_call(hop_b_result)
+        if np_input is not None and voice_runner is not None and service is not None:
+            # 委托路径：voice_runner 自建正确 take 上下文 messages
+            run_awaitable = voice_runner(np_input, audio if audio is not None else b"", service)
+        else:
+            # Fallback：包 _parse_tool_call 成 awaitable（同步结果转 coroutine）
+            from backend.pipelines.np_note import _parse_tool_call  # noqa: PLC0415
+
+            _parsed = _parse_tool_call(hop_b_result)
+
+            async def _wrap_resolved(_o: Any = _parsed) -> Any:
+                return _o
+
+            run_awaitable = _wrap_resolved()
+
         if _persist_np_output_callable is not None:
             await _persist_np_output_callable(
-                np_output,
+                run_awaitable,
                 ts=ts,
                 client_id=client_id,
                 raw_text_override=None,

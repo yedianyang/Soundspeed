@@ -44,11 +44,13 @@ from backend.core.events import (
     LLM_STATUS,
     NOTE_FAILED,
     NOTE_PROCESSED,
+    QP_ANSWER,
     SCENE_CHANGED,
     TAKE_CHANGED,
     TAKE_DELETED,
     TAKE_PROCESSING,
     TAKE_SEGMENTS_UPDATED,
+    QpAnswerPayload,
 )
 from backend.core.orchestrator import Orchestrator
 
@@ -99,6 +101,29 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
         warmup_coro = getattr(orch, "_warmup_coro", None)
         if warmup_coro is not None:
             asyncio.ensure_future(warmup_coro())
+
+        # voice dispatch 接线：注入 _persist_np_output_callable + _schedule_qp_broadcast
+        # 仅当 llm_service 存在时绑定（无 LLM 时 dispatch 入口不会被调，无需接线）。
+        if app.state.llm_service is not None:
+            import backend.pipelines.voice_dispatch as _vd  # noqa: PLC0415
+
+            async def _persist_np_wrapper(
+                run_awaitable: Any, *, ts: float, client_id: str | None, raw_text_override: str | None
+            ) -> None:
+                await orch._finalize_np(
+                    run_awaitable, ts=ts, client_id=client_id, raw_text_override=raw_text_override
+                )
+
+            async def _broadcast_wrapper(
+                answer: str, conn_id: str, *, dal: Any, service: Any, cm: Any
+            ) -> None:
+                cm.broadcast(
+                    f"{QP_ANSWER}.{conn_id}",
+                    QpAnswerPayload(connection_id=conn_id, answer_text=answer),
+                )
+
+            _vd._persist_np_output_callable = _persist_np_wrapper  # type: ignore[assignment]
+            _vd._schedule_qp_broadcast = _broadcast_wrapper  # type: ignore[assignment]
 
         yield
         # shutdown：清 loop 引用。loop 停后若仍有同步 handler 触发 broadcast

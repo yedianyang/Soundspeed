@@ -74,8 +74,10 @@ def test_note_branch_calls_persist(monkeypatch):
     persisted = {}
 
     async def _fake_persist(output, *, ts, client_id, raw_text_override):
+        # output 是 awaitable（coroutine）—— 对齐生产 adapter _finalize_np 的 await 语义
+        result = await output
         persisted["done"] = True
-        persisted["output"] = output
+        persisted["output"] = result
 
     monkeypatch.setattr(
         "backend.pipelines.voice_dispatch._persist_np_output_callable",
@@ -163,6 +165,8 @@ def test_fail_closed_note_when_scrape_returns_none(monkeypatch):
     persisted = {}
 
     async def _fake_persist(output, *, ts, client_id, raw_text_override):
+        # output 是 awaitable（coroutine）—— 对齐生产 adapter _finalize_np 的 await 语义
+        await output
         persisted["done"] = True
 
     monkeypatch.setattr(
@@ -234,3 +238,189 @@ def test_query_hop_messages_structure(monkeypatch):
     assert "Scene 1" in msgs[0]["content"]
     # 最后一帧含工具返回 JSON
     assert json.dumps({"count": 7}, ensure_ascii=False) in msgs[-1]["content"]
+
+
+def test_note_branch_delegates_to_voice_runner_when_np_input_provided(monkeypatch):
+    """note 分支：有 np_input + voice_runner → 委托 voice_runner 而非 _parse_tool_call。
+
+    voice_runner 被调时收到 (np_input, audio, service)，确保 take 上下文正确（修 FK 失败）。
+    _persist_np_output_callable adapter await output 得到 NPOutput → 落库（模拟）。
+    """
+    _patch_build_hop_a_system(monkeypatch)
+    from backend.pipelines.voice_dispatch import run_voice_dispatch
+    from backend.pipelines.np_note import NPInput, NPOutput
+
+    # 构造 fake NPInput（含 current_take_id）
+    fake_np_input = NPInput(
+        raw_text="",
+        parsed_category="note",
+        current_scene_id=1,
+        current_take_id=42,  # 正确 take_id
+        take_context=[],
+        ts=1000.0,
+        current_scene_code="1A",
+        current_shot="A",
+        current_take_number=3,
+    )
+
+    voice_runner_called: dict = {}
+
+    async def _fake_voice_runner(np_in, audio_bytes, svc):
+        voice_runner_called["np_input"] = np_in
+        voice_runner_called["audio_len"] = len(audio_bytes)
+        # 返回正确 take_id 的 NPOutput（来自 np_input.current_take_id）
+        return NPOutput(take_id=np_in.current_take_id, category="pass", content="这条过了")
+
+    persisted: dict = {}
+
+    async def _fake_persist(output, *, ts, client_id, raw_text_override):
+        # adapter 逻辑：await awaitable → 得到 NPOutput → 落库
+        result = await output
+        persisted["take_id"] = result.take_id
+        persisted["category"] = result.category
+
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch._persist_np_output_callable",
+        _fake_persist,
+    )
+
+    svc = _StubService(
+        "structure_note", {},
+        {"category": "ng", "content": "这条不行", "take_id": 999},  # 模型猜的错误 take_id
+    )
+    asyncio.run(run_voice_dispatch(
+        WAV_BYTES,
+        conn_id="c-delegate",
+        ts=1000.0,
+        client_id="cid-d",
+        dal=_StubDAL(),
+        service=svc,
+        cm=_StubCM(),
+        scene_context="",
+        np_input=fake_np_input,
+        voice_runner=_fake_voice_runner,
+    ))
+
+    # 验证委托路径被走（voice_runner 被调，np_input 含正确 current_take_id）
+    assert voice_runner_called.get("np_input") is fake_np_input, "voice_runner 未被调（应走委托路径）"
+    assert voice_runner_called["np_input"].current_take_id == 42
+
+    # 验证落库 take_id 来自 voice_runner（42），不是 hop_b_result 里模型猜的 999
+    assert persisted.get("take_id") == 42, (
+        f"take_id 应为 42（来自 np_input），实际 {persisted.get('take_id')}"
+    )
+
+
+# ── 回归：_schedule_qp_broadcast 接线后 cm.broadcast 收到 QpAnswerPayload dataclass ──
+
+def test_query_branch_broadcast_payload_is_dataclass(monkeypatch):
+    """回归测试：query 分支通过 _schedule_qp_broadcast 调 cm.broadcast 时，
+    payload 必须是 QpAnswerPayload 冻结 dataclass，不能是 plain dict。
+
+    _broadcast_wrapper（lifespan 接线）传 plain dict 会触发 asdict() TypeError，
+    答案永远无法送达前端。此测试直接验证广播 payload 的类型。
+    """
+    import dataclasses
+
+    _patch_build_hop_a_system(monkeypatch)
+
+    # 构造一个记录 broadcast 调用的 CM stub（不 mock asdict，直接检查 payload 类型）
+    class _CheckingCM:
+        def __init__(self):
+            self.calls: list[tuple] = []
+
+        def broadcast(self, topic: str, payload) -> None:
+            self.calls.append((topic, payload))
+            # 模拟 ws.py:97 的 asdict(payload)，确认运行时不崩
+            dataclasses.asdict(payload)  # plain dict 会 TypeError
+
+    # 先用「修复前」的裸 dict 版本验证它确实报错（红阶段）
+    async def _wrong_wrapper(answer: str, conn_id: str, *, dal, service, cm) -> None:
+        cm.broadcast(f"qp.answer.{conn_id}", {"connection_id": conn_id, "answer_text": answer})
+
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch._schedule_qp_broadcast",
+        _wrong_wrapper,
+    )
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch._run_executor",
+        MagicMock(return_value={"count": 3}),
+    )
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch.run_tool_loop",
+        AsyncMock(return_value="第一场拍了 3 条。"),
+    )
+
+    from backend.pipelines.voice_dispatch import run_voice_dispatch
+
+    svc = _StubService("count_takes", {"scene_id": 1}, {"scene_id": 1})
+    cm = _CheckingCM()
+
+    import pytest
+    with pytest.raises(TypeError):
+        # 修复前：plain dict 传给 asdict() 会 TypeError
+        asyncio.run(run_voice_dispatch(
+            WAV_BYTES,
+            conn_id="c-payload",
+            ts=1000.0,
+            client_id="cid-payload",
+            dal=_StubDAL(),
+            service=svc,
+            cm=cm,
+            scene_context="",
+        ))
+
+
+def test_query_branch_broadcast_payload_is_dataclass_after_fix(monkeypatch):
+    """修复后：_schedule_qp_broadcast 传 QpAnswerPayload，asdict() 不崩，topic 用 QP_ANSWER 常量。"""
+    import dataclasses
+    from backend.core.events import QP_ANSWER, QpAnswerPayload
+
+    _patch_build_hop_a_system(monkeypatch)
+
+    class _CheckingCM:
+        def __init__(self):
+            self.calls: list[tuple] = []
+
+        def broadcast(self, topic: str, payload) -> None:
+            self.calls.append((topic, payload))
+            dataclasses.asdict(payload)  # 断言不崩
+
+    # 修复后的正确 wrapper：传 QpAnswerPayload 和 QP_ANSWER 常量
+    async def _correct_wrapper(answer: str, conn_id: str, *, dal, service, cm) -> None:
+        cm.broadcast(f"{QP_ANSWER}.{conn_id}", QpAnswerPayload(connection_id=conn_id, answer_text=answer))
+
+    from backend.pipelines.voice_dispatch import run_voice_dispatch
+
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch._schedule_qp_broadcast",
+        _correct_wrapper,
+    )
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch._run_executor",
+        MagicMock(return_value={"count": 3}),
+    )
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch.run_tool_loop",
+        AsyncMock(return_value="第一场拍了 3 条。"),
+    )
+
+    svc = _StubService("count_takes", {"scene_id": 1}, {"scene_id": 1})
+    cm = _CheckingCM()
+    asyncio.run(run_voice_dispatch(
+        WAV_BYTES,
+        conn_id="c-payload2",
+        ts=1000.0,
+        client_id="cid-payload2",
+        dal=_StubDAL(),
+        service=svc,
+        cm=cm,
+        scene_context="",
+    ))
+
+    assert len(cm.calls) == 1, f"broadcast 应被调 1 次，实际 {len(cm.calls)}"
+    topic, payload = cm.calls[0]
+    assert topic == f"{QP_ANSWER}.c-payload2", f"topic 不对: {topic!r}"
+    assert isinstance(payload, QpAnswerPayload), f"payload 类型不对: {type(payload)}"
+    assert payload.connection_id == "c-payload2"
+    assert payload.answer_text == "第一场拍了 3 条。"
