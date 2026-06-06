@@ -62,6 +62,10 @@ class GemmaClient:
 
     不暴露内部 Llama 对象，调用方只能通过 create_chat_completion 接口，
     保证后续替换为 Ollama / vLLM 时只改 client.py。
+
+    ⚠️ 并发不安全：多模态实例下 create_chat_completion 对 text+tools 请求临时换/还原
+    `self._llm.chat_handler`（换原生 FunctionGemma formatter），并发调用会串 handler。
+    依赖外层串行——生产恒经 LLMService 的 `_lock`（service.py:_worker），勿绕过 service 并发直调。
     """
 
     def __init__(
@@ -164,6 +168,8 @@ class GemmaClient:
             return result
         # 文本 + tools：多模态 handler 不渲染工具声明 → 临时换 GGUF 原生 FunctionGemma formatter。
         # _lock（LLMService 层）串行化所有 client 调用，故 chat_handler 的临时换/还原无竞态。
+        # ⚠️ 3.x vision：未来 image content + tools 的请求不带 audio= kwarg，会落进本分支换原生
+        #   formatter——但原生 formatter 不处理图像嵌入，须在此判据补 content-type 守卫（届时）。
         if self._text_tool_handler is not None and kwargs.get("tools"):
             prev = self._llm.chat_handler
             self._llm.chat_handler = self._text_tool_handler

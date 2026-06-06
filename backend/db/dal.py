@@ -34,10 +34,28 @@ _NO_EXCLUDE_TAKE_ID = -1
 # QP 场次编号归一：剥 Scene/场/Sc/S 前缀 + 分隔符，保留数字+后缀，统一大写。
 # (?=\d) 前瞻：前缀只在其后（跨可选分隔符）紧跟数字时才剥，避免误剥 `sce3` 这类。
 _SCENE_PREFIX_RE = re.compile(r"^(?:scene|场|sc|s)[\s_\-]*(?=\d)", re.IGNORECASE)
-# 中文口语「第N场」归一：第一场/第1场/第72场 → 数字（一二三…十 转阿拉伯）。
-_CN_NUM = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
-           "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
+# 中文口语「第N场」归一：第一场/第1场/第72场/第十一场 → 阿拉伯数字。
+_CN_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
 _SCENE_ORDINAL_RE = re.compile(r"^第\s*([0-9一二三四五六七八九十]+)\s*场")
+
+
+def _cn_numeral_to_arabic(s: str) -> str | None:
+    """中文数字 1-99 → 阿拉伯字符串；纯阿拉伯原样返回；无法解析返回 None。
+
+    覆盖电影场次常见区间：一→1，十→10，十一→11，二十→20，二十一→21，九十九→99。
+    超 99（百/千）或含未知字符返回 None。
+    """
+    if s.isdigit():
+        return s
+    if "十" not in s:
+        return str(_CN_DIGITS[s]) if s in _CN_DIGITS else None
+    tens_part, _, ones_part = s.partition("十")
+    if (tens_part and tens_part not in _CN_DIGITS) or (ones_part and ones_part not in _CN_DIGITS):
+        return None
+    tens = _CN_DIGITS.get(tens_part, 1) if tens_part else 1  # 「十X」→ 十位=1
+    ones = _CN_DIGITS.get(ones_part, 0) if ones_part else 0  # 「X十」→ 个位=0
+    return str(tens * 10 + ones)
 
 # 万能笔 authorizer：只放行 SELECT 系动作，其余 DENY（挡 ATTACH/写/非 data_version PRAGMA）。
 # FTS 影子表（_config/_idx/_data/_docsize）按设计可读：MATCH 内部需要 _config/_idx，
@@ -66,16 +84,19 @@ def normalize_scene_code(raw: str) -> str:
     读、写两侧都过一遍再精确比对，覆盖「同号不同前缀」的常见变体；
     剥不掉前缀的原样大写返回（不破坏纯中文/特殊编号）。
     前缀只在其后（跨可选分隔符）紧跟数字时才剥，避免误剥 `sce3` 这类。
-    中文口语「第一场」「第72场」是 4B 真模型实测高频传法（e2e Task 11 发现）——
-    normalize 在此收编，避免模型用口语场次号查不到而瞎答。
+    中文口语「第一场」「第72场」「第十一场」是 4B 真模型实测高频传法（e2e Task 11 发现）——
+    normalize 在此收编，避免模型用口语场次号查不到而瞎答。中文数字仅支持 1-99（超 99 或
+    「第3场A」这类带字母后缀的口语不在收编内，落回前缀剥离路径或原样返回）。
     """
     s = str(raw).strip()
     if not s:
         return ""
     m = _SCENE_ORDINAL_RE.match(s)
-    if m:  # 「第一场」/「第1场」/「第72场」→ 纯数字
-        num = m.group(1)
-        return _CN_NUM.get(num, num)
+    if m:  # 「第一场」/「第1场」/「第72场」/「第十一场」→ 纯数字
+        arabic = _cn_numeral_to_arabic(m.group(1))
+        if arabic is not None:
+            return arabic
+        # 无法解析（如超 99）→ 落回下面前缀剥离/原样
     s = _SCENE_PREFIX_RE.sub("", s)
     return s.strip().upper()
 

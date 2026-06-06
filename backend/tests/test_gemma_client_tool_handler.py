@@ -10,6 +10,8 @@ FunctionGemma formatter（渲染 tools）；音频/无 tools 仍走多模态 han
 """
 from __future__ import annotations
 
+import pytest
+
 from backend.llm.client import GemmaClient
 
 
@@ -77,3 +79,18 @@ def test_no_native_handler_no_swap() -> None:
     )
     assert c._llm.active == ["MULTIMODAL"]
     assert c._llm.chat_handler == "MULTIMODAL"
+
+
+def test_exception_in_llm_still_restores_handler() -> None:
+    # 核心不变量：text+tools 切原生后，即便 create_chat_completion 抛异常，finally 也还原多模态 handler。
+    class _BrokenLlm(_RecordingLlm):
+        def create_chat_completion(self, messages, **kwargs):  # noqa: ANN001, ANN003
+            raise RuntimeError("model crash")
+
+    c = _client(text_tool_handler="NATIVE")
+    c._llm = _BrokenLlm()  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError):
+        c.create_chat_completion(
+            messages=[{"role": "user", "content": "x"}], tools=[{"function": {"name": "t"}}]
+        )
+    assert c._llm.chat_handler == "MULTIMODAL"  # 异常路径也还原
