@@ -1,13 +1,22 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import {
+  CalendarDays,
   Eye,
+  Layers,
   Settings,
   Upload,
   X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import BottomControlBar from "@/components/admin/BottomControlBar"
 import InlineFeedbackQueue from "@/components/admin/InlineFeedbackQueue"
@@ -19,6 +28,8 @@ import { useFileNameFormat } from "@/store/filename"
 import type { Status } from "@/types/take"
 import type { LlmState, TakeStatus, TakeDTO } from "@/types/api"
 import {
+  exportTakesCsv,
+  todayRange,
   pickActiveScene,
   takesQueryKey,
   useActivateScene,
@@ -149,6 +160,26 @@ export default function AdminHome() {
   const archiveUnread = useSessionStore((s) => s.archiveUnread)
   const markArchiveRead = useSessionStore((s) => s.markArchiveRead)
   const fileFormat = useFileNameFormat((s) => s.format)
+
+  // 顶栏导出 Sound Report：下拉两项——今天 / 全部（不弹 modal）。
+  // FileName 列按当前命名格式渲染，与 UI 一致；"今天" 按 take 开录时间落在本地今天过滤。
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const handleExport = async (scope: "today" | "all") => {
+    if (exporting) return
+    setExporting(true)
+    setExportError(null)
+    try {
+      const range = scope === "today" ? todayRange() : undefined
+      await exportTakesCsv(fileFormat, scope, range)
+    } catch (err) {
+      // 不能只 console：顶栏图标下拉无内联错误位，失败会完全不可见（401/CORS 是已知坑）。
+      console.error("导出 CSV 失败", err)
+      setExportError(`导出失败：${err instanceof Error ? err.message : "未知错误"}`)
+    } finally {
+      setExporting(false)
+    }
+  }
 
   // 混合电平判新鲜度需要「现在」，但 Date.now() 是非纯函数不能在 render 调（react-hooks/purity）。
   // 故用 nowTick 状态：收到后端帧后起一个 100ms 轮询 effect 在回调里推进 nowTick（setState 不能在
@@ -611,9 +642,29 @@ export default function AdminHome() {
               <Eye />
               <span className="font-mono text-xs">{viewerCount}</span>
             </Button>
-            <Button variant="ghost" size="icon-sm" className="rounded-full text-muted-foreground" title="导出">
-              <Upload className="size-4" />
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild disabled={exporting}>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="rounded-full text-muted-foreground"
+                  title="导出 Sound Report"
+                >
+                  <Upload className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuLabel>导出 Sound Report</DropdownMenuLabel>
+                <DropdownMenuItem onClick={() => void handleExport("today")}>
+                  <CalendarDays className="size-3.5" />
+                  导出今天的内容
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => void handleExport("all")}>
+                  <Layers className="size-3.5" />
+                  导出全部内容
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <Button
               variant="ghost"
               size="icon-sm"
@@ -635,6 +686,20 @@ export default function AdminHome() {
               className="ml-auto flex-shrink-0 text-amber-600/70 hover:text-amber-600"
               title="忽略提示"
               onClick={() => setDeviceWarning(null)}
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+        )}
+        {/* 导出失败可见反馈：顶栏图标下拉本身无内联错误位，否则失败完全静默。可手动 dismiss。 */}
+        {exportError && (
+          <div className="px-4 py-1 flex items-center gap-1.5 border-b bg-destructive/10">
+            <span className="text-xs text-destructive min-w-0 truncate">{exportError}</span>
+            <button
+              type="button"
+              className="ml-auto flex-shrink-0 text-destructive/70 hover:text-destructive"
+              title="忽略提示"
+              onClick={() => setExportError(null)}
             >
               <X className="size-3.5" />
             </button>

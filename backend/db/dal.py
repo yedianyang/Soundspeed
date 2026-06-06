@@ -894,6 +894,21 @@ class DAL:
         rows = self._conn.execute(base, params).fetchall()
         return [_row_to_segment(r) for r in rows]
 
+    def list_ch1_texts_by_take(self) -> dict[int, list[str]]:
+        """一趟取全部 ch1 转录文本，按 take_id 分组、组内按 start_frame 升序。
+
+        供 CSV 导出装配「Lines」列用：一次查询替代 per-take list_segments，避免 N+1。
+        只取 ch1（对白）；ch2 备注不计入导出 Lines 列。空表返回空 dict。
+        """
+        rows = self._conn.execute(
+            "SELECT take_id, text FROM transcript_segments "
+            "WHERE ch = 1 ORDER BY take_id ASC, start_frame ASC;"
+        ).fetchall()
+        out: dict[int, list[str]] = {}
+        for r in rows:
+            out.setdefault(r["take_id"], []).append(r["text"])
+        return out
+
     def get_segment(self, segment_id: int) -> TranscriptSegment | None:
         """按 segment_id 获取单条片段，不存在返回 None。"""
         row = self._conn.execute(

@@ -26,13 +26,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.api.auth import require_admin
 from backend.api.routes.query import schedule_qp_broadcast
+from backend.core.export import (
+    FileNameFormat,
+    SegFormat,
+    build_export_rows,
+    rows_to_csv,
+)
 from backend.core.events import (
     SCENE_CHANGED,
     TAKE_CHANGED,
@@ -187,6 +195,50 @@ async def list_takes(
     dal = request.app.state.orchestrator.dal
     takes = dal.list_takes(scene_id)
     return {"takes": [TakeDTO.model_validate(t, from_attributes=True) for t in takes]}
+
+
+@router.get("/takes/export")
+async def export_takes_csv(
+    request: Request,
+    scene_prefix: str = "",
+    scene_pad: int = Query(2, ge=0, le=6),
+    shot_prefix: str = "S",
+    shot_pad: int = Query(0, ge=0, le=6),
+    take_prefix: str = "T",
+    take_pad: int = Query(3, ge=0, le=6),
+    sep: str = "_",
+    ts_from: float | None = None,
+    ts_to: float | None = None,
+    _: None = Depends(require_admin),
+) -> Response:
+    """导出 take 为 CSV（Sound Report）：text/csv + attachment 下载。
+
+    必须注册在 GET /takes/{take_id} 之前——否则 FastAPI 会把 "export" 当 take_id 解析（422）。
+    导出日期服务端生成（本地日期），首行写「导出日期：YYYY-MM-DD」，第二行表头。
+
+    FileName 列板式由 7 个 query 参数控制（前端从用户配置的命名格式传入，对齐 UI 显示）；
+    全缺省即 DEFAULT_FILENAME_FORMAT（01_S1_T001）。Content-Disposition 经 CORS expose 暴露，
+    供前端跨域读取文件名。
+
+    ts_from/ts_to（Unix 秒，半开区间）：导出范围。前端「导出今天」传本地零点起 24h；
+    「导出全部」不传，导全部 take。
+    """
+    dal = request.app.state.orchestrator.dal
+    fmt = FileNameFormat(
+        scene=SegFormat(scene_prefix, scene_pad),
+        shot=SegFormat(shot_prefix, shot_pad),
+        take=SegFormat(take_prefix, take_pad),
+        sep=sep,
+    )
+    rows = build_export_rows(dal, fmt, ts_from=ts_from, ts_to=ts_to)
+    export_date = datetime.now().strftime("%Y-%m-%d")
+    body = rows_to_csv(rows, export_date)
+    filename = f"soundspeed_takes_{export_date}.csv"
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/takes/{take_id}")
