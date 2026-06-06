@@ -208,3 +208,96 @@ def test_export_endpoint_requires_auth(tmp_dal: DAL, monkeypatch):
     c = _client(tmp_dal, monkeypatch)
     res = c.get("/api/v1/takes/export")
     assert res.status_code in (401, 403)
+
+
+# ── 命名格式（FileName 列跟随用户配置，对齐前端 formatFileName）─────────────────
+
+# 与前端 filename-format.ts 的 FILENAME_PRESETS 一一对应（同一 sample：Scene_1 / shot 1 / take 1）。
+# 后端 take_filename 必须与前端 formatFileName 同输出，否则导出 FileName 与 UI 不一致。
+_PRESET_PARITY = [
+    # (scene_prefix, scene_pad, shot_prefix, shot_pad, take_prefix, take_pad, sep, expected)
+    ("", 2, "S", 0, "T", 3, "_", "01_S1_T001"),
+    ("Sc", 0, "S", 0, "T", 2, "-", "Sc1-S1-T01"),
+    ("Scene", 0, "Shot", 0, "Take", 0, " · ", "Scene1 · Shot1 · Take1"),
+    ("", 3, "", 3, "", 3, "_", "001_001_001"),
+]
+
+
+@pytest.mark.parametrize(
+    "sp,spad,shp,shpad,tp,tpad,sep,expected", _PRESET_PARITY
+)
+def test_take_filename_matches_frontend_presets(sp, spad, shp, shpad, tp, tpad, sep, expected):
+    from backend.core.export import FileNameFormat, SegFormat, take_filename
+
+    fmt = FileNameFormat(
+        scene=SegFormat(sp, spad),
+        shot=SegFormat(shp, shpad),
+        take=SegFormat(tp, tpad),
+        sep=sep,
+    )
+    assert take_filename("Scene_1", "1", 1, fmt) == expected
+
+
+def test_take_filename_default_equals_default_take_filename():
+    # default_take_filename 是 take_filename(默认格式) 的薄封装，二者必须一致。
+    from backend.core.export import DEFAULT_FILENAME_FORMAT, take_filename
+
+    assert take_filename("Scene_12", "2B", 3, DEFAULT_FILENAME_FORMAT) == default_take_filename(
+        "Scene_12", "2B", 3
+    )
+
+
+def test_build_export_rows_uses_passed_format(tmp_dal: DAL):
+    from backend.core.export import FileNameFormat, SegFormat
+
+    _seed_take(tmp_dal, "Scene_1", "1")
+    fmt = FileNameFormat(
+        scene=SegFormat("Sc", 0), shot=SegFormat("S", 0), take=SegFormat("T", 2), sep="-"
+    )
+    rows = build_export_rows(tmp_dal, fmt)
+    assert rows[0].file_name == "Sc1-S1-T01"
+
+
+def test_export_endpoint_applies_format_query_params(tmp_dal: DAL, monkeypatch):
+    _seed_take(tmp_dal, "Scene_1", "1")
+    c = _client(tmp_dal, monkeypatch)
+    res = c.get(
+        "/api/v1/takes/export",
+        params={
+            "scene_prefix": "Sc",
+            "scene_pad": 0,
+            "shot_prefix": "S",
+            "shot_pad": 0,
+            "take_prefix": "T",
+            "take_pad": 2,
+            "sep": "-",
+        },
+        headers=_HEADERS,
+    )
+    assert res.status_code == 200
+    grid = _parse_csv(res.content)
+    # FileName 列（第 4 列，index 3）按传入格式渲染。
+    assert grid[2][3] == "Sc1-S1-T01"
+
+
+def test_export_endpoint_defaults_to_default_format(tmp_dal: DAL, monkeypatch):
+    # 不传任何格式参数 → 默认格式 01_S1_T001（与未接入格式前行为一致）。
+    _seed_take(tmp_dal, "Scene_1", "1")
+    c = _client(tmp_dal, monkeypatch)
+    res = c.get("/api/v1/takes/export", headers=_HEADERS)
+    grid = _parse_csv(res.content)
+    assert grid[2][3] == "01_S1_T001"
+
+
+def test_export_endpoint_exposes_content_disposition_for_cors(tmp_dal: DAL, monkeypatch):
+    # 跨域（dev：vite:5173 → backend:8000）下前端要读 Content-Disposition 取文件名，
+    # 必须在 CORS expose_headers 暴露，否则 fetch 读不到该头。带 Origin 的请求应回
+    # access-control-expose-headers，且含 Content-Disposition。
+    c = _client(tmp_dal, monkeypatch)
+    res = c.get(
+        "/api/v1/takes/export",
+        headers={**_HEADERS, "Origin": "http://localhost:5173"},
+    )
+    assert res.status_code == 200
+    expose = res.headers.get("access-control-expose-headers", "")
+    assert "Content-Disposition" in expose
