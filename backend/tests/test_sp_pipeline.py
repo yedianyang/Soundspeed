@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,9 +23,11 @@ from backend.pipelines.sp_script import (
     Slugline,
     _fallback_lines,
     _is_scene_header,
+    _parse_fc_lines,
     _parse_lines_output,
     _parse_slugline,
     parse_scene_block,
+    parse_scene_block_fc,
     run_sp_parse,
     split_scenes_by_slugline,
 )
@@ -187,3 +190,97 @@ def test_dataclasses():
     )
     assert s.lines[0].character is None
     assert s.lines[0].text == "动作"
+
+
+# ── 原生 function calling 路径（parse_scene_block_fc / _parse_fc_lines）──────────
+
+
+def _tool_call(lines: list) -> dict:
+    """构造 report_parsed_lines 的 tool_call dict（arguments 为 JSON 字符串）。"""
+    return {
+        "type": "function",
+        "function": {"name": "report_parsed_lines", "arguments": json.dumps({"lines": lines})},
+    }
+
+
+def _mock_llm_tool(tool_call: dict | None = None, *, raises: Exception | None = None) -> MagicMock:
+    """注入 AsyncMock.infer_tool：返回 tool_call 或抛 raises。"""
+    svc = MagicMock(spec=LLMService)
+    if raises is not None:
+        svc.infer_tool = AsyncMock(side_effect=raises)
+    else:
+        svc.infer_tool = AsyncMock(return_value=tool_call)
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_fc_parse_dialogue_and_description():
+    svc = _mock_llm_tool(_tool_call([
+        {"speaker": "罗湘", "text": "你好。"},
+        {"speaker": "", "text": "罗湘走到窗边。"},  # 空说话人 → 描述
+    ]))
+    scenes = await parse_scene_block_fc("罗湘：你好。\n罗湘走到窗边。", svc)
+    lines = scenes[0].lines
+    assert (lines[0].character, lines[0].text) == ("罗湘", "你好。")
+    assert lines[1].character is None and lines[1].text == "罗湘走到窗边。"
+
+
+@pytest.mark.asyncio
+async def test_fc_parse_with_scene_header():
+    svc = _mock_llm_tool(_tool_call([{"speaker": "罗湘", "text": "你好。"}]))
+    scenes = await parse_scene_block_fc("场3 内 咖啡馆 日\n罗湘：你好。", svc)
+    s = scenes[0]
+    assert s.scene_code == "3"
+    assert s.slugline.int_ext == "内" and s.slugline.time_of_day == "日"
+    assert "咖啡馆" in (s.slugline.location or "")
+    assert s.lines[0].character == "罗湘"
+
+
+@pytest.mark.asyncio
+async def test_fc_parse_empty_block_no_infer():
+    svc = _mock_llm_tool(_tool_call([]))
+    scenes = await parse_scene_block_fc("场3 内 咖啡馆 日", svc)  # 只有场头
+    assert scenes[0].scene_code == "3"
+    assert scenes[0].lines == []
+    svc.infer_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fc_parse_lookup_error_falls_back_no_raise():
+    # 模型没走 FC（infer_tool 抛 LookupError）→ 不抛；冒号启发式兜底，台词不丢
+    svc = _mock_llm_tool(raises=LookupError("no tool_calls"))
+    scenes = await parse_scene_block_fc("罗湘：你好。\n（罗湘坐下）", svc)
+    lines = scenes[0].lines
+    assert (lines[0].character, lines[0].text) == ("罗湘", "你好。")
+    assert lines[1].character is None and lines[1].text == "（罗湘坐下）"
+
+
+@pytest.mark.asyncio
+async def test_fc_parse_invalid_arguments_falls_back():
+    # arguments 非法 JSON → 兜底（不崩、台词不丢）
+    bad = {"type": "function", "function": {"name": "report_parsed_lines", "arguments": "{not json"}}
+    svc = _mock_llm_tool(bad)
+    scenes = await parse_scene_block_fc("甲：你好", svc)
+    assert (scenes[0].lines[0].character, scenes[0].lines[0].text) == ("甲", "你好")
+
+
+def test_parse_fc_lines_valid():
+    out = _parse_fc_lines(
+        _tool_call([{"speaker": "罗湘", "text": "你好。"}, {"speaker": "", "text": "描述行"}]),
+        ["罗湘：你好。", "描述行"],
+    )
+    assert (out[0].character, out[0].text) == ("罗湘", "你好。")
+    assert (out[1].character, out[1].text) == (None, "描述行")
+
+
+def test_parse_fc_lines_tolerates_array_items():
+    # 模型偶发吐 [说话人,台词] 数组而非 {speaker,text} → 仍能解析
+    out = _parse_fc_lines(_tool_call([["甲", "台词"]]), ["甲：台词"])
+    assert (out[0].character, out[0].text) == ("甲", "台词")
+
+
+def test_parse_fc_lines_invalid_falls_back():
+    bad = {"function": {"arguments": "garbage"}}
+    out = _parse_fc_lines(bad, ["甲：你好", "一句描述"])
+    assert (out[0].character, out[0].text) == ("甲", "你好")
+    assert (out[1].character, out[1].text) == (None, "一句描述")

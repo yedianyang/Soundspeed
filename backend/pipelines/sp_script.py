@@ -4,7 +4,8 @@
   Slugline / ParsedLine / ParsedScene   解析结果 dataclass（frozen）
   SPParseError                          解析失败异常（当前路径不主动抛，保留兼容）
   split_scenes_by_slugline / split_for_parse  启发式分场（不调 LLM）
-  parse_scene_block                     单场结构化（Gemma 逐行判定 + 代码拼装）
+  parse_scene_block                     单场结构化（Gemma 逐行判定 + 代码拼装，普通输出快路径）
+  parse_scene_block_fc                  单场结构化的原生 function calling 版（强制调工具，结构由 grammar 保证）
   run_sp_parse                          整本解析（split + 逐场，串行）
 
 设计依据：
@@ -389,6 +390,55 @@ def _parse_lines_output(raw_text: str, body_lines: list[str]) -> list[ParsedLine
     return parsed or _fallback_lines(body_lines)
 
 
+def _split_scene_header(block: str) -> tuple[str | None, Slugline, list[str]]:
+    """切出场头（scene_code + slugline）与正文行（已 strip、去空行）。
+
+    首行是场头（_is_scene_header）→ 代码抽 scene_code/slugline，正文取其后；
+    否则整块都是正文、无场头元信息。parse_scene_block 与 parse_scene_block_fc 共用。
+    """
+    lines = block.splitlines()
+    scene_code: str | None = None
+    slugline = Slugline(int_ext=None, time_of_day=None, location=None)
+    body_lines = lines
+    if lines and _is_scene_header(lines[0]):
+        scene_code, slugline = _parse_slugline(lines[0])
+        body_lines = lines[1:]
+    body = [ln.strip() for ln in body_lines if ln.strip()]
+    return scene_code, slugline, body
+
+
+def _parse_fc_lines(tool_call: dict, body_lines: list[str]) -> list[ParsedLine]:
+    """解析 report_parsed_lines tool_call 的 arguments → list[ParsedLine]。**永不抛**。
+
+    forced tool_choice 的 grammar 已保证结构合法，但仍做防御解析 + 兜底（与 v5 一致）：
+    arguments 缺失/非法时退化为冒号启发式（_fallback_lines，台词不丢）。
+    speaker 空串 → None（描述行）。兼容模型偶发吐 [说话人,台词] 数组而非 {speaker,text}。
+    """
+    try:
+        args = json.loads(tool_call["function"]["arguments"])
+        raw_lines = args.get("lines")
+    except (KeyError, TypeError, json.JSONDecodeError, ValueError):
+        return _fallback_lines(body_lines)
+    if not isinstance(raw_lines, list) or not raw_lines:
+        return _fallback_lines(body_lines)
+
+    parsed: list[ParsedLine] = []
+    for item in raw_lines:
+        if isinstance(item, dict):
+            speaker, text = item.get("speaker", ""), item.get("text", "")
+        elif isinstance(item, list) and item:  # 容忍模型偶发吐数组
+            speaker = item[0] if isinstance(item[0], str) else ""
+            text = " ".join(str(x) for x in item[1:]) if len(item) > 1 else ""
+        else:
+            continue
+        speaker = speaker.strip() if isinstance(speaker, str) else ""
+        text = text.strip() if isinstance(text, str) else ""
+        if not text:
+            continue
+        parsed.append(ParsedLine(character=speaker or None, text=text))
+    return parsed or _fallback_lines(body_lines)
+
+
 # ---------------------------------------------------------------------------
 # 核心函数
 # ---------------------------------------------------------------------------
@@ -425,15 +475,7 @@ async def parse_scene_block(
     **永不抛 SPParseError**：模型输出不合法时走冒号启发式兜底（台词不丢），不影响其余场。
     infer 自身异常（超时等）仍向上抛，由调用方处理。
     """
-    lines = block.splitlines()
-    scene_code: str | None = None
-    slugline = Slugline(int_ext=None, time_of_day=None, location=None)
-    body_lines = lines
-    if lines and _is_scene_header(lines[0]):
-        scene_code, slugline = _parse_slugline(lines[0])
-        body_lines = lines[1:]
-
-    body = [ln.strip() for ln in body_lines if ln.strip()]
+    scene_code, slugline, body = _split_scene_header(block)
     if not body:
         return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=[])]
 
@@ -448,6 +490,44 @@ async def parse_scene_block(
         timeout=timeout,
     )
     parsed_lines = _parse_lines_output(raw_output, body)  # 永不抛
+    return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=parsed_lines)]
+
+
+async def parse_scene_block_fc(
+    block: str,
+    llm_service: "LLMService",
+    *,
+    timeout: float = 120.0,
+) -> list[ParsedScene]:
+    """单场解析的**原生 function calling** 版：强制调 report_parsed_lines 工具。
+
+    与 parse_scene_block 同输入同输出（返回 [一个 ParsedScene]），区别仅在 LLM 调用机制：
+    走 infer_tool（forced tool_choice），输出结构由 JSON grammar 物理保证，不靠事后 JSON 容错。
+    用于单场路径（照片增补 / 更新对话框 / 黑客松原生 FC 展示）——一次一调，grammar 成本可忍；
+    整本逐场热循环仍用 parse_scene_block（快路径，无 grammar）。
+
+    **永不抛 SPParseError**：tool_call 缺失（模型没走 FC）或 arguments 非法时，
+    退化为冒号启发式兜底（台词不丢）。infer_tool 自身异常（超时等）仍向上抛。
+    """
+    scene_code, slugline, body = _split_scene_header(block)
+    if not body:
+        return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=[])]
+
+    messages = [
+        {"role": "system", "content": TASK_CONFIG["script_parse_fc"]["system"]},
+        {"role": "user", "content": "剧本：\n" + "\n".join(body)},
+    ]
+    try:
+        tool_call: dict = await llm_service.infer_tool(
+            messages,
+            task_type="script_parse_fc",
+            priority=3,
+            timeout=timeout,
+        )
+    except LookupError:  # 模型没走 FC（tool_calls 缺失）→ 兜底，不崩
+        return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=_fallback_lines(body))]
+
+    parsed_lines = _parse_fc_lines(tool_call, body)  # 永不抛
     return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=parsed_lines)]
 
 

@@ -47,7 +47,12 @@ from backend.core.script_import import (
     import_single_scene,
     plan_import,
 )
-from backend.pipelines.sp_script import SPParseError, parse_scene_block, split_for_parse
+from backend.pipelines.sp_script import (
+    SPParseError,
+    parse_scene_block,
+    parse_scene_block_fc,
+    split_for_parse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +129,25 @@ class SceneDecision(BaseModel):
 class ConfirmBody(BaseModel):
     plan: dict  # upload 阶段返回的 plan（原样回传，解析只发生一次）
     decisions: list[SceneDecision] = []
+
+
+class ParseSingleBody(BaseModel):
+    text: str  # 单场剧本文本（可含场头行）
+
+
+class ParsedLineOut(BaseModel):
+    character: str | None  # 对白角色名；描述/动作行为 None
+    text: str
+
+
+class ParseSingleResult(BaseModel):
+    """单场原生 FC 解析结果（不入库，仅返回结构化内容供预览/确认）。"""
+
+    scene_code: str | None
+    int_ext: str | None
+    time_of_day: str | None
+    location: str | None
+    lines: list[ParsedLineOut]
 
 
 # ── 内部辅助 ─────────────────────────────────────────────────────────────────
@@ -379,4 +403,35 @@ async def confirm_import(
     return UploadResult(
         status="imported",
         scenes=_build_imported_scenes(results, dal),
+    )
+
+
+@router.post("/parse-single", response_model=ParseSingleResult)
+async def parse_single(
+    request: Request,
+    body: ParseSingleBody,
+    _: None = Depends(require_admin),
+) -> ParseSingleResult:
+    """单场解析（Gemma 原生 function calling）：一段剧本文本 → 结构化一场，**不入库**。
+
+    走 report_parsed_lines 工具（forced tool_choice），输出结构由 grammar 物理保证。
+    是「照片增补 / 更新对话框」单场路径的基础，也是黑客松原生 FC 的展示点；
+    整本批量导入仍走 POST /uploads/{id}/parse（快路径，不上 FC）。
+    """
+    llm_service = request.app.state.llm_service
+    if llm_service is None:
+        raise HTTPException(503, "LLM 服务未启用，无法解析剧本")
+
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(422, "文本为空")
+
+    scenes = await parse_scene_block_fc(text, llm_service, timeout=180.0)
+    scene = scenes[0]  # 单场：parse_scene_block_fc 恒返回一个 ParsedScene
+    return ParseSingleResult(
+        scene_code=scene.scene_code,
+        int_ext=scene.slugline.int_ext,
+        time_of_day=scene.slugline.time_of_day,
+        location=scene.slugline.location,
+        lines=[ParsedLineOut(character=ln.character, text=ln.text) for ln in scene.lines],
     )
