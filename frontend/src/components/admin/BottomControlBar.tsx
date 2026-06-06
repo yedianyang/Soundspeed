@@ -394,17 +394,22 @@ export default function BottomControlBar({
               <Undo2 className="size-5" />
             </Button>
 
-            {/* LLM 历史一级入口：紧跟撤销按钮右侧。淡主题色 pill + 未读点描背景边，无装饰图标。 */}
+            {/* LLM 历史一级入口：Mark(TBD) 同款视觉（白底 + 边框 + 阴影 + 左状态点）。
+                左点承载未读 —— 有未读 = 主题色点，无未读 = 灰点。紧跟撤销按钮右侧。 */}
             <Button
               variant="ghost"
+              size="default"
               onClick={onOpenArchive}
-              className="relative gap-1.5 h-10 px-4 rounded-full bg-primary/10 hover:bg-primary/15 text-primary text-sm font-medium active:scale-95 transition-all"
+              className="flex-none gap-1.5 h-10 px-4 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform"
               title="LLM 反馈历史：QP 问答 + L2 推送全历史"
             >
-              LLM 历史
-              {archiveUnread > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-primary ring-2 ring-background" />
-              )}
+              <span
+                className={cn(
+                  "size-1.5 rounded-full",
+                  archiveUnread > 0 ? "bg-primary" : "bg-muted-foreground",
+                )}
+              />
+              <span className="text-sm font-medium text-foreground">LLM 历史</span>
             </Button>
           </div>
         </div>
