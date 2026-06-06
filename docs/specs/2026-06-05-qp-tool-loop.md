@@ -102,6 +102,19 @@ memo 框文字经 `POST /notes`（4.x，`backend/api/routes/takes.py:325 create_
 
 结论：v1 只做文字查询。语音查询要么进 v2 的 option 2 形态（模型选工具即分类），要么等语音先转文本——均延后。这不影响 demo：文字分类器已经交付「一个聪明框，自己分辨记录还是提问」的 agentic 叙事。
 
+### 3.2.1 QP-voice 设计方向（v2，2026-06-06 评审定向）
+
+**目标形态**：语音 memo → **一个多模态 auto-tool 模型调用**完成 ASR + 分类 + 路由 + 回答，全在 Gemma 4 原生音频里（不用 whisper、少一跳）。这正是上面「option 2（模型选工具即分类）」的落地路径，且**顺手解了 §3.2 的分类器结构难题**——语音进模型前没文本无法预分类，但模型边听边选工具时，**它选了 QP 工具 = 判定为查询、走 note 结构化 = 判定为记录**，分类内生于 auto 路由。
+
+**可行性（两半边已独立证实，剩一个不确定性）**：
+- 音频 → FunctionGemma tool call：4.x NP-voice 已做（audio + **forced** structure_note，真模型 smoke 验过）。模型「听音频吐 tool call」可行。
+- auto 多工具路由：QP-text 已做（Task 11，模型看到 5 工具自选）。
+- **唯一待验**：4B 在「音频 + 看到 N 个工具声明」时 **auto 选工具**的可靠性（auto 比 forced 难，模型要真看懂工具去选，非 grammar 焊死）。需真语音 spike。
+
+**实现要点（option a，比当前多模态 text-only swap 深一层）**：让 `MultimodalGemma4Handler` 的 prompt **既保留音频嵌入（mtmd/load_image）、又注入 FunctionGemma 工具声明**（`<|tool>declaration:...<tool|>`）。当前 Task 11 的修复只把 **text+tools** 切到原生 FunctionGemma formatter，**audio+tools 仍走多模态 handler、不渲染工具**——故 audio+auto 现在走不通（forced 靠 grammar 兜不需渲染，auto 需要）。QP-voice 要落地必须做这层 handler 改造，详见 client.py `create_chat_completion` 的前瞻注释 + memory `project_qp_tool_loop`。
+
+**spike 验法（时盒，本期不做）**：真语音 WAV（「第一场拍了多少条」）+ 给多模态 handler 注入工具声明 → 看模型是否 auto 调对工具。验通了 QP-voice + 分类器一并设计。
+
 ---
 
 ## 4. 内核：工具集（方案 C）
