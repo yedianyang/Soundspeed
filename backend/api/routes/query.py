@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from backend.api.auth import require_admin
-from backend.core.events import QP_ANSWER, QpAnswerPayload
+from backend.core.events import broadcast_qp_answer
 from backend.pipelines.qp_query import run_qp_query
 
 if TYPE_CHECKING:
@@ -52,10 +52,7 @@ async def run_qp_and_broadcast(
     except Exception as exc:  # noqa: BLE001
         logger.warning("qp query 失败 conn_id=%s: %r", conn_id, exc)
         answer = "抱歉，这次查询出错了，请换种说法再试一次。"
-    cm.broadcast(
-        f"{QP_ANSWER}.{conn_id}",
-        QpAnswerPayload(connection_id=conn_id, answer_text=answer, client_id=client_id),
-    )
+    broadcast_qp_answer(cm, conn_id, answer, client_id=client_id)
     return answer
 
 
