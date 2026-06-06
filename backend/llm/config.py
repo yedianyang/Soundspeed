@@ -5,6 +5,13 @@
 
 注：system prompt 模板由 Pipeline 在构建 messages 时插入（role="system"），
 TASK_CONFIG 的 system 字段仅作参考模板，service 层不自动注入。
+
+剧本解析（script_parse）为何不用 grammar / response_format（2026-06-06 实测拍板）：
+  实测 grammar（GBNF 约束采样）在 Gemma（~25 万词表）上每 token 多花大量 CPU →
+  吞吐从 ~84 tok/s 掉到 ~15 tok/s（5.6×）。故解析热路径**不用 grammar**，改 classify：
+  Gemma 只输出"每行说话人"短数组，台词由代码从原文取（见 sp_script.parse_scene_block）。
+  容错解析 + 兜底（解析失败 → 该场全部按描述，不崩）。
+  tool-calling/grammar 留给只调一两次的路由 / 场记分析，不进逐场热循环。
 """
 
 # task_type -> 配置字典
@@ -52,32 +59,23 @@ TASK_CONFIG: dict[str, dict] = {
         ),
     },
     "script_parse": {
-        # 8192：解析时需把输入原文回显成 JSON，output 体量可能比 input 还大，4096 不够用。
-        # 设成 8192 = n_ctx，等于「不人为限 output、靠 EOS 收尾」。
-        # 机制：n_ctx=8192 是 input+output 共享总窗口，实际 output 上限 = 8192 - prompt_tokens。
-        # 边界风险：部分 llama-cpp-python 版本在 prompt_tokens+max_tokens > n_ctx 时触发 overflow；
-        # 8192=n_ctx 是边界值，sp_smoke.py 冒烟需验证是否撞顶。
-        "max_tokens": 8192,
+        # 完整输出（v5，无 grammar）：模型逐行吐 [说话人,台词]。比 classify 准（边吐台词边
+        # 判断动作/对白，实测含人名的描述行也能标对）；无 grammar 故快。max_tokens 给足防截断。
+        "max_tokens": 4096,
         "temperature": 0.1,
         "priority": 3,
-        # prompt v1（3.B）：极简版，只输出 schema + 1 个 few-shot。
-        # 4B Gemma 实测越长越乱，不堆细则。
+        # 不设 response_format：grammar 在 Gemma 上每 token CPU 开销大（实测 5.6× 慢），不用。
+        # prompt v5：强调"即使句子含人名，叙述动作/神态的也是描述"——这是 classify 误判的点。
         "system": (
-            "你是剧本解析器。把输入的剧本片段解析为 JSON，直接输出合法 JSON，不要 markdown 代码块。\n\n"
-            "输出格式：\n"
-            '{"scenes": [{"scene_code": "string或null", "slugline": {"int_ext": "string或null", '
-            '"time_of_day": "string或null", "location": "string或null"}, '
-            '"lines": [{"character": "string或null", "text": "string"}]}]}\n\n'
-            "规则：scene_code 是剧本中明确写出的场次号（如「场3」「3A」），没有就填 null。"
-            "character 是说话角色名，舞台指示行填 null。\n\n"
-            "示例输入：\n"
-            "内 咖啡馆 日\n"
-            "罗湘：我们先聊聊。\n"
-            "（罗湘坐下）\n\n"
+            "你是剧本解析器。逐行把剧本解析成 [说话人, 内容] 的数组。\n"
+            "- 对白行 → [\"角色名\", \"台词\"]\n"
+            "- 非对白行（动作、场景描述、舞台指示，即使句子里出现人名）→ [\"\", \"原文\"]\n"
+            "判断依据：有「角色：台词」形式、或明显是某人说出口的话，才算对白；"
+            "叙述某人动作/神态/场景的是描述。\n"
+            "只输出一个 JSON 数组，不要解释。\n\n"
+            "示例输入：\n罗湘：我们先聊聊。\n罗湘走到窗边。\n\n"
             "示例输出：\n"
-            '{"scenes": [{"scene_code": null, "slugline": {"int_ext": "内", "time_of_day": "日", '
-            '"location": "咖啡馆"}, "lines": [{"character": "罗湘", "text": "我们先聊聊。"}, '
-            '{"character": null, "text": "罗湘坐下"}]}]}'
+            '[["罗湘", "我们先聊聊。"], ["", "罗湘走到窗边。"]]'
         ),
     },
     "note_struct": {

@@ -56,6 +56,11 @@ def build_app() -> FastAPI:
     db_path.parent.mkdir(parents=True, exist_ok=True)  # 无库/无目录则自动创建持久库
     dal = DAL(db_path)
 
+    # 清理上次进程残留的 'parsing' 上传（其后台任务已随进程消失，否则前端无限转圈）。
+    stale = dal.reset_stale_parsing_uploads()
+    if stale:
+        logger.info("启动清理：%d 条残留 parsing 上传已复位为 error", stale)
+
     # DEV 自动播种：保证 dev server 启动后即有 active scene，1.K 可直接 take/start。
     # 仅在 SOUNDSPEED_DEV=1 且 DB 为空时执行（幂等，重启不重复播种）。
     if os.environ.get("SOUNDSPEED_DEV") == "1" and not dal.list_scenes():
@@ -73,11 +78,13 @@ def build_app() -> FastAPI:
     # 真实音频设备枚举/选择端点（独立于实时 ASR 开关，GET 总能枚举）
     from backend.api.routes.asr import router as asr_router
     from backend.api.routes.devices import router as devices_router
+    from backend.api.routes.scripts import router as scripts_router
     from backend.api.routes.speakers import router as speakers_router
 
     app.include_router(devices_router)
     app.include_router(asr_router)
     app.include_router(speakers_router)
+    app.include_router(scripts_router)
     return app
 
 

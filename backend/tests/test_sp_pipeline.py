@@ -1,21 +1,16 @@
-"""3.B SP Pipeline 单元测试。
+"""3.B SP Pipeline 单元测试（完整输出 v5：Gemma 逐行吐 [说话人,台词]，无 grammar）。
 
 覆盖：
-  ① 单场无 slugline 纯对白（全角冒号格式）
-  ② 多场带 slugline + 场次号
-  ③ 多场带 slugline 但无场次号
-  ④ 脏数据（空行、页码、噪声）
-  ⑤ 分块 loop：多次调用 infer（side_effect 列表）
-  ⑥ JSON 容错路径：非法 JSON / 缺 lines / markdown fence 包裹
-  ⑦ 空输入返回空列表
-
-全部使用 AsyncMock 注入 llm_service.infer，不加载真实模型。
+  - parse_scene_block：对白 / 描述(空说话人) / 场头 slugline / markdown fence
+  - 无 grammar 兜底：模型输出非法 → 冒号启发式 _fallback_lines（台词不丢、不抛）
+  - run_sp_parse 多块、空输入
+  - 纯函数：_is_scene_header / split_scenes_by_slugline / _parse_slugline /
+            _parse_lines_output / _fallback_lines
+全部用 AsyncMock 注入 llm_service.infer，不加载真实模型。
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -25,22 +20,18 @@ from backend.pipelines.sp_script import (
     ParsedLine,
     ParsedScene,
     Slugline,
-    SPParseError,
+    _fallback_lines,
+    _is_scene_header,
+    _parse_lines_output,
+    _parse_slugline,
+    parse_scene_block,
     run_sp_parse,
+    split_scenes_by_slugline,
 )
 
 
-# ---------------------------------------------------------------------------
-# 辅助函数
-# ---------------------------------------------------------------------------
-
-
 def _mock_llm(*responses: str) -> MagicMock:
-    """创建注入 AsyncMock.infer 的 LLMService mock。
-
-    传多个 response 时 infer 按顺序返回（side_effect），
-    只传一个时 return_value 固定返回。
-    """
+    """注入 AsyncMock.infer：单个 → return_value；多个 → side_effect 顺序。"""
     svc = MagicMock(spec=LLMService)
     if len(responses) == 1:
         svc.infer = AsyncMock(return_value=responses[0])
@@ -49,394 +40,150 @@ def _mock_llm(*responses: str) -> MagicMock:
     return svc
 
 
-def _scenes_json(scenes: list[dict]) -> str:
-    """把 scenes list 序列化为 LLM 返回格式。"""
-    return json.dumps({"scenes": scenes}, ensure_ascii=False)
-
-
-# ---------------------------------------------------------------------------
-# Fixture ① 单场无 slugline 纯对白
-# ---------------------------------------------------------------------------
-
-# 仿 frontend/src/data/devFixtures.ts 的 DEV_SCRIPT_SAMPLE
-SINGLE_SCENE_RAW = """罗湘：罗湘老师平时是一个不爱社交的人
-罗湘：他喝多的时候会在深夜给我打电话
-访谈者：你会刷短视频吗
-罗湘：我刷过，但我觉得太上瘾了"""
-
-SINGLE_SCENE_LLM_RESPONSE = _scenes_json(
-    [
-        {
-            "scene_code": None,
-            "slugline": {"int_ext": None, "time_of_day": None, "location": None},
-            "lines": [
-                {"character": "罗湘", "text": "罗湘老师平时是一个不爱社交的人"},
-                {"character": "罗湘", "text": "他喝多的时候会在深夜给我打电话"},
-                {"character": "访谈者", "text": "你会刷短视频吗"},
-                {"character": "罗湘", "text": "我刷过，但我觉得太上瘾了"},
-            ],
-        }
-    ]
-)
+# ── parse_scene_block（完整输出主路径）──────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_single_scene_no_slugline() -> None:
-    """单场无 slugline：返回单个 ParsedScene，scene_code=None，slugline 全 None。"""
-    svc = _mock_llm(SINGLE_SCENE_LLM_RESPONSE)
-    scenes = await run_sp_parse(SINGLE_SCENE_RAW, svc)
-
+async def test_parse_dialogue_lines():
+    svc = _mock_llm('[["罗湘","你好。"],["阿明","走吧。"]]')
+    scenes = await parse_scene_block("罗湘：你好。\n阿明：走吧。", svc)
     assert len(scenes) == 1
-    scene = scenes[0]
-    assert isinstance(scene, ParsedScene)
-    assert scene.scene_code is None
-    assert scene.slugline.int_ext is None
-    assert scene.slugline.time_of_day is None
-    assert scene.slugline.location is None
-    assert len(scene.lines) == 4
-    assert all(isinstance(ln, ParsedLine) for ln in scene.lines)
-    # 第一行角色正确
-    assert scene.lines[0].character == "罗湘"
-    assert scene.lines[0].text == "罗湘老师平时是一个不爱社交的人"
-
-
-# ---------------------------------------------------------------------------
-# Fixture ② 多场带 slugline + 场次号
-# ---------------------------------------------------------------------------
-
-MULTI_SCENE_WITH_CODE_RAW = """场 3  内 咖啡馆 日
-罗湘：我们先聊聊你的背景。
-访谈者：好的。
-
-场 4  外 广场 夜
-罗湘：今晚的广场很安静。
-（罗湘环顾四周）"""
-
-MULTI_SCENE_WITH_CODE_LLM_RESPONSE = _scenes_json(
-    [
-        {
-            "scene_code": "3",
-            "slugline": {"int_ext": "内", "time_of_day": "日", "location": "咖啡馆"},
-            "lines": [
-                {"character": "罗湘", "text": "我们先聊聊你的背景。"},
-                {"character": "访谈者", "text": "好的。"},
-            ],
-        },
-        {
-            "scene_code": "4",
-            "slugline": {"int_ext": "外", "time_of_day": "夜", "location": "广场"},
-            "lines": [
-                {"character": "罗湘", "text": "今晚的广场很安静。"},
-                {"character": None, "text": "罗湘环顾四周"},
-            ],
-        },
-    ]
-)
+    lines = scenes[0].lines
+    assert (lines[0].character, lines[0].text) == ("罗湘", "你好。")
+    assert (lines[1].character, lines[1].text) == ("阿明", "走吧。")
 
 
 @pytest.mark.asyncio
-async def test_multi_scene_with_scene_code() -> None:
-    """多场带场次号：scene_code 正确抽取，slugline 三要素填充，舞台指示行 character=None。"""
-    svc = _mock_llm(MULTI_SCENE_WITH_CODE_LLM_RESPONSE)
-    scenes = await run_sp_parse(MULTI_SCENE_WITH_CODE_RAW, svc)
-
-    assert len(scenes) == 2
-
-    s1 = scenes[0]
-    assert s1.scene_code == "3"
-    assert s1.slugline.int_ext == "内"
-    assert s1.slugline.time_of_day == "日"
-    assert s1.slugline.location == "咖啡馆"
-    assert len(s1.lines) == 2
-
-    s2 = scenes[1]
-    assert s2.scene_code == "4"
-    assert s2.slugline.int_ext == "外"
-    assert s2.slugline.time_of_day == "夜"
-    assert s2.slugline.location == "广场"
-    # 最后一行是舞台指示行
-    stage_direction = s2.lines[-1]
-    assert stage_direction.character is None
-    assert stage_direction.text  # 非空字符串
-
-
-# ---------------------------------------------------------------------------
-# Fixture ③ 多场带 slugline 但无场次号
-# ---------------------------------------------------------------------------
-
-MULTI_SCENE_NO_CODE_RAW = """内 咖啡馆 日
-罗湘：你好。
-
-外 广场 夜
-访谈者：再见。"""
-
-MULTI_SCENE_NO_CODE_LLM_RESPONSE = _scenes_json(
-    [
-        {
-            "scene_code": None,
-            "slugline": {"int_ext": "内", "time_of_day": "日", "location": "咖啡馆"},
-            "lines": [
-                {"character": "罗湘", "text": "你好。"},
-            ],
-        },
-        {
-            "scene_code": None,
-            "slugline": {"int_ext": "外", "time_of_day": "夜", "location": "广场"},
-            "lines": [
-                {"character": "访谈者", "text": "再见。"},
-            ],
-        },
-    ]
-)
+async def test_parse_description_empty_speaker():
+    svc = _mock_llm('[["罗湘","你好。"],["","罗湘走到窗边。"]]')
+    scenes = await parse_scene_block("罗湘：你好。\n罗湘走到窗边。", svc)
+    lines = scenes[0].lines
+    assert lines[0].character == "罗湘"
+    assert lines[1].character is None  # 空说话人 → 描述
+    assert lines[1].text == "罗湘走到窗边。"
 
 
 @pytest.mark.asyncio
-async def test_multi_scene_no_scene_code() -> None:
-    """多场有 slugline 但无场次号：scene_code=None 是合法常态值，不报错。"""
-    svc = _mock_llm(MULTI_SCENE_NO_CODE_LLM_RESPONSE)
-    scenes = await run_sp_parse(MULTI_SCENE_NO_CODE_RAW, svc)
-
-    assert len(scenes) == 2
-    for scene in scenes:
-        assert scene.scene_code is None
-    assert scenes[0].slugline.location == "咖啡馆"
-    assert scenes[1].slugline.location == "广场"
-
-
-# ---------------------------------------------------------------------------
-# Fixture ④ 脏数据（空行、页码、噪声）
-# ---------------------------------------------------------------------------
-
-DIRTY_RAW = """
-
-第 3 页
-
-罗湘：我们继续。
-                        12
-
-访谈者：好的。
----页眉---
-罗湘：就这样。"""
-
-DIRTY_LLM_RESPONSE = _scenes_json(
-    [
-        {
-            "scene_code": None,
-            "slugline": {"int_ext": None, "time_of_day": None, "location": None},
-            "lines": [
-                {"character": "罗湘", "text": "我们继续。"},
-                {"character": "访谈者", "text": "好的。"},
-                {"character": "罗湘", "text": "就这样。"},
-            ],
-        }
-    ]
-)
+async def test_parse_with_scene_header():
+    svc = _mock_llm('[["罗湘","你好。"]]')
+    scenes = await parse_scene_block("场3 内 咖啡馆 日\n罗湘：你好。", svc)
+    s = scenes[0]
+    assert s.scene_code == "3"
+    assert s.slugline.int_ext == "内"
+    assert s.slugline.time_of_day == "日"
+    assert "咖啡馆" in (s.slugline.location or "")
+    assert len(s.lines) == 1
+    assert s.lines[0].character == "罗湘"
 
 
 @pytest.mark.asyncio
-async def test_dirty_data_no_exception() -> None:
-    """脏数据输入：LLM 模拟过滤后，pipeline 正常返回，不抛异常。"""
-    svc = _mock_llm(DIRTY_LLM_RESPONSE)
-    scenes = await run_sp_parse(DIRTY_RAW, svc)
-
-    assert len(scenes) == 1
-    # LLM 清理了噪声，只剩 3 行真实对白
-    assert len(scenes[0].lines) == 3
-
-
-# ---------------------------------------------------------------------------
-# 分块 loop 测试
-# ---------------------------------------------------------------------------
+async def test_parse_strips_markdown_fence():
+    svc = _mock_llm('```json\n[["罗湘","你好。"]]\n```')
+    scenes = await parse_scene_block("罗湘：你好。", svc)
+    assert scenes[0].lines[0].character == "罗湘"
 
 
 @pytest.mark.asyncio
-async def test_chunked_input_calls_infer_multiple_times() -> None:
-    """超长输入被分块：infer 被调用多于 1 次，结果合并。
-
-    使用 return_value（固定返回同一响应），对分块数变化免疫。
-    构造 10 行、每行约 156 字符，chunk_size=500 会切成多块（>=2）。
-    每块返回 1 个 ParsedScene，最终合并场数 == infer 调用次数。
-    """
-    chunk_scene = {
-        "scene_code": None,
-        "slugline": {"int_ext": None, "time_of_day": None, "location": None},
-        "lines": [{"character": "A", "text": "台词"}],
-    }
-    chunk_response = _scenes_json([chunk_scene])
-
-    # 单个 return_value：每次 infer 都返回同一响应，对实际分块数免疫
-    svc = _mock_llm(chunk_response)
-
-    long_raw = "\n".join(
-        [f"角色甲：{'这是一段很长的台词，用于测试分块逻辑。' * 8}"] * 10
-    )
-
-    scenes = await run_sp_parse(long_raw, svc, chunk_size=500)
-
-    # infer 被调用超过 1 次（验证确实走了 loop，不是一把梭）
-    assert svc.infer.call_count >= 2
-    # 场列表 = 各块场列表合并（每块各返回 1 场）
-    assert len(scenes) == svc.infer.call_count
-
-
-# ---------------------------------------------------------------------------
-# JSON 容错路径
-# ---------------------------------------------------------------------------
+async def test_parse_fallback_on_invalid_output_no_raise():
+    # 模型吐非法（非数组）→ 不抛；走冒号启发式兜底，台词不丢
+    svc = _mock_llm("抱歉我无法解析")
+    scenes = await parse_scene_block("罗湘：你好。\n（罗湘坐下）", svc)
+    lines = scenes[0].lines
+    assert lines[0].character == "罗湘" and lines[0].text == "你好。"  # 冒号→对白
+    assert lines[1].character is None  # 无冒号→描述
+    assert lines[1].text == "（罗湘坐下）"
 
 
 @pytest.mark.asyncio
-async def test_invalid_json_raises_sp_parse_error() -> None:
-    """LLM 返回非 JSON 字符串，抛 SPParseError，cause 为 JSONDecodeError。"""
-    svc = _mock_llm("这不是JSON")
-    with pytest.raises(SPParseError) as exc_info:
-        await run_sp_parse(SINGLE_SCENE_RAW, svc)
-
-    import json as _json
-
-    assert isinstance(exc_info.value.cause, _json.JSONDecodeError)
-
-
-@pytest.mark.asyncio
-async def test_markdown_fence_json_parsed() -> None:
-    """LLM 返回 ```json...``` 包裹的 JSON，pipeline 能正常解析。"""
-    wrapped = "```json\n" + SINGLE_SCENE_LLM_RESPONSE + "\n```"
-    svc = _mock_llm(wrapped)
-    scenes = await run_sp_parse(SINGLE_SCENE_RAW, svc)
-
-    assert len(scenes) == 1
-
-
-@pytest.mark.asyncio
-async def test_missing_lines_key_raises_sp_parse_error() -> None:
-    """LLM 返回的场里缺 lines 字段，抛 SPParseError。"""
-    bad_response = json.dumps(
-        {"scenes": [{"scene_code": None, "slugline": {"int_ext": None, "time_of_day": None, "location": None}}]},
-        ensure_ascii=False,
-    )
-    svc = _mock_llm(bad_response)
-    with pytest.raises(SPParseError):
-        await run_sp_parse(SINGLE_SCENE_RAW, svc)
-
-
-@pytest.mark.asyncio
-async def test_missing_scenes_key_raises_sp_parse_error() -> None:
-    """LLM 返回顶层缺 scenes 字段的 JSON，抛 SPParseError。"""
-    bad_response = json.dumps({"result": []}, ensure_ascii=False)
-    svc = _mock_llm(bad_response)
-    with pytest.raises(SPParseError):
-        await run_sp_parse(SINGLE_SCENE_RAW, svc)
-
-
-@pytest.mark.asyncio
-async def test_empty_llm_response_raises_sp_parse_error() -> None:
-    """LLM 返回空字符串，抛 SPParseError。"""
-    svc = _mock_llm("")
-    with pytest.raises(SPParseError):
-        await run_sp_parse(SINGLE_SCENE_RAW, svc)
-
-
-# ---------------------------------------------------------------------------
-# 空输入 / 零场
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_empty_raw_text_returns_empty_list() -> None:
-    """空 raw_text 返回空列表，不调用 infer。"""
-    svc = _mock_llm(SINGLE_SCENE_LLM_RESPONSE)
-    scenes = await run_sp_parse("", svc)
-
-    assert scenes == []
+async def test_parse_empty_block_no_infer():
+    svc = _mock_llm("[]")
+    scenes = await parse_scene_block("场3 内 咖啡馆 日", svc)  # 只有场头、无正文
+    assert scenes[0].scene_code == "3"
+    assert scenes[0].lines == []
     svc.infer.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_whitespace_only_raw_text_returns_empty_list() -> None:
-    """纯空白 raw_text 返回空列表，不调用 infer。"""
-    svc = _mock_llm(SINGLE_SCENE_LLM_RESPONSE)
-    scenes = await run_sp_parse("   \n\n  ", svc)
+# ── run_sp_parse（多块）────────────────────────────────────────────────────────
 
-    assert scenes == []
+
+@pytest.mark.asyncio
+async def test_run_sp_parse_multi_block():
+    svc = _mock_llm('[["罗湘","一。"]]', '[["阿明","二。"]]')
+    raw = "场1 内 咖啡馆 日\n罗湘：一。\n\n场2 外 广场 夜\n阿明：二。"
+    scenes = await run_sp_parse(raw, svc)
+    assert svc.infer.call_count == 2
+    assert len(scenes) == 2
+    assert scenes[0].scene_code == "1" and scenes[0].lines[0].character == "罗湘"
+    assert scenes[1].scene_code == "2" and scenes[1].lines[0].character == "阿明"
+
+
+@pytest.mark.asyncio
+async def test_run_sp_parse_empty_returns_empty():
+    svc = _mock_llm("[]")
+    assert await run_sp_parse("", svc) == []
+    assert await run_sp_parse("   \n  ", svc) == []
     svc.infer.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# LLM 返回 scenes=[] 正常处理
-# ---------------------------------------------------------------------------
+# ── 纯函数 ─────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_llm_returns_zero_scenes() -> None:
-    """LLM 返回 scenes=[] 时，pipeline 返回空列表，不抛异常。"""
-    empty_response = json.dumps({"scenes": []}, ensure_ascii=False)
-    svc = _mock_llm(empty_response)
-    scenes = await run_sp_parse(SINGLE_SCENE_RAW, svc)
-
-    assert scenes == []
+def test_parse_lines_output_valid():
+    out = _parse_lines_output('[["罗湘","你好。"],["","描述行"]]', ["罗湘：你好。", "描述行"])
+    assert (out[0].character, out[0].text) == ("罗湘", "你好。")
+    assert (out[1].character, out[1].text) == (None, "描述行")
 
 
-# ---------------------------------------------------------------------------
-# timeout 穿透
-# ---------------------------------------------------------------------------
+def test_parse_lines_output_wrapped_text():
+    # 模型在数组外裹文字 → 仍取 [..] 子串
+    out = _parse_lines_output('输出：[["甲","台词"]] 完毕', ["甲：台词"])
+    assert (out[0].character, out[0].text) == ("甲", "台词")
 
 
-@pytest.mark.asyncio
-async def test_timeout_propagated() -> None:
-    """LLMService.infer 抛 asyncio.TimeoutError，pipeline 不吞，让其穿透。"""
-    svc = MagicMock(spec=LLMService)
-    svc.infer = AsyncMock(side_effect=asyncio.TimeoutError())
-
-    with pytest.raises(asyncio.TimeoutError):
-        await run_sp_parse(SINGLE_SCENE_RAW, svc, timeout=0.1)
+def test_parse_lines_output_invalid_falls_back():
+    # 非法 → 冒号启发式兜底（台词不丢）
+    out = _parse_lines_output("garbage", ["甲：你好", "一句描述"])
+    assert (out[0].character, out[0].text) == ("甲", "你好")
+    assert (out[1].character, out[1].text) == (None, "一句描述")
 
 
-# ---------------------------------------------------------------------------
-# infer 调用参数验证
-# ---------------------------------------------------------------------------
+def test_fallback_lines():
+    out = _fallback_lines(["罗湘：你好。", "罗湘走到窗边。"])
+    assert out[0].character == "罗湘" and out[0].text == "你好。"
+    assert out[1].character is None  # 无冒号 → 描述
 
 
-@pytest.mark.asyncio
-async def test_infer_called_with_correct_task_type_and_priority() -> None:
-    """run_sp_parse 调用 infer 时 task_type='script_parse' 且 priority=3。"""
-    svc = _mock_llm(SINGLE_SCENE_LLM_RESPONSE)
-    await run_sp_parse(SINGLE_SCENE_RAW, svc)
-
-    svc.infer.assert_called_once()
-    call_kwargs = svc.infer.call_args
-    kw = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
-    assert kw.get("task_type") == "script_parse"
-    assert kw.get("priority") == 3
+def test_is_scene_header():
+    assert _is_scene_header("场3")
+    assert _is_scene_header("内 咖啡馆 日")
+    assert _is_scene_header("大漠·沙梁 日 外")  # 反序 slugline
+    assert not _is_scene_header("罗湘：我们到屋内坐坐吧")  # 台词
+    assert not _is_scene_header("他慢慢走出了门外")  # 普通叙述
+    assert not _is_scene_header("")
 
 
-# ---------------------------------------------------------------------------
-# 数据类型验证
-# ---------------------------------------------------------------------------
+def test_parse_slugline():
+    code, sl = _parse_slugline("场3 内 咖啡馆 日")
+    assert code == "3"
+    assert sl.int_ext == "内"
+    assert sl.time_of_day == "日"
+    assert "咖啡馆" in (sl.location or "")
 
 
-def test_parsed_scene_is_frozen_dataclass() -> None:
-    """ParsedScene 是 frozen dataclass，字段赋值应抛 FrozenInstanceError。"""
-    from dataclasses import FrozenInstanceError
+def test_split_scenes_by_slugline():
+    raw = "场1 内 咖啡馆 日\n罗湘：你好。\n\n场2 外 广场 夜\n阿明：再见。"
+    blocks = split_scenes_by_slugline(raw)
+    assert len(blocks) == 2
+    assert blocks[0].startswith("场1")
+    assert blocks[1].startswith("场2")
+    assert split_scenes_by_slugline("") == []
 
-    scene = ParsedScene(
+
+def test_dataclasses():
+    s = ParsedScene(
         scene_code=None,
         slugline=Slugline(int_ext=None, time_of_day=None, location=None),
-        lines=[],
+        lines=[ParsedLine(character=None, text="动作")],
     )
-    with pytest.raises(FrozenInstanceError):
-        scene.scene_code = "1"  # type: ignore[misc]
-
-
-def test_slugline_is_frozen_dataclass() -> None:
-    """Slugline 是 frozen dataclass。"""
-    from dataclasses import FrozenInstanceError
-
-    sl = Slugline(int_ext="内", time_of_day="日", location="咖啡馆")
-    with pytest.raises(FrozenInstanceError):
-        sl.int_ext = "外"  # type: ignore[misc]
-
-
-def test_parsed_line_character_none_is_stage_direction() -> None:
-    """ParsedLine.character=None 合法，表示舞台指示行。"""
-    line = ParsedLine(character=None, text="罗湘走向门口")
-    assert line.character is None
-    assert line.text == "罗湘走向门口"
+    assert s.lines[0].character is None
+    assert s.lines[0].text == "动作"

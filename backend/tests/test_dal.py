@@ -1418,10 +1418,10 @@ def test_v8_incremental_upgrade_from_v7(tmp_path: Path) -> None:
     # 增量迁移
     apply_migrations(db_path)
 
-    # 断言版本号
+    # 断言版本号：增量迁移会一路升到最新已注册版本（v8 引入 app_settings）
     conn = _raw_conn(db_path)
     version = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert version == 8
+    assert version == max(MIGRATION_FILES)
 
     # 断言表存在
     names = {
@@ -1433,8 +1433,48 @@ def test_v8_incremental_upgrade_from_v7(tmp_path: Path) -> None:
     assert "app_settings" in names
     conn.close()
 
-    # 断言可通过 DAL 读写（DAL 自行调用 apply_migrations，已在 v8 → 幂等）
+    # 断言可通过 DAL 读写（DAL 自行调用 apply_migrations，幂等）
     dal = DAL(db_path)
     dal.set_setting("audio_input_device", "USB Mic")
     assert dal.get_setting("audio_input_device") == "USB Mic"
+    dal.close()
+
+
+def test_v9_incremental_upgrade_from_v8(tmp_path: Path) -> None:
+    """既有 v8 库平滑升级到 v9：script_uploads 表存在且 DAL 可增删查改。"""
+    import sqlite3 as _sql
+
+    db_path = tmp_path / "v8_to_v9.db"
+
+    # 模拟 v8 库：建 app_settings + 设 user_version=8（v9 migration 不依赖前置表）
+    conn = _sql.connect(str(db_path))
+    conn.execute("CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+    conn.execute("PRAGMA user_version = 8;")
+    conn.commit()
+    conn.close()
+
+    apply_migrations(db_path)
+
+    conn = _raw_conn(db_path)
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == max(MIGRATION_FILES)
+    names = {
+        r["name"]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table';"
+        ).fetchall()
+    }
+    assert "script_uploads" in names
+    conn.close()
+
+    # DAL 可增删查改 script_uploads
+    dal = DAL(db_path)
+    uid = dal.insert_script_upload("剧本.docx", "内 咖啡馆 日\n罗湘：你好。")
+    info = dal.get_script_upload(uid)
+    assert info["filename"] == "剧本.docx"
+    assert info["status"] == "uploaded"
+    assert info["char_count"] > 0
+    assert dal.get_script_upload_raw(uid).startswith("内 咖啡馆")
+    dal.update_script_upload_status(uid, "parsed", "导入 2 场")
+    assert dal.get_script_upload(uid)["status"] == "parsed"
+    assert [u["upload_id"] for u in dal.list_script_uploads()] == [uid]
     dal.close()

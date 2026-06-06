@@ -195,6 +195,94 @@ export function correctSegmentSpeaker(
   )
 }
 
+// ── 剧本导入（3.D：上传文件 → Gemma 分场 → 入库）──
+
+// 单个已入库场次（upload 返回）。
+export interface ImportedScene {
+  scene_id: number
+  script_id: number
+  scene_code: string | null
+  int_ext: string | null
+  time_of_day: string | null
+  location: string | null
+  line_count: number
+  lines: { line_no: number; character: string | null; text: string }[]
+}
+
+// 重复场冲突项（needs_confirmation 时）。
+export interface ImportConflict {
+  scene_id: number
+  scene_code: string | null
+  original: { raw_text: string; lines: unknown[] }
+  incoming: { raw_text: string; lines: unknown[] }
+}
+
+// 解析（parse）/ confirm 统一响应。
+export interface UploadScriptResult {
+  status: "imported" | "needs_confirmation"
+  scenes: ImportedScene[]
+  conflicts: ImportConflict[]
+  plan: Record<string, unknown> | null
+}
+
+// 阶段 1（上传）响应：只表示已存入 DB，未解析。
+export interface UploadSavedResult {
+  upload_id: number
+  filename: string
+  char_count: number
+  status: string // "uploaded"
+}
+
+// 上传记录（含解析状态/进度）。status: uploaded|parsing|parsed|error；detail 是进度/结果/错误文案。
+export interface ScriptUploadInfo {
+  upload_id: number
+  filename: string
+  char_count: number
+  status: "uploaded" | "parsing" | "parsed" | "error"
+  detail: string | null
+  created_at: number
+  updated_at: number
+}
+
+// 阶段 1：上传剧本文件（multipart）→ 提取 + 入库。秒回、不碰 Gemma。
+// 失败抛 ApiError（带后端 detail）。解析是独立的一步（parseUpload）。
+export async function uploadScript(file: File): Promise<UploadSavedResult> {
+  const token = useSessionStore.getState().token
+  const fd = new FormData()
+  fd.append("file", file)
+  const res = await fetch(`${API_BASE}/api/v1/scripts/upload`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: fd,
+  })
+  if (!res.ok) {
+    let detail = `upload → ${res.status}`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = String(j.detail)
+    } catch { /* 忽略非 JSON 错误体 */ }
+    throw new ApiError(res.status, detail)
+  }
+  return res.json()
+}
+
+// 阶段 2：启动后台解析（瞬时切场 → 后台逐场结构化）。立即返回 status=parsing。
+// 进度/结果通过轮询 listScriptUploads 的 status/detail 获取。
+export function parseUpload(
+  uploadId: number,
+  target: "multi_scene" | "current_scene" = "multi_scene",
+): Promise<ScriptUploadInfo> {
+  return request<ScriptUploadInfo>(
+    `/api/v1/scripts/uploads/${uploadId}/parse?target=${target}`,
+    { method: "POST" },
+  )
+}
+
+// 列出所有上传记录（含解析状态/进度），用于轮询。
+export function listScriptUploads(): Promise<ScriptUploadInfo[]> {
+  return request<ScriptUploadInfo[]>(`/api/v1/scripts/uploads`)
+}
+
 // ── 音频输入设备（真实枚举 + 选择）──
 export interface InputDeviceDTO {
   index: number
@@ -474,5 +562,41 @@ export function useEndTake() {
     mutationFn: () => endTake(),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["takes"] }),
+  })
+}
+
+// 阶段 1：上传剧本（只入库，不改场次，无需 invalidate）。
+export function useUploadScript() {
+  return useMutation({
+    mutationFn: ({ file }: { file: File }) => uploadScript(file),
+  })
+}
+
+// 阶段 2：启动后台解析（立即返回 parsing；进度/结果靠 useScriptUploads 轮询）。
+export function useParseUpload() {
+  return useMutation({
+    mutationFn: ({
+      uploadId,
+      target,
+    }: {
+      uploadId: number
+      target?: "multi_scene" | "current_scene"
+    }) => parseUpload(uploadId, target),
+  })
+}
+
+export const scriptUploadsQueryKey = () => ["script-uploads"] as const
+
+// 上传记录查询：常驻启用（每次挂载都拉一次，故切走再回来能恢复进度），
+// 仅当有「解析中」记录时每 1.5s 轮询；否则不轮询。后台解析与前端解耦，
+// 进度由服务器 status/detail 派生，切 tab 卸载组件不影响后台任务。
+export function useScriptUploads() {
+  return useQuery({
+    queryKey: scriptUploadsQueryKey(),
+    queryFn: listScriptUploads,
+    refetchInterval: (query) => {
+      const data = query.state.data as ScriptUploadInfo[] | undefined
+      return data?.some((u) => u.status === "parsing") ? 1500 : false
+    },
   })
 }

@@ -283,11 +283,16 @@ class DAL:
         return row["scene_id"] if row else None
 
     def list_scenes(self) -> list[dict]:
-        """返回所有场次的基本信息列表（含 slugline 三列）。"""
+        """返回所有场次的基本信息列表（含 slugline 三列 + has_script）。
+
+        has_script（0/1）：该场是否已有剧本版本（EXISTS 子查询，O(1) per row）。
+        前端剧本面板据此跳过无剧本的空场（如 dev 种子的 Scene_1），不展示空占位。
+        """
         rows = self._conn.execute(
-            "SELECT scene_id, scene_code, description, shoot_date, is_active, created_at, "
-            "int_ext, time_of_day, location "
-            "FROM scenes ORDER BY scene_id ASC;"
+            "SELECT s.scene_id, s.scene_code, s.description, s.shoot_date, s.is_active, "
+            "s.created_at, s.int_ext, s.time_of_day, s.location, "
+            "EXISTS(SELECT 1 FROM scripts sc WHERE sc.scene_id = s.scene_id) AS has_script "
+            "FROM scenes s ORDER BY s.scene_id ASC;"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -675,6 +680,69 @@ class DAL:
             (scene_id,),
         ).fetchone()
         return dict(row) if row else None
+
+    # ── script_uploads（上传/解析两段拆分，v9）─────────────────────────────────
+
+    def insert_script_upload(self, filename: str, raw_text: str) -> int:
+        """存一份待解析的原始剧本（status='uploaded'），返回 upload_id。不碰 LLM。"""
+        with self._write_tx() as conn:
+            cur = conn.execute(
+                "INSERT INTO script_uploads (filename, raw_text, char_count, status) "
+                "VALUES (?, ?, ?, 'uploaded');",
+                (filename, raw_text, len(raw_text)),
+            )
+        return cur.lastrowid  # type: ignore[return-value]
+
+    def get_script_upload(self, upload_id: int) -> dict | None:
+        """返回上传记录的元信息（不含 raw_text，避免大字段），无则 None。"""
+        row = self._conn.execute(
+            "SELECT upload_id, filename, char_count, status, detail, created_at, updated_at "
+            "FROM script_uploads WHERE upload_id = ?;",
+            (upload_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_script_upload_raw(self, upload_id: int) -> str | None:
+        """返回上传记录的原始文本（解析步骤用），无则 None。"""
+        row = self._conn.execute(
+            "SELECT raw_text FROM script_uploads WHERE upload_id = ?;",
+            (upload_id,),
+        ).fetchone()
+        return row["raw_text"] if row else None
+
+    def list_script_uploads(self) -> list[dict]:
+        """返回所有上传记录元信息，按 upload_id 倒序（最新在前）。"""
+        rows = self._conn.execute(
+            "SELECT upload_id, filename, char_count, status, detail, created_at, updated_at "
+            "FROM script_uploads ORDER BY upload_id DESC;"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_script_upload_status(
+        self, upload_id: int, status: str, detail: str | None = None
+    ) -> None:
+        """更新上传记录状态（uploaded/parsing/parsed/error），detail 传 None 则保留原值。"""
+        with self._write_tx() as conn:
+            conn.execute(
+                f"UPDATE script_uploads SET status = ?, "
+                f"detail = COALESCE(?, detail), updated_at = {_NOW_TS_SQL} "
+                f"WHERE upload_id = ?;",
+                (status, detail, upload_id),
+            )
+
+    def reset_stale_parsing_uploads(self) -> int:
+        """把残留在 'parsing' 的上传标记为 error（启动时调用）。返回清理条数。
+
+        解析任务在内存中（asyncio task），进程重启/崩溃后这些任务已不存在，
+        但 DB 里的 'parsing' 状态会残留 → 前端无限转圈。启动时统一复位为中断。
+        """
+        with self._write_tx() as conn:
+            cur = conn.execute(
+                f"UPDATE script_uploads SET status = 'error', "
+                f"detail = '解析中断（服务已重启），请重新解析', updated_at = {_NOW_TS_SQL} "
+                f"WHERE status = 'parsing';"
+            )
+        return cur.rowcount
 
     # ── script_lines ─────────────────────────────────────────────────────────
 

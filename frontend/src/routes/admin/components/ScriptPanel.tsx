@@ -1,9 +1,21 @@
-import { useState, useRef } from "react"
+import { useState, useRef, useEffect, useMemo } from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { miniPill, mutedCard } from "@/lib/styles"
-import { pickActiveScene, useSceneScript, useScenes } from "@/lib/api"
+import { cn } from "@/lib/utils"
+import {
+  ApiError,
+  pickActiveScene,
+  scenesQueryKey,
+  scriptUploadsQueryKey,
+  useParseUpload,
+  useSceneScript,
+  useScenes,
+  useScriptUploads,
+  useUploadScript,
+} from "@/lib/api"
 import type { SceneDTO } from "@/types/api"
 import {
   ChevronLeft,
@@ -12,6 +24,8 @@ import {
   Camera,
   RotateCcw,
   Check,
+  Loader2,
+  X,
 } from "lucide-react"
 
 // ---- OCR 本地 mock（决策点 2：上传/拍照不接后端，仍走本地预览）----
@@ -59,15 +73,38 @@ export function ScriptPanel() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
 
+  // 剧本上传/解析（两段式 + 异步进度，全部从服务器状态派生 → 切 tab 不丢）。
+  const upload = useUploadScript()
+  const parse = useParseUpload()
+  const queryClient = useQueryClient()
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const [dismissedId, setDismissedId] = useState<number | null>(null)
+
+  // 常驻轮询上传记录；最新一条驱动 UI（上传/解析中/完成）。组件重新挂载会重新拉，
+  // 故切走再回来能自动恢复进度——后台解析本就不受前端影响。
+  const { data: uploads } = useScriptUploads()
+  const latestUpload = uploads?.[0]
+
   const isOcr = ocrScene !== null
 
-  // 当前场 = is_active 那条（pickActiveScene 退回第一条）。每次渲染从最新 scenes 派生。
+  // 剧本面板只翻「有剧本的场」：跳过 dev 种子 Scene_1 这类无剧本空场，不显示空占位。
+  // has_script 由后端 list_scenes 带（EXISTS 子查询）。
+  const scriptScenes = useMemo<SceneDTO[]>(
+    () => (scenes ?? []).filter((s) => s.has_script),
+    [scenes],
+  )
+
+  // 当前场 = is_active 那条（若它有剧本则定位到它，否则默认第一场有剧本的）。
   const active = pickActiveScene(scenes)
-  const currentIndex =
-    scenes && active ? scenes.findIndex((s) => s.scene_id === active.scene_id) : 0
-  // 有效查看索引：null → 当前场。
-  const view = viewIndex ?? currentIndex
-  const viewScene: SceneDTO | undefined = scenes?.[view]
+  const activeIdx = active
+    ? scriptScenes.findIndex((s) => s.scene_id === active.scene_id)
+    : -1
+  const currentIndex = activeIdx >= 0 ? activeIdx : 0
+  // 有效查看索引：null → 当前场；并夹在有效范围内（场数变化时防越界）。
+  const rawView = viewIndex ?? currentIndex
+  const view = Math.min(Math.max(0, rawView), Math.max(0, scriptScenes.length - 1))
+  const viewScene: SceneDTO | undefined = scriptScenes[view]
+  const hasScriptScenes = scriptScenes.length > 0
 
   // OCR 模式不拉剧本（OCR 自带行）；真库模式按 scene_id 拉，hook 内部用 enabled 门控。
   const scriptSceneId = isOcr ? null : viewScene?.scene_id ?? null
@@ -77,14 +114,12 @@ export function ScriptPanel() {
     isError: scriptError,
   } = useSceneScript(scriptSceneId)
 
-  // ---- 导航（都从有效 view 算，避免异步 stale）----
+  // ---- 导航（都在 scriptScenes 范围内，避免异步 stale）----
   const goPrev = () => {
-    if (!scenes) return
     setViewIndex(Math.max(0, view - 1))
   }
   const goNext = () => {
-    if (!scenes) return
-    setViewIndex(Math.min(scenes.length - 1, view + 1))
+    setViewIndex(Math.min(scriptScenes.length - 1, view + 1))
   }
   const goCurrent = () => {
     setOcrScene(null)
@@ -98,11 +133,11 @@ export function ScriptPanel() {
 
   const commitJump = () => {
     const target = jumpValue.trim()
-    if (!target || !scenes) {
+    if (!target) {
       setJumpInput(false)
       return
     }
-    const idx = scenes.findIndex((s) => s.scene_code === target)
+    const idx = scriptScenes.findIndex((s) => s.scene_code === target)
     if (idx >= 0) {
       setViewIndex(idx)
       setOcrScene(null)
@@ -110,17 +145,55 @@ export function ScriptPanel() {
     setJumpInput(false)
   }
 
-  // ---- 上传 / OCR（保持本地 mock，不接后端）----
+  // ---- 阶段 1：上传（只入库，不碰 Gemma，秒回）----
   const triggerUpload = () => fileInputRef.current?.click()
   const triggerCamera = () => cameraInputRef.current?.click()
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
+    e.target.value = "" // 允许重复选同一文件
     if (!file) return
-    // 任意文件都进 OCR 本地预览（决策点 2：导入/OCR 无后端端点）。
-    setOcrScene(MOCK_OCR)
-    e.target.value = ""
+    setUploadError(null)
+    setOcrScene(null)
+    try {
+      await upload.mutateAsync({ file })
+      setDismissedId(null)
+      queryClient.invalidateQueries({ queryKey: scriptUploadsQueryKey() })
+    } catch (err) {
+      setUploadError(err instanceof ApiError ? err.message : "上传失败，请重试")
+    }
   }
+
+  // ---- 阶段 2：解析分场（启动后台任务；进度由 latestUpload 轮询派生）----
+  const handleParse = async () => {
+    if (!latestUpload) return
+    setUploadError(null)
+    setDismissedId(null)
+    try {
+      await parse.mutateAsync({ uploadId: latestUpload.upload_id, target: "multi_scene" })
+      queryClient.invalidateQueries({ queryKey: scriptUploadsQueryKey() })
+    } catch (err) {
+      setUploadError(err instanceof ApiError ? err.message : "解析启动失败，请重试")
+    }
+  }
+
+  // 相机仍走本地 mock（拍照 OCR 属后续 ticket，暂不接后端）。
+  const handleCameraChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ""
+    if (!file) return
+    setOcrScene(MOCK_OCR)
+  }
+
+  // 解析进行中/刚完成 → 刷新场次/剧本，让已入库的场「逐个冒出来」（updated_at 每场变一次）。
+  const latestStatus = latestUpload?.status
+  const latestUpdatedAt = latestUpload?.updated_at
+  useEffect(() => {
+    if (latestStatus === "parsing" || latestStatus === "parsed") {
+      queryClient.invalidateQueries({ queryKey: scenesQueryKey() })
+      queryClient.invalidateQueries({ queryKey: ["scene-script"] })
+    }
+  }, [latestStatus, latestUpdatedAt, queryClient])
 
   // ---- 渲染台词（归一化行）----
   const renderLines = (lines: NormLine[]) => (
@@ -160,10 +233,15 @@ export function ScriptPanel() {
           <Button
             variant="ghost"
             size="icon-sm"
-            title="上传剧本文件"
+            title="上传剧本文件（txt / md / docx / pdf）"
             onClick={triggerUpload}
+            disabled={upload.isPending}
           >
-            <Upload className="size-4" />
+            {upload.isPending ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Upload className="size-4" />
+            )}
           </Button>
           <Button
             variant="ghost"
@@ -180,9 +258,9 @@ export function ScriptPanel() {
       <input
         ref={fileInputRef}
         type="file"
-        accept=".txt,.doc,.docx,.pdf"
+        accept=".txt,.md,.markdown,.docx,.pdf"
         className="hidden"
-        onChange={handleFileChange}
+        onChange={handleFileUpload}
       />
       <input
         ref={cameraInputRef}
@@ -190,11 +268,88 @@ export function ScriptPanel() {
         accept="image/*"
         capture="environment"
         className="hidden"
-        onChange={handleFileChange}
+        onChange={handleCameraChange}
       />
 
-      {/* ========== 场次导航 ========== */}
-      {!isOcr && (
+      {/* 阶段 1：上传中（秒回）*/}
+      {upload.isPending && (
+        <div className="flex items-center gap-2 rounded-lg bg-muted/70 px-3 py-2 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin flex-shrink-0" />
+          <span>正在上传剧本…</span>
+        </div>
+      )}
+
+      {/* 已保存：显示文件信息 + 独立「解析分场」按钮 */}
+      {latestUpload?.status === "uploaded" && (
+        <div className="rounded-lg bg-muted/70 px-3 py-2 text-xs space-y-2">
+          <span className="text-foreground">
+            已保存：<span className="font-medium">{latestUpload.filename}</span>
+            <span className="text-muted-foreground">（{latestUpload.char_count} 字）</span>
+          </span>
+          <Button
+            size="sm"
+            className="h-7 w-full text-xs gap-1.5"
+            onClick={handleParse}
+            disabled={parse.isPending}
+          >
+            {parse.isPending ? (
+              <>
+                <Loader2 className="size-3.5 animate-spin" />
+                启动中…
+              </>
+            ) : (
+              "解析分场"
+            )}
+          </Button>
+        </div>
+      )}
+
+      {/* 解析进度（后台逐场，轮询 detail：解析中 i/N 场…）切 tab 回来自动恢复 */}
+      {latestUpload?.status === "parsing" && (
+        <div className="flex items-center gap-2 rounded-lg bg-muted/70 px-3 py-2 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin flex-shrink-0" />
+          <span>{latestUpload.detail ?? "正在解析…"}</span>
+        </div>
+      )}
+
+      {uploadError && (
+        <div className="flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <X className="size-3.5 mt-0.5 flex-shrink-0" />
+          <span className="flex-1">{uploadError}</span>
+          <button onClick={() => setUploadError(null)} className="opacity-60 hover:opacity-100">
+            <X className="size-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* 解析完成结果（parsed 成功 / error 失败）；dismiss 后不再显示同一条 */}
+      {latestUpload &&
+        (latestUpload.status === "parsed" || latestUpload.status === "error") &&
+        dismissedId !== latestUpload.upload_id && (
+          <div
+            className={cn(
+              "flex items-start gap-2 rounded-lg px-3 py-2 text-xs",
+              latestUpload.status === "parsed"
+                ? "bg-primary/10 text-foreground"
+                : "bg-destructive/10 text-destructive",
+            )}
+          >
+            <span className="flex-1">
+              {latestUpload.status === "parsed" ? "✅ " : "✗ "}
+              {latestUpload.detail ??
+                (latestUpload.status === "parsed" ? "解析完成" : "解析失败")}
+            </span>
+            <button
+              onClick={() => setDismissedId(latestUpload.upload_id)}
+              className="opacity-60 hover:opacity-100"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+        )}
+
+      {/* ========== 场次导航（仅当有「带剧本的场」时显示）========== */}
+      {!isOcr && hasScriptScenes && (
         <div className="flex items-center justify-between">
           <Button variant="ghost" size="icon-sm" onClick={goPrev} disabled={view === 0}>
             <ChevronLeft className="size-4" />
@@ -254,7 +409,7 @@ export function ScriptPanel() {
             variant="ghost"
             size="icon-sm"
             onClick={goNext}
-            disabled={!scenes || view >= scenes.length - 1}
+            disabled={view >= scriptScenes.length - 1}
           >
             <ChevronRight className="size-4" />
           </Button>
@@ -289,6 +444,10 @@ export function ScriptPanel() {
                 </div>
                 {renderLines(ocrLines)}
               </>
+            ) : !hasScriptScenes ? (
+              <p className="text-sm text-muted-foreground/70 text-center py-8">
+                {scenes ? "还没有剧本。点右上角上传剧本文件并「解析分场」。" : "加载中…"}
+              </p>
             ) : (
               <>
                 {/* 真库场次头 */}

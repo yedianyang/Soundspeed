@@ -15,6 +15,7 @@ export interface SceneDTO {
   int_ext: string | null // slugline 内外景：室内 / 室外（v2，可能 null）
   time_of_day: string | null // slugline 时间：日 / 夜 …（v2，可能 null）
   location: string | null // slugline 地点：街道 / 咖啡馆 …（v2，可能 null）
+  has_script?: number // 该场是否已有剧本（0/1）；剧本面板据此跳过无剧本空场
 }
 
 // ── Scene 写操作（2.C）──

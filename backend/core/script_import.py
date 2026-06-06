@@ -438,6 +438,60 @@ def apply_import(
 
         results.append(_write_scene(scene_id, entry))
 
+    return _apply_conflicts(plan, decisions, dal, is_single, results)
+
+
+def import_single_scene(
+    scene: "ParsedScene",
+    *,
+    target: Literal["current_scene", "multi_scene"],
+    synthetic_code: str,
+    dal: ScriptImportWriteDAL,
+    active_scene_id: int | None = None,
+) -> dict | None:
+    """逐场增量入库（异步解析的每场即时落库用）。
+
+    清洗该场行；空场返回 None（跳过）。多场路径按 scene_code（无号用 synthetic_code）
+    get_or_create_scene；命中既有且已有脚本 → 重复场，返回 None（本期跳过不替换）。
+    单场路径写入 active_scene_id（注意：多次调用会各起新版本，current_scene 的
+    「多场合并成一版」语义不适用增量，调用方对 current_scene 应走 plan_import 批量）。
+
+    Returns:
+        {scene_id, script_id, scene_code} 或 None（空场/重复跳过）。
+
+    Raises:
+        NoActiveSceneError: target=current_scene 但 active_scene_id 为 None。
+    """
+    valid_lines = _clean_lines(scene)
+    if not valid_lines:
+        return None  # 空场跳过（spec §5 步骤 5）
+
+    raw_text = _build_raw_text(valid_lines)
+
+    if target == "current_scene":
+        if active_scene_id is None:
+            raise NoActiveSceneError("no active scene")
+        scene_id = active_scene_id
+        scene_code: str | None = None
+    else:
+        scene_code = scene.scene_code or synthetic_code
+        scene_id, created = dal.get_or_create_scene(
+            scene_code,
+            int_ext=scene.slugline.int_ext,
+            time_of_day=scene.slugline.time_of_day,
+            location=scene.slugline.location,
+        )
+        if not created and dal.get_latest_script(scene_id) is not None:
+            return None  # 重复场：本期跳过（不静默替换）
+
+    script_id = dal.insert_script(scene_id, raw_text)
+    for line_no, (character, text) in enumerate(valid_lines, start=1):
+        dal.insert_script_line(script_id, line_no, character, text)
+    return {"scene_id": scene_id, "script_id": script_id, "scene_code": scene_code}
+
+
+def _apply_conflicts(plan, decisions, dal, is_single, results):
+    """apply_import 的重复场写入分支（按 decisions：replace 写 / skip 跳过）。"""
     # 写重复场（按 decisions）
     for conflict in plan.conflicts:
         conflict_scene_id: int = conflict["scene_id"]
