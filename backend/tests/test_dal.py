@@ -605,6 +605,44 @@ def test_insert_script_auto_version(tmp_path: Path) -> None:
     assert latest["script_id"] == scr2
 
 
+def test_list_all_characters_cross_scene_distinct_sorted(tmp_path: Path) -> None:
+    """跨场角色取并集、去重、排序；舞台指示（character=NULL）排除。"""
+    dal = DAL(tmp_path / "test.db")
+    s1 = dal.create_scene("Scene_1")
+    scr1 = dal.insert_script(s1, "场一")
+    dal.insert_script_line(scr1, 1, "夏雨", "你来了。")
+    dal.insert_script_line(scr1, 2, "顾朗", "嗯。")
+    dal.insert_script_line(scr1, 3, None, "（顾朗坐下）")  # 舞台指示，排除
+    s2 = dal.create_scene("Scene_2")
+    scr2 = dal.insert_script(s2, "场二")
+    dal.insert_script_line(scr2, 1, "阿知", "走吧。")
+    dal.insert_script_line(scr2, 2, "夏雨", "等等。")  # 跨场重复 → 去重
+
+    chars = dal.list_all_characters()
+    assert set(chars) == {"夏雨", "顾朗", "阿知"}  # 并集去重，None 不入
+    assert chars == sorted(chars)  # ORDER BY 已排序
+
+
+def test_list_all_characters_only_latest_version(tmp_path: Path) -> None:
+    """同场多版本只算最新版剧本的角色，旧版角色不出现。"""
+    dal = DAL(tmp_path / "test.db")
+    sid = dal.create_scene("Scene_1")
+    old = dal.insert_script(sid, "旧版")
+    dal.insert_script_line(old, 1, "旧角色", "旧台词")
+    new = dal.insert_script(sid, "新版")
+    dal.insert_script_line(new, 1, "新角色", "新台词")
+
+    chars = dal.list_all_characters()
+    assert chars == ["新角色"]
+
+
+def test_list_all_characters_empty_when_no_scripts(tmp_path: Path) -> None:
+    """无任何剧本时返回空列表。"""
+    dal = DAL(tmp_path / "test.db")
+    dal.create_scene("Scene_1")  # 有场无剧本
+    assert dal.list_all_characters() == []
+
+
 def test_insert_script_line_and_fts_sync(tmp_path: Path) -> None:
     """插入台词行后 FTS5 可立即 MATCH 到（trigram 最短 3 字符 query）。"""
     dal = DAL(tmp_path / "test.db")

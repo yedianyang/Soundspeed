@@ -384,6 +384,43 @@ def _merge_parentheticals(lines: list[ParsedLine]) -> list[ParsedLine]:
     return out
 
 
+# 角色名尾部括号注记：（V.O.）/（O.S.）/（画外音）/（记忆中的自己）等。
+_CHAR_PAREN_SUFFIX_RE = re.compile(r"[（(][^（）()]*[）)]\s*$")
+
+
+def normalize_character(name: str | None) -> str | None:
+    """归一角色名：剥掉尾部括号注记（夏雨（V.O.）→ 夏雨；沈默（记忆中的自己）→ 沈默）。
+
+    用户 2026-06-06：角色名不一致但实为同一人/同一声纹 → 直接合并。反复剥连续尾部括号；
+    若整名就是括号（如「（旁白）」剥后为空）则保留原名不动。None/描述行原样返回。
+    """
+    if name is None:
+        return None
+    cur = name.strip()
+    while True:
+        stripped = _CHAR_PAREN_SUFFIX_RE.sub("", cur).strip()
+        if stripped == cur or not stripped:
+            break
+        cur = stripped
+    return cur or (name.strip() or None)
+
+
+def _normalize_characters(lines: list[ParsedLine]) -> list[ParsedLine]:
+    """对每行 character 做归一（剥尾部括号注记），text 不动。解析落库前的统一收口。"""
+    return [
+        ParsedLine(character=normalize_character(ln.character), text=ln.text)
+        for ln in lines
+    ]
+
+
+def _finalize_lines(lines: list[ParsedLine]) -> list[ParsedLine]:
+    """解析输出落库前的统一收尾：括号语气并入下一行 → 角色名归一。
+
+    parse_scene_block / parse_scene_block_fc（含兜底）三条出口共用，避免重复拼接。
+    """
+    return _normalize_characters(_merge_parentheticals(lines))
+
+
 def _parse_slugline(header: str) -> tuple[str | None, Slugline]:
     """从场头行抽 scene_code + slugline 三要素（best-effort 正则，仅供展示/去重）。"""
     s = header.strip()
@@ -546,7 +583,7 @@ async def parse_scene_block(
         priority=3,
         timeout=timeout,
     )
-    parsed_lines = _merge_parentheticals(_parse_lines_output(raw_output, body))  # 永不抛
+    parsed_lines = _finalize_lines(_parse_lines_output(raw_output, body))  # 永不抛
     return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=parsed_lines)]
 
 
@@ -582,10 +619,10 @@ async def parse_scene_block_fc(
             timeout=timeout,
         )
     except LookupError:  # 模型没走 FC（tool_calls 缺失）→ 兜底，不崩
-        fallback = _merge_parentheticals(_fallback_lines(body))
+        fallback = _finalize_lines(_fallback_lines(body))
         return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=fallback)]
 
-    parsed_lines = _merge_parentheticals(_parse_fc_lines(tool_call, body))  # 永不抛
+    parsed_lines = _finalize_lines(_parse_fc_lines(tool_call, body))  # 永不抛
     return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=parsed_lines)]
 
 

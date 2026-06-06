@@ -414,6 +414,27 @@ class DAL:
             ).fetchall()
         return [r["c"] for r in rows]
 
+    def list_all_characters(self) -> list[str]:
+        """返回整部戏（全场次最新版剧本）去重后的角色清单，按角色名排序。
+
+        供声纹注册弹窗的"选角色"下拉用：演员一个角色横跨多场，故取全场次并集，
+        而非单场（list_characters 是单场版）。每场只算最新版剧本（version 最大），
+        不 union 历史版本。无任何剧本时返回 []。
+        """
+        with self._readonly_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT sl.character AS c "
+                "FROM script_lines sl "
+                "WHERE sl.script_id IN ("
+                "  SELECT s1.script_id FROM scripts s1 "
+                "  WHERE s1.version = ("
+                "    SELECT MAX(s2.version) FROM scripts s2 WHERE s2.scene_id = s1.scene_id"
+                "  )"
+                ") AND sl.character IS NOT NULL "
+                "ORDER BY sl.character;"
+            ).fetchall()
+        return [r["c"] for r in rows]
+
     def search_script_lines(self, query: str, scene_id: int | None = None) -> list[dict]:
         """FTS5 MATCH 检索台词（BM25 排序，只读连接）。返回 line_no/character/text dict 列表。"""
         base = (

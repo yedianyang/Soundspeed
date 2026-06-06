@@ -14,6 +14,7 @@ L2 gate：L2 由本链第 6 步（回填完成后）触发，不再由 take.end 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -157,9 +158,16 @@ class DiarizationBackfill:
         # 前端 Live 框状态条：正在分离说话人（pyannote 跑批，较慢）
         self._emit_processing(take_id, scene_id, "diarizing")
 
+        # 本 take 选定的参演演员：既作为 pyannote 人数先验（防单麦/相似音色塌成一人），
+        # 也用于后续声纹匹配。num_speakers=None（没选演员）时 pyannote 自动判定。
+        candidates = self._dal.list_take_speakers(take_id)
+        num_hint = len(candidates) if candidates else None
+
         # 在 executor 里跑（阻塞的 CPU/GPU 操作）
         loop = asyncio.get_running_loop()
-        turns = await loop.run_in_executor(None, self._engine.diarize, pcm)
+        turns = await loop.run_in_executor(
+            None, functools.partial(self._engine.diarize, pcm, num_speakers=num_hint)
+        )
 
         if not turns:
             logger.info("diarization 返回空 turns（take_id=%d）", take_id)
@@ -177,8 +185,7 @@ class DiarizationBackfill:
         for label, embs in local_embeddings.items():
             avg_embeddings[label] = np.mean(embs, axis=0) if embs else None
 
-        # 声纹匹配：只在本 take 挂的已注册演员里匹配；未命中 → 匿名说话人N
-        candidates = self._dal.list_take_speakers(take_id)
+        # 声纹匹配：只在本 take 挂的已注册演员里匹配（candidates 上面已取）；未命中 → 匿名说话人N
         speaker_map = await loop.run_in_executor(
             None, self._registry.resolve, avg_embeddings, candidates
         )
