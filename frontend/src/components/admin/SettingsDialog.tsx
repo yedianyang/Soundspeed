@@ -44,6 +44,18 @@ import {
 } from "@/lib/api"
 import { FlaskConical, RefreshCw, Server, Trash2 } from "lucide-react"
 import ActorManagementPanel from "@/components/admin/ActorManagementPanel"
+import { useFileNameFormat } from "@/store/filename"
+import {
+  formatFileName,
+  FILENAME_SAMPLE,
+  FILENAME_PRESETS,
+  SCENE_PREFIXES,
+  SHOT_PREFIXES,
+  TAKE_PREFIXES,
+  SEPARATORS,
+  PAD_OPTIONS,
+  type SegFormat,
+} from "@/lib/filename-format"
 
 const DEV = import.meta.env.DEV
 
@@ -184,6 +196,152 @@ function statusTextClass(kind: "info" | "error" | "done"): string {
     : kind === "done"
       ? "text-xs text-green-600"
       : "text-xs text-muted-foreground"
+}
+
+// ── 文件名显示格式设置（常规 tab）：场镜次 → 录音机文件名风格，分项可配 + 实时预览 ──
+const PREFIX_NONE = "·none·" // radix SelectItem 不允许空 value，空前缀编码占位
+const SEP_LABEL: Record<string, string> = {
+  "_": "下划线 _",
+  "-": "连字符 -",
+  " · ": "中点 ·",
+  " ": "空格",
+}
+const PAD_LABEL: Record<number, string> = { 0: "不补零", 1: "1 位", 2: "2 位（01）", 3: "3 位（001）" }
+
+function PrefixSelect({
+  value,
+  options,
+  onChange,
+}: {
+  value: string
+  options: readonly string[]
+  onChange: (v: string) => void
+}) {
+  return (
+    <Select
+      value={value === "" ? PREFIX_NONE : value}
+      onValueChange={(v) => onChange(v === PREFIX_NONE ? "" : v)}
+    >
+      <SelectTrigger className="h-9">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {options.map((o) => (
+          <SelectItem key={o || PREFIX_NONE} value={o === "" ? PREFIX_NONE : o}>
+            {o === "" ? "（无）" : o}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
+function PadSelect({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  return (
+    <Select value={String(value)} onValueChange={(v) => onChange(Number(v))}>
+      <SelectTrigger className="h-9">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {PAD_OPTIONS.map((p) => (
+          <SelectItem key={p} value={String(p)}>
+            {PAD_LABEL[p]}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
+function FileNameFormatSettings() {
+  const format = useFileNameFormat((s) => s.format)
+  const setFormat = useFileNameFormat((s) => s.setFormat)
+  const preview = formatFileName(FILENAME_SAMPLE, format)
+  const updateSeg = (key: "scene" | "shot" | "take", patch: Partial<SegFormat>) =>
+    setFormat({ ...format, [key]: { ...format[key], ...patch } })
+
+  return (
+    <div className="grid gap-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm font-medium">文件名显示格式</span>
+        <span className="font-mono text-xs text-muted-foreground truncate">
+          Scene 1·Shot 1·Take 1 →{" "}
+          <span className="text-primary font-semibold">{preview || "—"}</span>
+        </span>
+      </div>
+
+      {/* 预设快选：选了即套用（不保持选中态）。 */}
+      <Select
+        value=""
+        onValueChange={(v) => {
+          const p = FILENAME_PRESETS[Number(v)]
+          if (p) setFormat(p.value)
+        }}
+      >
+        <SelectTrigger className="w-full">
+          <SelectValue placeholder="套用预设…" />
+        </SelectTrigger>
+        <SelectContent>
+          {FILENAME_PRESETS.map((p, i) => (
+            <SelectItem key={p.label} value={String(i)}>
+              {p.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+
+      {/* 分项配置 */}
+      <div className="grid grid-cols-3 gap-2">
+        <div className="grid gap-1">
+          <span className="text-[11px] text-muted-foreground">Scene 前缀</span>
+          <PrefixSelect
+            value={format.scene.prefix}
+            options={SCENE_PREFIXES}
+            onChange={(v) => updateSeg("scene", { prefix: v })}
+          />
+        </div>
+        <div className="grid gap-1">
+          <span className="text-[11px] text-muted-foreground">Scene 补零</span>
+          <PadSelect value={format.scene.pad} onChange={(v) => updateSeg("scene", { pad: v })} />
+        </div>
+        <div className="grid gap-1">
+          <span className="text-[11px] text-muted-foreground">分隔符</span>
+          <Select value={format.sep} onValueChange={(v) => setFormat({ ...format, sep: v })}>
+            <SelectTrigger className="h-9">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SEPARATORS.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {SEP_LABEL[s] ?? s}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="grid gap-1">
+          <span className="text-[11px] text-muted-foreground">Shot 前缀</span>
+          <PrefixSelect
+            value={format.shot.prefix}
+            options={SHOT_PREFIXES}
+            onChange={(v) => updateSeg("shot", { prefix: v })}
+          />
+        </div>
+        <div className="grid gap-1">
+          <span className="text-[11px] text-muted-foreground">Take 前缀</span>
+          <PrefixSelect
+            value={format.take.prefix}
+            options={TAKE_PREFIXES}
+            onChange={(v) => updateSeg("take", { prefix: v })}
+          />
+        </div>
+        <div className="grid gap-1">
+          <span className="text-[11px] text-muted-foreground">Take 补零</span>
+          <PadSelect value={format.take.pad} onChange={(v) => updateSeg("take", { pad: v })} />
+        </div>
+      </div>
+    </div>
+  )
 }
 
 const DEBUG_ASR_PLACEHOLDER = `{
@@ -512,6 +670,11 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                 </SelectContent>
               </Select>
             </div>
+
+            <Separator />
+
+            {/* ========== 文件名显示格式（场镜次 → 录音机文件名风格）========== */}
+            <FileNameFormatSettings />
           </TabsContent>
 
           {/* ============ 开发者 tab ============ */}
