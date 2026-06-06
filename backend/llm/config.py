@@ -8,9 +8,9 @@ TASK_CONFIG 的 system 字段仅作参考模板，service 层不自动注入。
 
 剧本解析（script_parse）为何不用 grammar / response_format（2026-06-06 实测拍板）：
   实测 grammar（GBNF 约束采样）在 Gemma（~25 万词表）上每 token 多花大量 CPU →
-  吞吐从 ~84 tok/s 掉到 ~15 tok/s（5.6×）。故解析热路径**不用 grammar**，改 classify：
-  Gemma 只输出"每行说话人"短数组，台词由代码从原文取（见 sp_script.parse_scene_block）。
-  容错解析 + 兜底（解析失败 → 该场全部按描述，不崩）。
+  吞吐从 ~84 tok/s 掉到 ~15 tok/s（5.6×）。故解析热路径**不用 grammar**：代码先按场头
+  切分，再让 Gemma 逐行吐 [说话人, 台词]（完整输出 v5，见 sp_script.parse_scene_block）。
+  容错解析 + 兜底（解析失败 → 冒号启发式，台词不丢、不崩）。
   tool-calling/grammar 留给只调一两次的路由 / 场记分析，不进逐场热循环。
 """
 

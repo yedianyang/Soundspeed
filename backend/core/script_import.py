@@ -370,6 +370,17 @@ def plan_import(
 # ---------------------------------------------------------------------------
 
 
+def _write_scene(dal: ScriptImportWriteDAL, scene_id: int, entry: dict) -> tuple[int, int]:
+    """把 plan entry（raw_text + lines）写入 script + script_lines，返回 (scene_id, script_id)。"""
+    raw_text: str = entry["raw_text"]
+    plan_lines: list[tuple] = entry["lines"]  # (None, character, text)
+
+    script_id = dal.insert_script(scene_id, raw_text)
+    for line_no, (_, character, text) in enumerate(plan_lines, start=1):
+        dal.insert_script_line(script_id, line_no, character, text)
+    return scene_id, script_id
+
+
 def apply_import(
     plan: ImportPlan,
     *,
@@ -407,16 +418,6 @@ def apply_import(
 
     is_single = plan.target == "current_scene"
 
-    def _write_scene(scene_id: int, entry: dict) -> tuple[int, int]:
-        """把 plan entry 写入 script + script_lines，返回 (scene_id, script_id)。"""
-        raw_text: str = entry["raw_text"]
-        plan_lines: list[tuple] = entry["lines"]  # (None, character, text)
-
-        script_id = dal.insert_script(scene_id, raw_text)
-        for line_no, (_, character, text) in enumerate(plan_lines, start=1):
-            dal.insert_script_line(script_id, line_no, character, text)
-        return scene_id, script_id
-
     # 写无重复场
     for entry in plan.new_scenes:
         if is_single:
@@ -436,7 +437,7 @@ def apply_import(
             else:
                 scene_id = entry["scene_id"]
 
-        results.append(_write_scene(scene_id, entry))
+        results.append(_write_scene(dal, scene_id, entry))
 
     return _apply_conflicts(plan, decisions, dal, is_single, results)
 
@@ -510,13 +511,6 @@ def _apply_conflicts(plan, decisions, dal, is_single, results):
             )
 
         # 写 incoming 内容（新版本）
-        incoming = conflict["incoming"]
-        raw_text = incoming["raw_text"]
-        plan_lines = incoming["lines"]
-
-        script_id = dal.insert_script(scene_id, raw_text)
-        for line_no, (_, character, text) in enumerate(plan_lines, start=1):
-            dal.insert_script_line(script_id, line_no, character, text)
-        results.append((scene_id, script_id))
+        results.append(_write_scene(dal, scene_id, conflict["incoming"]))
 
     return results

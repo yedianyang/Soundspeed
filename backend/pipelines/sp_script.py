@@ -1,45 +1,33 @@
 """SP Pipeline：剧本解析器（ticket 3.B）。
 
 公共 API：
-  Slugline      slugline 三要素 dataclass（frozen）
-  ParsedLine    单行对白/舞台指示 dataclass（frozen）
-  ParsedScene   单场解析结果 dataclass（frozen）
-  SPParseError  LLM 输出解析失败异常
-  run_sp_parse  纯异步函数，执行剧本解析
+  Slugline / ParsedLine / ParsedScene   解析结果 dataclass（frozen）
+  SPParseError                          解析失败异常（当前路径不主动抛，保留兼容）
+  split_scenes_by_slugline / split_for_parse  启发式分场（不调 LLM）
+  parse_scene_block                     单场结构化（Gemma 逐行判定 + 代码拼装）
+  run_sp_parse                          整本解析（split + 逐场，串行）
 
 设计依据：
-  docs/specs/2026-06-03-script-import-sp-pipeline.md §4
+  docs/specs/2026-06-03-script-import-sp-pipeline.md §4（注：实现已按 2026-06 实测演进，
+  与 spec v1「全 LLM + grammar」不同，详见下）
 
-分块策略（体量约束，§4 最后一段）
+架构（v5，2026-06 实测拍板）
 ---------------------------------------
-script_parse.max_tokens=8192（= n_ctx，靠 EOS 收尾），整本剧本仍不能一把梭，必须分块。
+整本剧本远超 n_ctx，且实测 grammar 在 Gemma（~25 万词表）上每 token CPU 开销大、
+吞吐降 5.6×。故按「能用代码就别用模型、模型只做必须语义判断、不用 grammar」分工：
 
-采用「空行优先切分 → 每块一次 LLM 调用 → 结果顺序 append」策略：
+1. 分场（split_scenes_by_slugline，纯代码）：正则认场头（slugline / 场号），对整本
+   一次扫切成「每段一场」。瞬时、不受上下文窗口限制（绕开整本喂不进的死结）。
+   超长单场再按字数兜底切（split_for_parse → _split_into_chunks）。
+2. 场头元信息（_parse_slugline，纯代码正则）：scene_code + 内外景/时间/地点。
+3. 逐行结构化（parse_scene_block，唯一调 LLM 处）：把单场正文喂 Gemma，它逐行吐
+   [说话人, 台词]——对白给说话人、动作/描述/舞台指示给空串（边吐台词边判定，
+   比"只标说话人"的 classify 准）。无 response_format/grammar。
+4. 解析模型输出（_parse_lines_output，永不抛）：模型输出不合法时退化为冒号启发式
+   兜底（_fallback_lines，台词不丢），保证整本不因单场崩。
 
-1. 先按空行（连续空行）把 raw_text 切成段落块（paragraph）。
-   空行是剧本中最常见的场间分隔，优先在段落边界切可避免把 slugline
-   和其紧跟的对白行切进两个不同块（孤儿场的主因）。
-2. 按 chunk_size 字符数累积段落块成 chunk；段落内不切（保场内完整）。
-   若单个段落块本身超过 chunk_size，退化到按行机械切兜底（防超 token）。
-3. 每块独立调用 LLM（task_type="script_parse"），LLM 在该块内做：
-   - slugline 识别与三要素抽取（int_ext / time_of_day / location）
-   - scene_code 识别（有则抽取，无则 null）
-   - 行结构化（character / text，舞台指示行 character=null）
-   - 脏数据过滤（空行、页码、噪声）
-4. 各块输出的 ParsedScene 列表顺序 append，形成最终结果。
-
-此策略的权衡（已标 flag，留 Lead 拍板）：
-- 跨块孤儿场：空行切降低概率但不消除——场间无空行的剧本仍可能在
-  块边界切中场内。多场长剧本是**常态触发**（不只是单场超长的边缘情况）。
-  chunk 边界落在 slugline 与其对白行之间时，对白那块会被 LLM 识别为
-  scene_code=null 的孤儿场，append-only 入库建出额外场。v1 不合并，
-  待冒烟（sp_smoke.py）后评估实际孤儿场率再决定是否加后处理。
-- scene_code 透传：strip 前后空白后原样透传 LLM 输出（可能是「场3」
-  「3」「Scene 3」等），跨「手动建场」与「解析器建场」的归一化规则
-  待 Lead + 2.x 商定后对齐（§3.1）。
-- 空 raw_text 直接返回 []，不调 LLM（422 是 3.D 端点的职责）。
-
-不写正则/规则解析器（用户明确定，§4）。所有语义由 LLM 结构化。
+历史：v1 全靠 LLM + grammar 输出整场 JSON（慢）；中途试过 classify（只标说话人，
+4B 易把含人名的描述误判成对白，质量差）；v5 定为上面的"代码切场 + LLM 逐行 + 无 grammar"。
 """
 
 from __future__ import annotations
@@ -128,7 +116,7 @@ _DEFAULT_CHUNK_SIZE = 1500
 
 
 def _build_system_prompt() -> str:
-    """返回 TASK_CONFIG["script_parse"]["system"]（classify prompt）。"""
+    """返回 TASK_CONFIG["script_parse"]["system"]（v5 完整输出 prompt，逐行 [说话人,台词]）。"""
     return TASK_CONFIG["script_parse"]["system"]
 
 
