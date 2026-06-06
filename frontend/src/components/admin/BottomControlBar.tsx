@@ -159,12 +159,12 @@ export default function BottomControlBar({
   return (
     <div className="flex-shrink-0 border-t bg-background">
       {/* Memo input（真实打字 memo 输入口；类别走 @语法，Mic 预留语音入口）*/}
-      <div className="relative z-30 px-4 pt-2 pb-1.5">
+      <div className="relative z-30 mx-auto w-full max-w-screen-2xl px-4 pt-2 pb-1.5">
         <MemoInput onNoteAdded={onNoteAdded} />
       </div>
 
-      {/* Controls: left stack + right REC (absolute) */}
-      <div className="px-4 pb-2 mt-1 relative">
+      {/* Controls: left stack + right REC (absolute)。max-w 容器让超宽屏 REC 不贴 viewport 右、跟控制区一组。 */}
+      <div className="mx-auto w-full max-w-screen-2xl px-4 pb-2 mt-1 relative">
         <div className="flex flex-col gap-2 pr-24">
           {/* Row 1: Scene / Shot / Take / Mark。窄屏可换行（Scene 持最长内容，给更大比例）。 */}
           <div className="flex items-center gap-2 flex-wrap">
@@ -450,7 +450,7 @@ export default function BottomControlBar({
 
       {/* Log */}
       <div className="px-4 pb-1.5 pt-0.5 border-t">
-        <div className="flex items-center justify-between">
+        <div className="mx-auto w-full max-w-screen-2xl flex items-center justify-between">
           <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap py-1">
             <span className="size-1.5 rounded-full bg-green-500 flex-shrink-0" />
             <span>debug log</span>
