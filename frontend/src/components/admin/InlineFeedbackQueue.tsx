@@ -47,21 +47,27 @@ function ReceiptRow({
   )
 }
 
-// pending note：处理中（转圈）/ 失败（琥珀左条 + 重试）。
+// pending note：处理中（转圈 + 当条内容）/ 失败（alert 块 + 当条内容 + 原因 + 重试）。
+// 始终显示当条内容（原文优先，语音无原文则占位 content），让多条并存时能区分是哪条。
 function PendingRow({ pn, onRetry }: { pn: PendingNote; onRetry: (pn: PendingNote) => void }) {
   const failed = pn.failedReason != null
+  const label = pn.rawText || pn.content
   if (!failed) {
     return (
-      <div className="flex items-center gap-2 text-sm text-muted-foreground/80 px-1 py-1">
-        <Loader2 className="size-3.5 animate-spin opacity-60" />
-        <span>正在记录…</span>
+      <div className="flex items-center gap-2 px-2.5 py-1.5 text-sm text-muted-foreground">
+        <Loader2 className="size-3.5 animate-spin opacity-60 flex-shrink-0" />
+        <span className="flex-1 min-w-0 truncate text-foreground/80">{label}</span>
+        <span className="text-xs text-muted-foreground/60 flex-shrink-0">处理中</span>
       </div>
     )
   }
-  // 失败 = alert 块（更重主题色底 + ring），与「正在记录…」中性轻行、答案淡主题色块拉开档差。
+  // 失败 = alert 块（更重主题色底 + ring），与处理中轻行、答案淡主题色块拉开档差。
   return (
     <div className={cn(feedBlock.alert, "flex items-center gap-2 px-2.5 py-1.5 text-sm")}>
-      <span className="flex-1 min-w-0 text-foreground">{FAIL_REASON_TEXT[pn.failedReason!] ?? "处理失败"}</span>
+      <span className="flex-1 min-w-0 truncate text-foreground">{label}</span>
+      <span className="text-xs text-muted-foreground flex-shrink-0">
+        {FAIL_REASON_TEXT[pn.failedReason!] ?? "处理失败"}
+      </span>
       <button onClick={() => onRetry(pn)} className="text-primary font-medium hover:underline flex-shrink-0">
         重试
       </button>
@@ -76,17 +82,19 @@ function QaRow({ q, onAsNote }: { q: QaItem; onAsNote: (question: string) => voi
   const [expanded, setExpanded] = useState(false)
   if (q.status === "processing") {
     return (
-      <div className="flex items-center gap-2 text-sm text-muted-foreground/80 px-1 py-1">
-        <Loader2 className="size-3.5 animate-spin opacity-60" />
-        <span>正在查询…</span>
+      <div className="flex items-center gap-2 px-2.5 py-1.5 text-sm text-muted-foreground">
+        <Loader2 className="size-3.5 animate-spin opacity-60 flex-shrink-0" />
+        <span className="flex-1 min-w-0 truncate text-foreground/80">{q.question}</span>
+        <span className="text-xs text-muted-foreground/60 flex-shrink-0">查询中</span>
       </div>
     )
   }
-  // 警告/失败 = alert 块（更重主题色底 + ring）。
+  // 警告/失败 = alert 块（更重主题色底 + ring）。显示当条问题 + 失败原因以区分。
   if (q.status === "failed") {
     return (
-      <div className={cn(feedBlock.alert, "px-2.5 py-1.5 text-sm text-foreground")}>
-        查询失败：{q.failedReason ?? "未知"}
+      <div className={cn(feedBlock.alert, "flex items-center gap-2 px-2.5 py-1.5 text-sm")}>
+        <span className="flex-1 min-w-0 truncate text-foreground">{q.question}</span>
+        <span className="text-xs text-muted-foreground flex-shrink-0">{q.failedReason ?? "查询失败"}</span>
       </div>
     )
   }

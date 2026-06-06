@@ -426,16 +426,16 @@ export default function BottomControlBar({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             {/* LLM 反馈一级入口（带未读点）：点开 QP 问答 + L2 推送全历史档案 Sheet。
-                纯文字 + 主题色，未读点 bg-primary，无装饰图标。 */}
+                常驻淡主题色 pill 提升可见性，未读点描背景色浮出，无装饰图标。 */}
             <button
               type="button"
               onClick={onOpenArchive}
-              className="relative flex items-center h-7 px-2.5 rounded-full text-[11px] font-medium text-primary hover:bg-primary/10 transition-colors"
-              title="LLM 反馈：QP 问答 + L2 推送全历史"
+              className="relative flex items-center h-7 px-3 rounded-full text-[11px] font-medium text-primary bg-primary/10 hover:bg-primary/20 transition-colors"
+              title="LLM 反馈历史：QP 问答 + L2 推送全历史"
             >
-              LLM 反馈
+              LLM 历史
               {archiveUnread > 0 && (
-                <span className="absolute top-0.5 right-0 size-1.5 rounded-full bg-primary" />
+                <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-primary ring-2 ring-background" />
               )}
             </button>
             <span className="text-muted-foreground/30 text-[11px]">·</span>
