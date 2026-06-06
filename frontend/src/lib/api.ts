@@ -710,22 +710,30 @@ export function useScriptUploads() {
 
 // ── 导出场记单 CSV ──
 
-// 从 Content-Disposition 抠 filename；跨域已 expose 该头（后端 CORS）。读不到则回退本地名。
-function filenameFromDisposition(cd: string | null): string | null {
-  if (!cd) return null
-  const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd)
-  return m ? decodeURIComponent(m[1]) : null
+// 导出文件名由前端权威生成（纯 ASCII，恒带 .csv 后缀）。不依赖响应的 Content-Disposition——
+// 跨域代理可能 strip 或改写该头，浏览器读到的值不可信，曾导致下载名乱码 / 丢后缀。
+// scope 标出范围（today/all），日期用本地日期。
+export function buildExportFilename(scope: "today" | "all", now = new Date()): string {
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, "0")
+  const d = String(now.getDate()).padStart(2, "0")
+  return `soundspeed_takes_${scope}_${y}-${m}-${d}.csv`
 }
 
-// 导出 take 为 CSV 并触发浏览器下载。FileName 列按用户当前命名格式渲染（与 UI 一致）：
-// 把 fmt 摊成 query 传后端，后端用同一算法生成 FileName，CSV 装配/转义/BOM 全在后端。
-// range 给定时只导该 take 开录时间区间（[from, to) Unix 秒，"今天"=本地零点起 24h）；
-// 省略即导全部。不弹 modal——下拉选完直接下载（blob + 隐藏 a 标签）。
-export async function exportTakesCsv(
+// "今天" 的导出区间：本地零点起 24h（[from, to) Unix 秒）。收 now 参数便于测试。
+// 注：固定加 86400，DST 切换当天本地日严格说不是恒定 86400 秒，此处沿用现有行为不做日历修正。
+export function todayRange(now = new Date()): { from: number; to: number } {
+  const from = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000
+  return { from, to: from + 86400 }
+}
+
+// 装配导出请求：把 fmt 摊成 query（后端用同一算法生成 FileName 列），range 给定时附 ts_from/ts_to，
+// token 给定时带 Authorization。纯函数，便于直接测 URL/参数/鉴权头，不碰 fetch/DOM。
+export function buildExportRequest(
   fmt: FileNameFormat,
-  range?: { from: number; to: number },
-): Promise<void> {
-  const token = useSessionStore.getState().token
+  range: { from: number; to: number } | undefined,
+  token: string | null,
+): { url: string; headers: Record<string, string> } {
   const params = new URLSearchParams({
     scene_prefix: fmt.scene.prefix,
     scene_pad: String(fmt.scene.pad),
@@ -739,28 +747,43 @@ export async function exportTakesCsv(
     params.set("ts_from", String(range.from))
     params.set("ts_to", String(range.to))
   }
-  const res = await fetch(`${API_BASE}/api/v1/takes/export?${params.toString()}`, {
+  return {
+    url: `${API_BASE}/api/v1/takes/export?${params.toString()}`,
     headers: token ? { Authorization: `Bearer ${token}` } : {},
-  })
+  }
+}
+
+// 导出 take 为 CSV 并触发浏览器下载。FileName 列按用户当前命名格式渲染（与 UI 一致）：
+// 把 fmt 摊成 query 传后端，后端用同一算法生成 FileName，CSV 装配/转义/BOM 全在后端。
+// range 给定时只导该 take 开录时间区间（[from, to) Unix 秒，"今天"=本地零点起 24h）；
+// 省略即导全部。不弹 modal——下拉选完直接下载（blob + 隐藏 a 标签）。
+export async function exportTakesCsv(
+  fmt: FileNameFormat,
+  scope: "today" | "all",
+  range?: { from: number; to: number },
+): Promise<void> {
+  const token = useSessionStore.getState().token
+  const { url, headers } = buildExportRequest(fmt, range, token)
+  const res = await fetch(url, { headers })
   if (!res.ok) {
     throw new ApiError(res.status, `GET /api/v1/takes/export → ${res.status}`)
   }
 
   const blob = await res.blob()
-  const today = new Date().toISOString().slice(0, 10)
-  const filename =
-    filenameFromDisposition(res.headers.get("Content-Disposition")) ??
-    `soundspeed_takes_${today}.csv`
+  // 强制声明为 CSV 的 blob 类型；文件名前端权威生成，不读 Content-Disposition。
+  const csvBlob = blob.type ? blob : new Blob([blob], { type: "text/csv;charset=utf-8" })
+  const filename = buildExportFilename(scope)
 
-  const url = URL.createObjectURL(blob)
+  const objectUrl = URL.createObjectURL(csvBlob)
   try {
     const a = document.createElement("a")
-    a.href = url
+    a.href = objectUrl
     a.download = filename
+    a.rel = "noopener"
     document.body.appendChild(a)
     a.click()
     a.remove()
   } finally {
-    URL.revokeObjectURL(url)
+    URL.revokeObjectURL(objectUrl)
   }
 }

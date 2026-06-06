@@ -29,6 +29,7 @@ import type { Status } from "@/types/take"
 import type { LlmState, TakeStatus, TakeDTO } from "@/types/api"
 import {
   exportTakesCsv,
+  todayRange,
   pickActiveScene,
   takesQueryKey,
   useActivateScene,
@@ -167,13 +168,8 @@ export default function AdminHome() {
     if (exporting) return
     setExporting(true)
     try {
-      let range: { from: number; to: number } | undefined
-      if (scope === "today") {
-        const now = new Date()
-        const from = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000
-        range = { from, to: from + 86400 }
-      }
-      await exportTakesCsv(fileFormat, range)
+      const range = scope === "today" ? todayRange() : undefined
+      await exportTakesCsv(fileFormat, scope, range)
     } catch (err) {
       console.error("导出 CSV 失败", err)
     } finally {
