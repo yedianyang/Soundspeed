@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react"
-import { Mic, ArrowUp, X } from "lucide-react"
+import { useRef, useState } from "react"
+import { Mic, ArrowUp } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { postNote, postVoiceNote } from "@/lib/api"
@@ -8,38 +8,24 @@ import { randomId } from "@/lib/uuid"
 import { useVoiceRecorder } from "@/hooks/useVoiceRecorder"
 import { useSessionStore } from "@/store/session"
 
-// 答案气泡自动淡出毫秒数（点击 X 可提前关闭）。
-const QP_ANSWER_TTL_MS = 12_000
-
-interface MemoInputProps {
-  onNoteAdded?: () => void
-}
-
 // client_id 只需全局唯一（pending 乐观去重/精确移除/标失败的键），不要求密码学强度。
 const newClientId = (): string => randomId("nid")
 
-// 底部栏的打字 memo 输入（场记真实输入口）。接 POST /notes；类别走 @语法（如「@keep 第三条好」），
-// 不打前缀默认 note。提交后乐观插入 pending note（队列由上方 NoteList 显示「处理中」），
-// WS note.processed 落定后转实。麦克风按钮按住录音（4.L）→ 16k WAV → POST /notes/voice → Gemma 原生音频归置。
-export default function MemoInput({ onNoteAdded }: MemoInputProps) {
+// 底部栏的打字 memo 输入（场记真实输入口）。接 POST /notes 并带 CONN_ID：后端块③调度器自动判
+// note / query（用户发送时不打前缀，回溯地按 kind 渲染）。普通备注 → 乐观 pending → note.processed
+// 落定转就地回执；判为 query → 撤掉乐观 note、转一条就地 qaItem「正在查询…」，答案经
+// qp.answer.{CONN_ID} WS 按 client_id resolveQa 落到对应那条。类别走 @语法（@ 开头后端跳过分类
+// 强制 note）。麦克风按住录音（4.L）→ 16k WAV → POST /notes/voice → Gemma 原生音频归置。
+export default function MemoInput() {
   const [text, setText] = useState("")
   const addPendingNote = useSessionStore((s) => s.addPendingNote)
-  const qpAnswer = useSessionStore((s) => s.qpAnswer)
-  const clearQpAnswer = useSessionStore((s) => s.clearQpAnswer)
   const recorder = useVoiceRecorder()
   // 当前手势是否在录音（守卫 start 的 async 间隙 + 避免 up/leave 重复触发）。
   const gestureRef = useRef(false)
 
-  // 答案气泡到达后定时淡出（TTL 内来新答案则重置计时——setQpAnswer 刷新 ts）。
-  useEffect(() => {
-    if (!qpAnswer) return
-    const timer = setTimeout(() => clearQpAnswer(), QP_ANSWER_TTL_MS)
-    return () => clearTimeout(timer)
-  }, [qpAnswer, clearQpAnswer])
-
   // 文本提交：乐观 pending 提前到 await 之前（提交即显「处理中」，藏掉后端 classify 串行延迟），
-  // 提交转后台不阻塞输入。后端判这条其实是查询（kind=query）→ 撤掉刚插的 note pending，
-  // 答案靠 qp.answer 气泡回灌；普通备注照旧等 note.processed WS 落定转实。
+  // 提交转后台不阻塞输入。后端判这条其实是查询（kind=query）→ 撤掉刚插的 note pending、转一条
+  // 就地 qaItem 占位，答案靠 qp.answer WS 回灌；普通备注照旧等 note.processed 落定转回执。
   const handleSubmit = () => {
     const trimmed = text.trim()
     if (!trimmed || recorder.recording) return
@@ -54,12 +40,14 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
       rawText: trimmed, // 失败重试据此重投同文本
     })
     setText("")
-    onNoteAdded?.()
     postNote(trimmed, undefined, clientId, CONN_ID)
       .then((resp) => {
         if (resp.kind === "query") {
-          // 实为查询：撤掉乐观插的 note pending（它不会落库、无 note.processed 回灌），答案走气泡。
-          useSessionStore.getState().removePending(clientId)
+          // 实为查询：撤掉乐观插的 note pending（它不落库、无 note.processed 回灌），转一条就地
+          // qaItem 占位「正在查询…」，答案经 qp.answer.{CONN_ID} 按 client_id resolveQa 落到这条。
+          const s = useSessionStore.getState()
+          s.removePending(clientId)
+          s.addQa({ client_id: clientId, question: trimmed, status: "processing", ts })
         }
       })
       .catch(() => {
@@ -80,18 +68,17 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
   const uploadVoice = async (wav: Blob) => {
     const clientId = newClientId()
     const ts = Date.now() / 1000
-    // 乐观 pending：语音的类别/正文 202 时未知（由模型从音频判）。kind=voice → 渲染只显 🎤 不显
-    // @category（避免伪造类别）；voiceBlob 供失败重试重传。
+    // 乐观 pending：语音的类别/正文 202 时未知（由模型从音频判）。kind=voice → 渲染只显「语音备注」
+    // 不显 @category（避免伪造类别）；voiceBlob 供失败重试重传。
     addPendingNote({
       client_id: clientId,
       kind: "voice",
       ts,
       category: "note",
-      content: "🎤 语音备注",
+      content: "语音备注",
       rawText: "",
       voiceBlob: wav,
     })
-    onNoteAdded?.()
     try {
       await postVoiceNote(wav, clientId, ts)
     } catch {
@@ -126,65 +113,46 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
   }
 
   return (
-    <div className="relative">
-      {/* QP 答案气泡：默认位置在 memo 输入框正上方，TTL 后淡出 / 点 X 关闭。
-          UX 位置（浮层 toast vs 框上方气泡）待 Lead 定，先做能用的草样。 */}
-      {qpAnswer && (
-        <div className="absolute bottom-full left-0 right-0 mb-2 flex justify-start">
-          <div className="flex items-start gap-2 max-w-full rounded-2xl bg-primary text-primary-foreground px-3.5 py-2 text-sm shadow-lg">
-            <span className="whitespace-pre-wrap break-words">{qpAnswer.text}</span>
-            <button
-              type="button"
-              onClick={clearQpAnswer}
-              className="mt-0.5 shrink-0 opacity-70 hover:opacity-100"
-              title="关闭"
-            >
-              <X className="size-3.5" />
-            </button>
-          </div>
-        </div>
-      )}
-      <div className="flex items-center gap-2 h-11 px-4 rounded-4xl bg-muted">
-        <Input
-          placeholder={
-            recorder.recording
-              ? "录音中…松开发送，上滑取消"
-              : "Typing memo · 例：第三条结尾好，可以用（@keep / @pass / @ng）"
-          }
-          className="flex-1 bg-transparent border-0 ring-0 rounded-none text-sm focus:outline-none placeholder:text-muted-foreground/70 focus-visible:ring-0"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={handleKeyDown}
-          disabled={recorder.recording}
-        />
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="rounded-full text-muted-foreground hover:text-foreground disabled:opacity-40"
-          onClick={handleSubmit}
-          disabled={recorder.recording || !text.trim()}
-          title="提交备注"
-        >
-          <ArrowUp className="size-4" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className={
-            "rounded-full select-none touch-none " +
-            (recorder.recording
-              ? "text-destructive bg-destructive/10"
-              : "text-muted-foreground hover:text-foreground")
-          }
-          onPointerDown={handleMicDown}
-          onPointerUp={handleMicUp}
-          onPointerLeave={handleMicCancel}
-          onPointerCancel={handleMicCancel}
-          title="按住说话（松开发送，上滑取消）"
-        >
-          <Mic className={"size-4" + (recorder.recording ? " animate-pulse" : "")} />
-        </Button>
-      </div>
+    <div className="flex items-center gap-2 h-11 px-4 rounded-4xl bg-muted">
+      <Input
+        placeholder={
+          recorder.recording
+            ? "录音中…松开发送，上滑取消"
+            : "Typing memo / 提问 · 第三条结尾好（@keep）｜ 第三场 NG 几条？"
+        }
+        className="flex-1 bg-transparent border-0 ring-0 rounded-none text-sm focus:outline-none placeholder:text-muted-foreground/70 focus-visible:ring-0"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={handleKeyDown}
+        disabled={recorder.recording}
+      />
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className="rounded-full text-muted-foreground hover:text-foreground disabled:opacity-40"
+        onClick={handleSubmit}
+        disabled={recorder.recording || !text.trim()}
+        title="提交备注"
+      >
+        <ArrowUp className="size-4" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className={
+          "rounded-full select-none touch-none " +
+          (recorder.recording
+            ? "text-destructive bg-destructive/10"
+            : "text-muted-foreground hover:text-foreground")
+        }
+        onPointerDown={handleMicDown}
+        onPointerUp={handleMicUp}
+        onPointerLeave={handleMicCancel}
+        onPointerCancel={handleMicCancel}
+        title="按住说话（松开发送，上滑取消）"
+      >
+        <Mic className={"size-4" + (recorder.recording ? " animate-pulse" : "")} />
+      </Button>
     </div>
   )
 }

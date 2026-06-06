@@ -8,6 +8,7 @@ import type {
   NoteCreateResponse,
   NoteListResponse,
   PatchTakeBody,
+  QueryResponse,
   SceneDTO,
   ScriptDTO,
   SpeakerDTO,
@@ -472,6 +473,19 @@ export function postNote(
 
 export function getTakeNotes(takeId: number): Promise<NoteListResponse> {
   return request<NoteListResponse>(`/api/v1/takes/${takeId}/notes`)
+}
+
+// QP 同步直连：跑 tool-loop 并在 HTTP body 返回答案。仅用于「↩ 其实是提问」显式强制查询
+//（绕过 /notes 自动分类器）。一次性 conn_id：/api/v1/query 也广播到 qp.answer.{conn_id}，但前端
+// 只认领 qp.answer.{CONN_ID}，这条广播到无人订阅的 topic 故无害；答案靠同步返回就地 resolveQa。
+// 正常打字 memo 走 postNote(…,CONN_ID) 由后端自动判 note/query，不经此路。
+export function postQuery(text: string): Promise<QueryResponse> {
+  const connId =
+    crypto?.randomUUID?.() ?? `qp-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return request<QueryResponse>(`/api/v1/query`, {
+    method: "POST",
+    body: JSON.stringify({ text, conn_id: connId }),
+  })
 }
 
 // 语音 note（4.K/4.L）：浏览器麦 WAV 直传（multipart，POST /notes/voice）。后端 202

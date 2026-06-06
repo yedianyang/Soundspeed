@@ -26,7 +26,14 @@ export function StatusChip({
   )
   const content = (
     <>
-      <span className={cn("size-1.5 rounded-full flex-shrink-0", dotColor)} />
+      {/* warn 态（如 LLM 处理中）点呼吸，与 LLM 历史入口左点的处理态脉冲一致。 */}
+      <span
+        className={cn(
+          "size-1.5 rounded-full flex-shrink-0",
+          dotColor,
+          tone === "warn" && "animate-pulse",
+        )}
+      />
       <span className="hidden sm:inline text-xs font-medium text-foreground flex-shrink-0">{label}</span>
       {detail && (
         <span className="text-[10px] font-mono text-muted-foreground truncate min-w-0">{detail}</span>
@@ -58,7 +65,13 @@ export function LiveLevelMeter({
   color?: string
   className?: string
 }) {
-  const lit = Math.round(Math.min(1, Math.max(0, level)) * count)
+  // 线性 RMS 在人声区间（~0.05–0.3）亮格太少、不明显 → 转 dB（对数感知）刻度放大小信号：
+  // 20·log10(level) 落在 [FLOOR_DB, 0] dB，归一化到 [0,1]。静音（level→0）落到 floor 以下 → 0 格。
+  const FLOOR_DB = -60
+  const safe = Math.min(1, Math.max(0, level))
+  const db = 20 * Math.log10(Math.max(safe, 1e-5))
+  const norm = Math.max(0, (db - FLOOR_DB) / -FLOOR_DB)
+  const lit = Math.round(Math.min(1, norm) * count)
   return (
     <div className={cn("flex items-center gap-[1.5px] h-4 flex-shrink-0", className)}>
       {Array.from({ length: count }, (_, i) => (

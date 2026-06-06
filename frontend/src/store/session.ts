@@ -10,7 +10,13 @@ import type {
   TranscriptSegmentDTO,
 } from "@/types/api"
 
-import type { NoteFailedMsg, NoteProcessedMsg, PendingNote } from "@/types/api"
+import type {
+  FeedReceipt,
+  NoteFailedMsg,
+  NoteProcessedMsg,
+  PendingNote,
+  QaItem,
+} from "@/types/api"
 
 export type ConnectionState = "connecting" | "open" | "closed" | "no-token"
 
@@ -59,8 +65,19 @@ interface SessionState {
   // pending notes: 已提交、等待 NP Pipeline 归置
   pendingNotes: PendingNote[]
 
-  // note 队列版本号：note.processed 落库后递增，NoteList 据此 refetch resolved（让落定的 note 及时显示，
-  // 不只移除 pending）。提交时不 bump——那时 note 未落库，refetch 拿不到，pending 已由 store 直接显示。
+  // 就地队列的 note 回执（done 态，note.processed 派生，3s 由组件 dismissReceipt 自走）
+  feedReceipts: FeedReceipt[]
+
+  // QP 问答项：就地队列渲染（processing/done/failed）+ 留存供档案（P5）。
+  // inlineDismissed 后只在档案显示，不在就地层。query 答案经 qp.answer.{CONN_ID} WS 按 client_id resolveQa。
+  qaItems: QaItem[]
+
+  // LLM 反馈档案未读数：L2 推送实时到达（take.changed 带 script_diff null→非 null）/ QP 新答案落定
+  // 时 +1；打开档案 Sheet 时 markArchiveRead 清 0。seedTakes（历史加载/refetch）不 bump——非新事件。
+  archiveUnread: number
+
+  // note 队列版本号：note.processed 落库后递增，据此 refetch resolved notes（History/take 详情）。
+  // 提交时不 bump——那时 note 未落库，refetch 拿不到，pending 已由 store 直接显示。
   notesVersion: number
 
   // take.end 后处理状态条（diarization + Gemma）；done 清空，error 保留到下次录制。null=不显示。
@@ -78,10 +95,6 @@ interface SessionState {
   // viewer.count：当前连着 /ws 的客户端总数（含自己）。后端在连接建立 / 断开时广播。
   // 连接断开（onClose）归 0，避免显示陈旧值；重连后服务端首帧重填。
   viewerCount: number
-
-  // qp.answer：入口调度器判定为查询时，QP 跑完把答案经 qp.answer.{CONN_ID} 广播回本 tab。
-  // 存最近一条答案 + 到达时间戳（供气泡自动淡出计时）；null=不显示。点击 / 超时调 clearQpAnswer 清空。
-  qpAnswer: { text: string; ts: number } | null
 
   // ── actions ──
   setToken: (t: string | null) => void
@@ -104,8 +117,13 @@ interface SessionState {
   noteProcessed: (m: NoteProcessedMsg) => void
   noteFailed: (m: NoteFailedMsg) => void
   retryPending: (clientId: string) => void
-  setQpAnswer: (text: string) => void
-  clearQpAnswer: () => void
+  dismissPending: (clientId: string) => void
+  dismissReceipt: (clientId: string) => void
+  addQa: (q: QaItem) => void
+  resolveQa: (clientId: string, answer: string) => void
+  failQa: (clientId: string, reason: string) => void
+  dismissQaInline: (clientId: string) => void
+  markArchiveRead: () => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -118,13 +136,15 @@ export const useSessionStore = create<SessionState>((set) => ({
   takes: new Map(),
   llm: { state: "idle", taskType: null },
   pendingNotes: [],
+  feedReceipts: [],
+  qaItems: [],
+  archiveUnread: 0,
   notesVersion: 0,
   processing: null,
   deviceWarning: null,
   backendLevel: 0,
   backendLevelTs: 0,
   viewerCount: 0,
-  qpAnswer: null,
 
   setToken: (t) =>
     set(() => ({
@@ -191,6 +211,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const takes = new Map(state.takes)
       const existing = takes.get(m.take_id)
+      // L2 推送实时到达：script_diff 从无到有（新 take 直接带 diff，或已存在 take 补上 diff）→ 档案未读 +1。
+      const l2Arrived = m.script_diff != null && existing?.script_diff == null
       if (existing) {
         // patch-merge：只覆盖 take.changed 的 5 字段，保留 shot/start_ts/end_ts/notes 等。
         // script_diff 同 seedTakes：不向下降级到 null（与 P1-1 对称的纵深防御）。单条有序 WS 上
@@ -231,7 +253,11 @@ export const useSessionStore = create<SessionState>((set) => ({
           ? m.take_id
           : state.currentTakeId
 
-      return { takes, currentTakeId }
+      return {
+        takes,
+        currentTakeId,
+        archiveUnread: l2Arrived ? state.archiveUnread + 1 : state.archiveUnread,
+      }
     }),
 
   // getTakes 全量覆盖每个 take_id 条目（getTakes 权威）。例外：script_diff 不向下降级到 null——
@@ -290,12 +316,31 @@ export const useSessionStore = create<SessionState>((set) => ({
   // client_id 精确移除对应 pending（content 被 LLM 改写、ts 前后端不同源，旧的三元匹配必失败 → 永久卡
   // 「处理中」）。client_id 缺失（异常/旧后端）时不误删，仅 bump version。notesVersion 递增触发 refetch。
   noteProcessed: (m) =>
-    set((s) => ({
-      pendingNotes: m.client_id
-        ? s.pendingNotes.filter((p) => p.client_id !== m.client_id)
-        : s.pendingNotes,
-      notesVersion: s.notesVersion + 1,
-    })),
+    set((s) => {
+      // 移除前先取对应 pending 的原文，供回执「↩ 其实是提问」改判重发（content 被 LLM 改写，故用 rawText）。
+      const matched = m.client_id
+        ? s.pendingNotes.find((p) => p.client_id === m.client_id)
+        : undefined
+      return {
+        pendingNotes: m.client_id
+          ? s.pendingNotes.filter((p) => p.client_id !== m.client_id)
+          : s.pendingNotes,
+        notesVersion: s.notesVersion + 1,
+        // 就地队列：落定时推一条 note 回执（done 态，组件 3s 后 dismissReceipt 自走）。
+        feedReceipts: m.client_id
+          ? [
+              ...s.feedReceipts,
+              {
+                client_id: m.client_id,
+                category: m.category,
+                content: m.content,
+                rawText: matched?.rawText ?? m.content,
+                ts: m.ts,
+              },
+            ]
+          : s.feedReceipts,
+      }
+    }),
 
   // 4.I：NP 失败 → 按 client_id 把对应 pending 标失败态（保留在列表，渲染红 + reason + 重试），
   // 而非移除或永久卡「处理中」。client_id 缺失（异常/旧链路）时不误标，仅原样返回。
@@ -329,11 +374,40 @@ export const useSessionStore = create<SessionState>((set) => ({
   // viewer.count：后端广播的在线观看数；onClose 调 setViewerCount(0) 清陈旧值。
   setViewerCount: (count) => set(() => ({ viewerCount: count })),
 
-  // qp.answer：收到查询答案 → 存值 + 到达时间戳（气泡按此计时淡出）。后到的答案覆盖前一条。
-  setQpAnswer: (text) => set(() => ({ qpAnswer: { text, ts: Date.now() } })),
+  // 放弃失败 pending：用户主动关掉这条失败行，不再重试，直接移除。
+  dismissPending: (clientId) =>
+    set((s) => ({ pendingNotes: s.pendingNotes.filter((p) => p.client_id !== clientId) })),
 
-  // 清空答案气泡（自动淡出超时 / 用户点击关闭）。
-  clearQpAnswer: () => set(() => ({ qpAnswer: null })),
+  // 就地回执 3s 后由组件调用，按 client_id 移除（让回执飘走，不长期占席）。
+  dismissReceipt: (clientId) =>
+    set((s) => ({ feedReceipts: s.feedReceipts.filter((r) => r.client_id !== clientId) })),
+
+  // QP 问答：提交即乐观插 processing；qp.answer WS（按 client_id resolveQa）填 done；异常填 failed。
+  // query 项就地 lingers（不像 note 回执 3s 自走），点开看长答案，由 dismissQaInline 手动收进档案。
+  addQa: (q) => set((s) => ({ qaItems: [...s.qaItems, q] })),
+  resolveQa: (clientId, answer) =>
+    set((s) => ({
+      qaItems: s.qaItems.map((q) =>
+        q.client_id === clientId ? { ...q, status: "done", answer } : q,
+      ),
+      // QP 新答案进档案 → 未读 +1（打开档案清 0）。
+      archiveUnread: s.archiveUnread + 1,
+    })),
+  failQa: (clientId, reason) =>
+    set((s) => ({
+      qaItems: s.qaItems.map((q) =>
+        q.client_id === clientId ? { ...q, status: "failed", failedReason: reason } : q,
+      ),
+    })),
+  dismissQaInline: (clientId) =>
+    set((s) => ({
+      qaItems: s.qaItems.map((q) =>
+        q.client_id === clientId ? { ...q, inlineDismissed: true } : q,
+      ),
+    })),
+
+  // 打开档案 Sheet 时清未读（看过即已读）。
+  markArchiveRead: () => set((s) => (s.archiveUnread === 0 ? {} : { archiveUnread: 0 })),
 
   // 清实时转录（REC 开始 / dev 注入开始时调，避免上一条 take 的转录残留）。
   resetSegments: () => set(() => ({ segments: { ch1: [], ch2: [] } })),

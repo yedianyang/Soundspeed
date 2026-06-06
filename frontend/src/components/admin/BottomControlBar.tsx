@@ -28,7 +28,7 @@ import { STATUS_DOT, STATUS_LABEL } from "@/lib/constants"
 import { stageButton, recordingDisabled } from "@/lib/styles"
 import { cn, formatElapsed } from "@/lib/utils"
 import type { Status } from "@/types/take"
-import type { SceneDTO } from "@/types/api"
+import type { SceneDTO, LlmState } from "@/types/api"
 import TakeSpeakerSelect from "@/components/admin/TakeSpeakerSelect"
 import MemoInput from "@/components/admin/MemoInput"
 
@@ -72,8 +72,11 @@ interface BottomControlBarProps {
   sceneBusy?: boolean
   takeBusy?: boolean
 
-  // 打字 memo 提交后回调（触发 NoteList 刷新已落库 notes）。
-  onNoteAdded?: () => void
+  // ── P5：LLM 反馈档案一级入口（QP 问答 + L2 推送全历史）。未读点驱动来自 store.archiveUnread。──
+  onOpenArchive: () => void
+  archiveUnread: number
+  // LLM 运行态（与 header LLM chip 同源）：非 idle = 正在跑 → 入口左点呈处理态（amber + 脉冲）。
+  llmState: LlmState
 }
 
 export default function BottomControlBar({
@@ -105,7 +108,9 @@ export default function BottomControlBar({
   undoBusy = false,
   sceneBusy = false,
   takeBusy = false,
-  onNoteAdded,
+  onOpenArchive,
+  archiveUnread,
+  llmState,
 }: BottomControlBarProps) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [shotDraft, setShotDraft] = useState("")
@@ -150,12 +155,12 @@ export default function BottomControlBar({
   return (
     <div className="flex-shrink-0 border-t bg-background">
       {/* Memo input（真实打字 memo 输入口；类别走 @语法，Mic 预留语音入口）*/}
-      <div className="relative z-30 px-4 pt-2 pb-1.5">
-        <MemoInput onNoteAdded={onNoteAdded} />
+      <div className="relative z-30 mx-auto w-full max-w-screen-2xl px-4 pt-2 pb-1.5">
+        <MemoInput />
       </div>
 
-      {/* Controls: left stack + right REC (absolute) */}
-      <div className="px-4 pb-2 mt-1 relative">
+      {/* Controls: left stack + right REC (absolute)。max-w 容器让超宽屏 REC 不贴 viewport 右、跟控制区一组。 */}
+      <div className="mx-auto w-full max-w-screen-2xl px-4 pb-2 mt-1 relative">
         <div className="flex flex-col gap-2 pr-24">
           {/* Row 1: Scene / Shot / Take / Mark。窄屏可换行（Scene 持最长内容，给更大比例）。 */}
           <div className="flex items-center gap-2 flex-wrap">
@@ -334,18 +339,19 @@ export default function BottomControlBar({
               onChange={onSpeakerIdsChange}
               disabled={isRecording}
             />
+            {/* 窄屏（竖屏 <lg）缩成 + 圆按钮省空间；宽屏（横屏）显「Next take」全文。 */}
             <Button
               variant="ghost"
               onClick={onNextTake}
               disabled={nextDisabled}
               className={cn(
-                "gap-1.5 h-10 px-5 rounded-full bg-muted/60 hover:bg-muted/80 active:bg-muted/80 active:scale-95 transition-all text-foreground text-sm font-medium",
+                "gap-1.5 h-10 px-3 lg:px-5 rounded-full bg-muted/60 hover:bg-muted/80 active:bg-muted/80 active:scale-95 transition-all text-foreground text-sm font-medium",
                 disabledTone(true, nextDisabled)
               )}
               title={isRecording ? "录制中不可起新 take" : "起下一条空 take"}
             >
               <Plus className="size-4" />
-              Next take
+              <span className="hidden lg:inline">Next take</span>
             </Button>
             <Button
               variant="ghost"
@@ -386,6 +392,29 @@ export default function BottomControlBar({
             >
               <Undo2 className="size-5" />
             </Button>
+
+            {/* LLM 历史一级入口：Mark(TBD) 同款视觉（白底 + 边框 + 阴影 + 左状态点）。
+                左点与 header LLM chip 同步：处理中（非 idle）= amber + 脉冲，呈现正在处理；
+                idle 时有未读 = amber，无未读 = 绿（同 header idle）。紧跟撤销按钮右侧。 */}
+            <Button
+              variant="ghost"
+              size="default"
+              onClick={onOpenArchive}
+              className="flex-none gap-1.5 h-9 px-3 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform"
+              title="LLM 反馈历史：QP 问答 + L2 推送全历史"
+            >
+              <span
+                className={cn(
+                  "size-1.5 rounded-full",
+                  llmState !== "idle"
+                    ? "bg-primary animate-pulse"
+                    : archiveUnread > 0
+                      ? "bg-primary"
+                      : "bg-green-500",
+                )}
+              />
+              <span className="text-sm font-medium text-foreground">LLM 历史</span>
+            </Button>
           </div>
         </div>
 
@@ -417,7 +446,7 @@ export default function BottomControlBar({
 
       {/* Log */}
       <div className="px-4 pb-1.5 pt-0.5 border-t">
-        <div className="flex items-center justify-between">
+        <div className="mx-auto w-full max-w-screen-2xl flex items-center justify-between">
           <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap py-1">
             <span className="size-1.5 rounded-full bg-green-500 flex-shrink-0" />
             <span>debug log</span>
