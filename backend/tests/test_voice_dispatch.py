@@ -429,3 +429,171 @@ def test_query_branch_broadcast_payload_is_dataclass_after_fix(monkeypatch):
     assert payload.connection_id == "c-payload2"
     assert payload.answer_text == "第一场拍了 3 条。"
     assert payload.client_id == "cid-payload2"  # client_id 透传进 payload（前端据此精确撤语音 pending）
+
+
+# ── 问题 2：委托路径跳过 hop B（infer_voice_tool 不被调） ─────────────────────────
+
+def test_delegate_note_skips_hop_b(monkeypatch):
+    """note 委托路径（np_input + voice_runner 均非 None）下 infer_voice_tool 不应被调用。
+
+    问题 2：现状下委托路径仍先跑 hop B（infer_voice_tool）白跑一次推理，
+    修后委托路径完全跳过 hop B。
+    """
+    _patch_build_hop_a_system(monkeypatch)
+    from backend.pipelines.voice_dispatch import run_voice_dispatch
+    from backend.pipelines.np_note import NPInput, NPOutput
+
+    fake_np_input = NPInput(
+        raw_text="",
+        parsed_category="note",
+        current_scene_id=1,
+        current_take_id=10,
+        take_context=[],
+        ts=1000.0,
+        current_scene_code="1A",
+        current_shot="A",
+        current_take_number=1,
+    )
+
+    hop_b_call_count = {"n": 0}
+
+    class _CountingService(_StubService):
+        def __init__(self):
+            # hop A 返回 structure_note
+            super().__init__("structure_note", {}, {"category": "pass", "content": "ok", "take_id": 10})
+
+        async def infer_voice_tool(self, messages, audio, task_type, tool_choice=None, **kw):
+            hop_b_call_count["n"] += 1
+            return await super().infer_voice_tool(messages, audio, task_type, tool_choice=tool_choice, **kw)
+
+    async def _fake_voice_runner(np_in, audio_bytes, svc):
+        return NPOutput(take_id=np_in.current_take_id, category="pass", content="好")
+
+    persisted: dict = {}
+
+    async def _fake_persist(output, *, ts, client_id, raw_text_override):
+        await output
+        persisted["done"] = True
+
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch._persist_np_output_callable",
+        _fake_persist,
+    )
+
+    svc = _CountingService()
+    asyncio.run(run_voice_dispatch(
+        WAV_BYTES,
+        conn_id="c-skip-hopb",
+        ts=1000.0,
+        client_id="cid-skip",
+        dal=_StubDAL(),
+        service=svc,
+        cm=_StubCM(),
+        scene_context="",
+        np_input=fake_np_input,
+        voice_runner=_fake_voice_runner,
+    ))
+
+    assert persisted.get("done") is True, "note 落库未执行"
+    assert hop_b_call_count["n"] == 0, (
+        f"委托路径 infer_voice_tool 被调 {hop_b_call_count['n']} 次，应为 0"
+    )
+
+
+# ── 问题 3：query 分支任意失败 → 广播友好错误 + 带 client_id ─────────────────────
+
+def test_query_hop_b_failure_broadcasts_friendly_error(monkeypatch):
+    """query 分支 hop B（infer_voice_tool）抛异常 → 仍广播带 client_id 的友好错误答案。
+
+    问题 3：现状 hop B 失败 return {"kind": "error"} 不广播，前端 pending 永久挂。
+    修后：hop B 失败时也调 _schedule_qp_broadcast，前端据 client_id removePending。
+    """
+    _patch_build_hop_a_system(monkeypatch)
+    from backend.pipelines.voice_dispatch import run_voice_dispatch
+
+    class _HopBFailService(_StubService):
+        def __init__(self):
+            super().__init__("count_takes", {"scene_id": 1}, {})
+
+        async def infer_voice_tool(self, messages, audio, task_type, tool_choice=None, **kw):
+            raise RuntimeError("hop B 模拟失败")
+
+    broadcast_calls: list = []
+
+    async def _fake_broadcast(answer_text, conn_id, *, client_id=None, dal, service, cm):
+        broadcast_calls.append({"answer": answer_text, "conn_id": conn_id, "client_id": client_id})
+
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch._schedule_qp_broadcast",
+        _fake_broadcast,
+    )
+
+    svc = _HopBFailService()
+    result = asyncio.run(run_voice_dispatch(
+        WAV_BYTES,
+        conn_id="c-err",
+        ts=1000.0,
+        client_id="cid-err",
+        dal=_StubDAL(),
+        service=svc,
+        cm=_StubCM(),
+        scene_context="",
+    ))
+
+    assert result.get("kind") == "error"
+    assert len(broadcast_calls) == 1, (
+        f"hop B 失败后应广播 1 次，实际 {len(broadcast_calls)}"
+    )
+    bc = broadcast_calls[0]
+    assert bc["conn_id"] == "c-err"
+    assert bc["client_id"] == "cid-err"
+    assert "抱歉" in bc["answer"] or "出错" in bc["answer"], (
+        f"友好错误文案不含「抱歉」或「出错」：{bc['answer']!r}"
+    )
+
+
+def test_query_executor_failure_broadcasts_friendly_error(monkeypatch):
+    """query 分支 _run_executor 抛异常 → 仍广播带 client_id 的友好错误答案。
+
+    问题 3 补充：不只 hop B，_run_executor（asyncio.to_thread 被包函数）失败也需广播。
+    验证 _handle_query_branch 内部 except 将友好答案传入 _schedule_qp_broadcast。
+    注：patch 目标是 _run_executor，不是 run_tool_loop（两者在同一 try 块内）。
+    """
+    _patch_build_hop_a_system(monkeypatch)
+    from backend.pipelines.voice_dispatch import run_voice_dispatch
+
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch._run_executor",
+        MagicMock(side_effect=RuntimeError("executor 炸了")),
+    )
+
+    broadcast_calls: list = []
+
+    async def _fake_broadcast(answer_text, conn_id, *, client_id=None, dal, service, cm):
+        broadcast_calls.append({"answer": answer_text, "client_id": client_id})
+
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch._schedule_qp_broadcast",
+        _fake_broadcast,
+    )
+
+    svc = _StubService("count_takes", {"scene_id": 1}, {"scene_id": 1})
+    asyncio.run(run_voice_dispatch(
+        WAV_BYTES,
+        conn_id="c-loop-err",
+        ts=1000.0,
+        client_id="cid-loop-err",
+        dal=_StubDAL(),
+        service=svc,
+        cm=_StubCM(),
+        scene_context="",
+    ))
+
+    assert len(broadcast_calls) == 1, (
+        f"run_tool_loop 失败后应广播 1 次，实际 {len(broadcast_calls)}"
+    )
+    bc = broadcast_calls[0]
+    assert bc["client_id"] == "cid-loop-err"
+    assert "抱歉" in bc["answer"] or "出错" in bc["answer"], (
+        f"友好错误文案不含「抱歉」或「出错」：{bc['answer']!r}"
+    )

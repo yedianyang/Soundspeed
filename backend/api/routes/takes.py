@@ -446,30 +446,34 @@ async def create_voice_note(
         np_input = orchestrator._build_np_input("", "note", resolved_ts)
         # voice_runner 来自 orchestrator._deps（须有 llm_service 才绑定）
         voice_runner = getattr(orchestrator._deps, "voice_runner", None)
-        # fire-and-forget：不 await，不阻塞 202，对齐块③ schedule_qp_broadcast 模式。
-        # asyncio.create_task（async 函数内直接调用）等价 get_running_loop().create_task。
-        # _voice_dispatch_tasks 持有 task 引用防 GC（对齐 query.py _qp_tasks 模式）。
-        task = asyncio.create_task(
-            run_voice_dispatch(
+        cm = request.app.state.connection_manager
+
+        # 问题 1：wrapper 协程先发 LLM_STATUS busy，再跑 dispatch
+        # preamble 在协程内部执行（可能 await ensure_model_ready），不阻塞 202
+        # done callback 统一发 idle（成功/失败/取消三条路径）
+        async def _dispatch_with_status() -> dict:
+            await orchestrator._emit_np_status_preamble(service)
+            return await run_voice_dispatch(
                 audio,
                 conn_id=conn_id,
                 ts=resolved_ts,
                 client_id=client_id,
                 dal=orchestrator.dal,
                 service=service,
-                cm=request.app.state.connection_manager,
+                cm=cm,
                 scene_context="",  # 简化：不预取场次文本，hop A 系统内联说明已足
                 np_input=np_input,
                 voice_runner=voice_runner,
             )
-        )
+
+        # fire-and-forget：不 await，不阻塞 202，对齐块③ schedule_qp_broadcast 模式。
+        task = asyncio.create_task(_dispatch_with_status())
         _voice_dispatch_tasks.add(task)
 
         def _done(t: asyncio.Task) -> None:
             _voice_dispatch_tasks.discard(t)
-            exc = None if t.cancelled() else t.exception()
-            if exc is not None:
-                logger.warning("voice dispatch task 异常: %r", exc)
+            # 问题 1：无论成功/失败/取消，发 idle（对齐 _np_done_callback 形态）
+            orchestrator._np_done_callback(t, label="voice_dispatch")
 
         task.add_done_callback(_done)
         return {"status": "processing", "client_id": client_id, "kind": "dispatching"}

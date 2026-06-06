@@ -218,3 +218,115 @@ def test_voice_dispatch_receives_voice_runner(dal: DAL, monkeypatch) -> None:
     # voice_runner 来自 orchestrator._deps.voice_runner，有 llm_service 时非 None
     # 此处 _StubService 不绑 runner，可能为 None；验 key 存在即可（接线到位）
     assert "voice_runner" in received_kw, "voice_runner 未传入 run_voice_dispatch"
+
+
+# ── 测试 6/7：dispatch 路径发 busy → task done 发 idle（问题 1） ──────────────────
+#
+# 测试通过 TestClient 走真实 takes.py 路由层（_dispatch_with_status + _done callback），
+# spy orchestrator.publish，等 fire-and-forget task 完成后断言 LLM_STATUS 序列。
+# 若删掉 takes.py 的 _emit_np_status_preamble 调用或 _done 接线，测试会变红。
+
+def _wait_dispatch_tasks(app, timeout: float = 1.0) -> None:
+    """轮询直到 _voice_dispatch_tasks 清空（task.add_done_callback 触发后即清空）。
+    TestClient 在 `with` 上下文里保持 portal/event loop 存活，任务由后台线程推进。
+    """
+    import time
+    import backend.api.routes.takes as _takes_mod
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _takes_mod._voice_dispatch_tasks:
+            return
+        time.sleep(0.02)
+    raise TimeoutError("voice_dispatch_tasks 未在超时内清空")
+
+
+def test_voice_dispatch_emits_busy_then_idle(dal: DAL, monkeypatch) -> None:
+    """有 conn_id 路径（dispatch 成功）：先发 LLM_STATUS busy/running，done 后发 idle。
+
+    走真实 takes.py _dispatch_with_status wrapper + _done callback。
+    删掉 takes.py 中 _emit_np_status_preamble 调用或 _done 接线，此测试即变红。
+    """
+    import time
+    from backend.core.events import LLM_STATUS
+
+    _setup_scene_and_take(dal)
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+
+    published: list[tuple] = []
+    orch = create_orchestrator(dal)
+    _orig_publish = orch.publish
+
+    def _spy_publish(event, payload):
+        published.append((event, payload))
+        _orig_publish(event, payload)
+
+    orch.publish = _spy_publish
+
+    app = create_app(orch, llm_service=_StubService())
+
+    async def _fast_dispatch(audio, *, conn_id, **kw):
+        return {"kind": "note"}
+
+    monkeypatch.setattr("backend.api.routes.takes.run_voice_dispatch", _fast_dispatch)
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/v1/notes/voice",
+            data={"conn_id": "c-busy", "client_id": "cid6"},
+            files={"file": ("test.wav", io.BytesIO(_WAV_BYTES), "audio/wav")},
+            headers=AUTH,
+        )
+        assert r.status_code == 202, r.text
+        _wait_dispatch_tasks(app)
+
+    llm_events = [(e, p) for e, p in published if e == LLM_STATUS]
+    assert len(llm_events) >= 2, (
+        f"应有 ≥2 个 LLM_STATUS（busy+idle），实际：{[p.state for _, p in llm_events]}"
+    )
+    states = [p.state for _, p in llm_events]
+    assert states[0] in ("running", "loading", "downloading"), (
+        f"第一个 LLM_STATUS 应为 busy 态，实际 {states[0]!r}"
+    )
+    assert states[-1] == "idle", f"最后一个 LLM_STATUS 应为 idle，实际 {states[-1]!r}"
+
+
+def test_voice_dispatch_emits_idle_on_error(dal: DAL, monkeypatch) -> None:
+    """有 conn_id 路径（dispatch 抛异常）：即使 run_voice_dispatch 失败，done callback 也发 idle。
+
+    验证 takes.py _done callback 无论成功/失败均发 idle（_np_done_callback 无条件 publish）。
+    删掉 _done 接线或 _np_done_callback 里的 publish，此测试即变红。
+    """
+    from backend.core.events import LLM_STATUS
+
+    _setup_scene_and_take(dal)
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+
+    published: list[tuple] = []
+    orch = create_orchestrator(dal)
+    _orig_publish = orch.publish
+
+    def _spy_publish(event, payload):
+        published.append((event, payload))
+        _orig_publish(event, payload)
+
+    orch.publish = _spy_publish
+
+    app = create_app(orch, llm_service=_StubService())
+
+    async def _failing_dispatch(audio, *, conn_id, **kw):
+        raise RuntimeError("dispatch 爆了")
+
+    monkeypatch.setattr("backend.api.routes.takes.run_voice_dispatch", _failing_dispatch)
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/v1/notes/voice",
+            data={"conn_id": "c-err2", "client_id": "cid7"},
+            files={"file": ("test.wav", io.BytesIO(_WAV_BYTES), "audio/wav")},
+            headers=AUTH,
+        )
+        assert r.status_code == 202, r.text
+        _wait_dispatch_tasks(app)
+
+    idle_events = [p for e, p in published if e == LLM_STATUS and p.state == "idle"]
+    assert idle_events, "dispatch 失败时 done callback 应仍发 idle LLM_STATUS"

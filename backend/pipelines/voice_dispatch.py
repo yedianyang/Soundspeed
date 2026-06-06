@@ -50,6 +50,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 语音查询出错时的友好提示文案（两处复用，避免硬编码重复）
+_VOICE_QP_ERROR_TEXT = "抱歉，这次语音查询出错了，请换种说法再试。"
+
 # ── 注入点（由 Part C 入口接线赋值，测试可 monkeypatch） ─────────────────────
 #
 # _persist_np_output_callable: async (output: NPOutput, *, ts, client_id, raw_text_override) -> None
@@ -133,6 +136,25 @@ async def run_voice_dispatch(
 
     is_note = tool_name is None or tool_name in NOTE_TOOL_NAMES
 
+    # ── 问题 2：委托路径完全跳过 hop B ──────────────────────────────────────────
+    # note 分支且有 voice_runner + np_input → 直接委托，不跑 infer_voice_tool
+    delegate = (
+        is_note
+        and np_input is not None
+        and voice_runner is not None
+        and service is not None
+    )
+    if delegate:
+        return await _handle_note_branch(
+            None,  # hop_b_result=None，_handle_note_branch 走委托路径，不读 hop_b_result
+            ts=ts,
+            client_id=client_id,
+            audio=audio,
+            np_input=np_input,
+            service=service,
+            voice_runner=voice_runner,
+        )
+
     # ── hop B：forced audio 取参（task_type 按分支选） ───────────────────────
     # note → note_struct（对齐 run_np_voice task_type）
     # query → query_session（对齐 probe step B）
@@ -152,6 +174,14 @@ async def run_voice_dispatch(
         )
     except Exception as exc:
         logger.warning("hop B 失败 forced=%s: %r", forced_name, exc)
+        # 问题 3：query 分支 hop B 失败也要广播友好错误，前端 pending 才能被撤
+        if not is_note and _schedule_qp_broadcast is not None:
+            try:
+                await _schedule_qp_broadcast(
+                    _VOICE_QP_ERROR_TEXT, conn_id, client_id=client_id, dal=dal, service=service, cm=cm
+                )
+            except Exception as bc_exc:
+                logger.warning("hop B 失败后广播也异常: %r", bc_exc)
         return {"kind": "error"}
 
     # ── 分流 ──────────────────────────────────────────────────────────────────
@@ -182,7 +212,7 @@ async def run_voice_dispatch(
 # ── 分支实现 ──────────────────────────────────────────────────────────────────
 
 async def _handle_note_branch(
-    hop_b_result: dict,
+    hop_b_result: dict | None,
     *,
     ts: float,
     client_id: str | None,
@@ -212,9 +242,10 @@ async def _handle_note_branch(
             run_awaitable = voice_runner(np_input, audio if audio is not None else b"", service)
         else:
             # Fallback：包 _parse_tool_call 成 awaitable（同步结果转 coroutine）
+            # hop_b_result 在 delegate=False 路径下必然是 dict（非 None）
             from backend.pipelines.np_note import _parse_tool_call  # noqa: PLC0415
 
-            _parsed = _parse_tool_call(hop_b_result)
+            _parsed = _parse_tool_call(hop_b_result or {})
 
             async def _wrap_resolved(_o: Any = _parsed) -> Any:
                 return _o
@@ -262,7 +293,7 @@ async def _handle_query_branch(
       user       ← "工具 NAME 返回：{JSON}"
     （对齐 qp_query.py run_tool_loop 的回喂格式，119-122 行）
     """
-    answer = "抱歉，这次语音查询出错了，请换种说法再试。"
+    answer = _VOICE_QP_ERROR_TEXT
     try:
         args = json.loads(hop_b_result["function"]["arguments"])
         result = await asyncio.to_thread(_run_executor, tool_name, args, dal)
@@ -286,9 +317,10 @@ async def _handle_query_branch(
             service=service,
             dal=dal,
         )
-    except asyncio.TimeoutError:
-        raise  # 放行给 caller（对齐 run_tool_loop 的 TimeoutError 契约）
     except Exception as exc:
+        # 问题 3：TimeoutError / executor 失败 / run_tool_loop 异常统一包成友好答案广播。
+        # asyncio.TimeoutError 在 Python 3.12 是 Exception 子类，此处能接住。
+        # CancelledError 是 BaseException 不会被接，放行给 caller。
         logger.error("query 分支失败 tool_name=%s: %r", tool_name, exc)
 
     if _schedule_qp_broadcast is not None:
