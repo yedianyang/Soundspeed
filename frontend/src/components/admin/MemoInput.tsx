@@ -2,20 +2,14 @@ import { useRef, useState } from "react"
 import { Mic, ArrowUp } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
-import { postNote, postVoiceNote, postQuery } from "@/lib/api"
+import { postNote, postVoiceNote } from "@/lib/api"
+import { newClientId, runQuery } from "@/lib/feed-actions"
 import { useVoiceRecorder } from "@/hooks/useVoiceRecorder"
 import { useSessionStore } from "@/store/session"
 import type { NoteCreateResponse } from "@/types/api"
 
 interface MemoInputProps {
   onNoteAdded?: () => void
-}
-
-// client_id 只需全局唯一（pending 乐观去重/精确移除/标失败的键），不要求密码学强度。
-// crypto.randomUUID 仅在安全源（HTTPS / localhost）可用，局域网 HTTP（iPad/手机经 LAN IP 访问，
-// 见 spec §3.5）下为 undefined，直接调用会抛 TypeError 让 note 提交失败，故加回退。
-function newClientId(): string {
-  return crypto?.randomUUID?.() ?? `nid-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
 // 底部栏的打字 memo 输入（场记真实输入口）。接 POST /notes；类别走 @语法（如「@keep 第三条好」），
@@ -37,21 +31,11 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
     // ⚠ dev 期显式路由：以 "?" 或 "？" 开头 → QP 查询；否则 → NP 备注。
     // route_memo 单入口（后端按 kind 分流）落地后移除此前缀脚手架（spec §10 调度契约）。
     if (/^[?？]/.test(trimmed)) {
-      const queryClientId = newClientId()
-      const ts = Date.now() / 1000
       const question = trimmed.replace(/^[?？]\s*/, "")
-      const { addQa, resolveQa, failQa } = useSessionStore.getState()
-      addQa({ client_id: queryClientId, question, status: "processing", ts })
       setText("")
       onNoteAdded?.()
-      try {
-        const r = await postQuery(question)
-        resolveQa(queryClientId, r.answer)
-      } catch (e) {
-        failQa(queryClientId, e instanceof Error ? e.message : "查询失败")
-      } finally {
-        setSending(false)
-      }
+      await runQuery(question) // 乐观 pending + done/failed 自管，异常已内吞
+      setSending(false)
       return
     }
 

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react"
-import { Loader2, Clock, CornerUpLeft, ChevronDown, Sparkles } from "lucide-react"
+import { Loader2, Clock, CornerUpLeft, ChevronDown, Sparkles, Pencil } from "lucide-react"
 import { useSessionStore } from "@/store/session"
 import { postNote, postVoiceNote } from "@/lib/api"
+import { runQuery, runNote } from "@/lib/feed-actions"
 import type { PendingNote, FeedReceipt, QaItem } from "@/types/api"
 
 // note.failed reason → 场记可读文案（4.I），沿用旧 NoteList 映射。
@@ -15,17 +16,32 @@ const FAIL_REASON_TEXT: Record<string, string> = {
 }
 
 // note 回执：done 态，挂载即排 3s 自走（query 项 P3 lingers，不在此）。轻视觉，无框纯文字。
-function ReceiptRow({ r, onDismiss }: { r: FeedReceipt; onDismiss: (id: string) => void }) {
+// 「↩ 其实是提问」= query→note 误判兜底（最危险：问题被当日志记了），琥珀暖色动词，点击改走 query。
+function ReceiptRow({
+  r,
+  onDismiss,
+  onReclassify,
+}: {
+  r: FeedReceipt
+  onDismiss: (id: string) => void
+  onReclassify: (rawText: string) => void
+}) {
   useEffect(() => {
     const t = setTimeout(() => onDismiss(r.client_id), 3000)
     return () => clearTimeout(t)
   }, [r.client_id, onDismiss])
   return (
-    <div className="flex items-center gap-2 text-xs px-1 py-1 text-muted-foreground">
+    <div className="flex items-center gap-2 text-xs px-1 py-1">
       <Clock className="size-3 text-muted-foreground/60" />
-      <span>已记录</span>
+      <span className="text-muted-foreground">已记录</span>
       <span className="font-medium text-green-600/90">{r.category}</span>
-      <span className="truncate text-foreground/70">{r.content}</span>
+      <span className="flex-1 min-w-0 truncate text-foreground/70">{r.content}</span>
+      <button
+        onClick={() => onReclassify(r.rawText)}
+        className="flex items-center gap-1 text-amber-700 hover:underline flex-shrink-0"
+      >
+        <CornerUpLeft className="size-3" /> 其实是提问
+      </button>
     </div>
   )
 }
@@ -52,9 +68,10 @@ function PendingRow({ pn, onRetry }: { pn: PendingNote; onRetry: (pn: PendingNot
   )
 }
 
-// QP 问答行（B2 单行）：查询中转圈 / 失败琥珀左条 / 完成单行；长答案截断点开就地展开。
+// QP 问答行（B2 单行）：查询中转圈 / 失败琥珀实心块 / 完成单行；长答案截断点开就地展开。
 // query 项不像 note 回执 3s 自走——lingers 供场记看完，由档案/收起手动清。
-function QaRow({ q }: { q: QaItem }) {
+// 「✎ 记为备注」= note→query 误判兜底（较轻），淡链接，把这条问题改当 note 记。
+function QaRow({ q, onAsNote }: { q: QaItem; onAsNote: (question: string) => void }) {
   const [expanded, setExpanded] = useState(false)
   if (q.status === "processing") {
     return (
@@ -76,28 +93,38 @@ function QaRow({ q }: { q: QaItem }) {
   const isLong = text.includes("\n") || text.length > 36
   const head = isLong ? text.split("\n")[0].slice(0, 36) + "…" : text
   // 正常答案 = 琥珀左条 + ✦（轻，常态暖色，LLM 反馈基调）；note 回执维持中性灰以作区分。
+  // 外层 div 容纳两个平级按钮（展开 / 记为备注）——button 不能嵌 button。
   return (
-    <button
-      onClick={() => isLong && setExpanded((e) => !e)}
-      className="w-full flex items-start gap-2.5 text-sm text-left pl-2.5 pr-1 py-1 border-l-2 border-amber-400/50 hover:border-amber-400/80"
-    >
+    <div className="w-full flex items-start gap-2.5 text-sm pl-2.5 pr-1 py-1 border-l-2 border-amber-400/50 hover:border-amber-400/80">
       <Sparkles className="size-3.5 flex-shrink-0 mt-0.5 text-amber-500/80" />
-      <span className="flex-1 min-w-0 text-foreground/90">
-        {expanded ? (
-          <span className="leading-relaxed whitespace-pre-line">{text}</span>
-        ) : (
-          <span className="truncate block">{head}</span>
+      <button
+        onClick={() => isLong && setExpanded((e) => !e)}
+        className="flex-1 min-w-0 flex items-start gap-2.5 text-left text-foreground/90"
+      >
+        <span className="flex-1 min-w-0">
+          {expanded ? (
+            <span className="leading-relaxed whitespace-pre-line">{text}</span>
+          ) : (
+            <span className="truncate block">{head}</span>
+          )}
+        </span>
+        {isLong && (
+          <ChevronDown
+            className={
+              "size-4 flex-shrink-0 mt-0.5 text-muted-foreground/50 transition-transform " +
+              (expanded ? "rotate-180" : "")
+            }
+          />
         )}
-      </span>
-      {isLong && (
-        <ChevronDown
-          className={
-            "size-4 flex-shrink-0 mt-0.5 text-muted-foreground/50 transition-transform " +
-            (expanded ? "rotate-180" : "")
-          }
-        />
-      )}
-    </button>
+      </button>
+      <button
+        onClick={() => onAsNote(q.question)}
+        className="flex items-center gap-1 text-xs text-muted-foreground/70 hover:text-foreground flex-shrink-0 mt-0.5"
+        title="把这条改当备注记"
+      >
+        <Pencil className="size-3" /> 记为备注
+      </button>
+    </div>
   )
 }
 
@@ -108,6 +135,7 @@ export default function InlineFeedbackQueue() {
   const feedReceipts = useSessionStore((s) => s.feedReceipts)
   const qaItems = useSessionStore((s) => s.qaItems)
   const dismissReceipt = useSessionStore((s) => s.dismissReceipt)
+  const dismissQaInline = useSessionStore((s) => s.dismissQaInline)
   const retryPending = useSessionStore((s) => s.retryPending)
   const noteFailed = useSessionStore((s) => s.noteFailed)
 
@@ -120,6 +148,18 @@ export default function InlineFeedbackQueue() {
     resubmit.catch(() => noteFailed({ reason: "upload_failed", ts: pn.ts, client_id: pn.client_id }))
   }
 
+  // query→note 误判：拿原文重发 query，撤掉这条 note 回执（改判后它不再是 note）。
+  const handleReclassify = (rawText: string, receiptId: string) => {
+    runQuery(rawText)
+    dismissReceipt(receiptId)
+  }
+
+  // note→query 误判：把问题当 note 记，撤掉这条 query（postNote 失败才提示，乐观立即收起）。
+  const handleAsNote = (question: string, qaId: string) => {
+    runNote(question).catch((e) => alert(e instanceof Error ? e.message : "记为备注失败"))
+    dismissQaInline(qaId)
+  }
+
   // 合并按 ts，最新贴底（输入框侧）。
   const rows = [
     ...pendingNotes.map((pn) => ({
@@ -128,11 +168,27 @@ export default function InlineFeedbackQueue() {
     })),
     ...feedReceipts.map((r) => ({
       ts: r.ts,
-      node: <ReceiptRow key={`r-${r.client_id}`} r={r} onDismiss={dismissReceipt} />,
+      node: (
+        <ReceiptRow
+          key={`r-${r.client_id}`}
+          r={r}
+          onDismiss={dismissReceipt}
+          onReclassify={(rawText) => handleReclassify(rawText, r.client_id)}
+        />
+      ),
     })),
     ...qaItems
       .filter((q) => !q.inlineDismissed)
-      .map((q) => ({ ts: q.ts, node: <QaRow key={`q-${q.client_id}`} q={q} /> })),
+      .map((q) => ({
+        ts: q.ts,
+        node: (
+          <QaRow
+            key={`q-${q.client_id}`}
+            q={q}
+            onAsNote={(question) => handleAsNote(question, q.client_id)}
+          />
+        ),
+      })),
   ].sort((a, b) => a.ts - b.ts)
 
   if (rows.length === 0) return null

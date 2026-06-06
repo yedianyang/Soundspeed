@@ -288,16 +288,31 @@ export const useSessionStore = create<SessionState>((set) => ({
   // client_id 精确移除对应 pending（content 被 LLM 改写、ts 前后端不同源，旧的三元匹配必失败 → 永久卡
   // 「处理中」）。client_id 缺失（异常/旧后端）时不误删，仅 bump version。notesVersion 递增触发 refetch。
   noteProcessed: (m) =>
-    set((s) => ({
-      pendingNotes: m.client_id
-        ? s.pendingNotes.filter((p) => p.client_id !== m.client_id)
-        : s.pendingNotes,
-      notesVersion: s.notesVersion + 1,
-      // 就地队列：落定时推一条 note 回执（done 态，组件 3s 后 dismissReceipt 自走）。
-      feedReceipts: m.client_id
-        ? [...s.feedReceipts, { client_id: m.client_id, category: m.category, content: m.content, ts: m.ts }]
-        : s.feedReceipts,
-    })),
+    set((s) => {
+      // 移除前先取对应 pending 的原文，供回执「↩ 其实是提问」改判重发（content 被 LLM 改写，故用 rawText）。
+      const matched = m.client_id
+        ? s.pendingNotes.find((p) => p.client_id === m.client_id)
+        : undefined
+      return {
+        pendingNotes: m.client_id
+          ? s.pendingNotes.filter((p) => p.client_id !== m.client_id)
+          : s.pendingNotes,
+        notesVersion: s.notesVersion + 1,
+        // 就地队列：落定时推一条 note 回执（done 态，组件 3s 后 dismissReceipt 自走）。
+        feedReceipts: m.client_id
+          ? [
+              ...s.feedReceipts,
+              {
+                client_id: m.client_id,
+                category: m.category,
+                content: m.content,
+                rawText: matched?.rawText ?? m.content,
+                ts: m.ts,
+              },
+            ]
+          : s.feedReceipts,
+      }
+    }),
 
   // 4.I：NP 失败 → 按 client_id 把对应 pending 标失败态（保留在列表，渲染红 + reason + 重试），
   // 而非移除或永久卡「处理中」。client_id 缺失（异常/旧链路）时不误标，仅原样返回。

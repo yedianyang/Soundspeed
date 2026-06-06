@@ -269,11 +269,12 @@ export interface NoteFailedMsg {
   client_id: string | null // 定位要标失败的 pending；null=异常/旧链路，不误标
 }
 
-// 就地队列的 note 回执（done 态，3s 自走）。由 note.processed 派生（P4 加 rawText 供「其实是提问」改判）。
+// 就地队列的 note 回执（done 态，3s 自走）。由 note.processed 派生。
 export interface FeedReceipt {
   client_id: string
   category: string // keep/pass/ng/issue/note
   content: string
+  rawText: string // 提交原文，「↩ 其实是提问」改判据此重发 query（取自对应 pending；语音/缺失回退 content）
   ts: number
 }
 
