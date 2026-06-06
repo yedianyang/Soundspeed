@@ -26,13 +26,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.api.auth import require_admin
 from backend.api.routes.query import schedule_qp_broadcast
+from backend.core.export import build_export_rows, rows_to_csv
 from backend.core.events import (
     SCENE_CHANGED,
     TAKE_CHANGED,
@@ -187,6 +190,28 @@ async def list_takes(
     dal = request.app.state.orchestrator.dal
     takes = dal.list_takes(scene_id)
     return {"takes": [TakeDTO.model_validate(t, from_attributes=True) for t in takes]}
+
+
+@router.get("/takes/export")
+async def export_takes_csv(
+    request: Request,
+    _: None = Depends(require_admin),
+) -> Response:
+    """导出全部 take 为 CSV（场记单）：text/csv + attachment 下载。
+
+    必须注册在 GET /takes/{take_id} 之前——否则 FastAPI 会把 "export" 当 take_id 解析（422）。
+    导出日期服务端生成（本地日期），首行写「导出日期：YYYY-MM-DD」，第二行表头。
+    """
+    dal = request.app.state.orchestrator.dal
+    rows = build_export_rows(dal)
+    export_date = datetime.now().strftime("%Y-%m-%d")
+    body = rows_to_csv(rows, export_date)
+    filename = f"soundspeed_takes_{export_date}.csv"
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/takes/{take_id}")
