@@ -340,18 +340,19 @@ export default function BottomControlBar({
               onChange={onSpeakerIdsChange}
               disabled={isRecording}
             />
+            {/* 窄屏（竖屏 <lg）缩成 + 圆按钮省空间；宽屏（横屏）显「Next take」全文。 */}
             <Button
               variant="ghost"
               onClick={onNextTake}
               disabled={nextDisabled}
               className={cn(
-                "gap-1.5 h-10 px-5 rounded-full bg-muted/60 hover:bg-muted/80 active:bg-muted/80 active:scale-95 transition-all text-foreground text-sm font-medium",
+                "gap-1.5 h-10 px-3 lg:px-5 rounded-full bg-muted/60 hover:bg-muted/80 active:bg-muted/80 active:scale-95 transition-all text-foreground text-sm font-medium",
                 disabledTone(true, nextDisabled)
               )}
               title={isRecording ? "录制中不可起新 take" : "起下一条空 take"}
             >
               <Plus className="size-4" />
-              Next take
+              <span className="hidden lg:inline">Next take</span>
             </Button>
             <Button
               variant="ghost"
