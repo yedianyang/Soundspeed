@@ -155,6 +155,109 @@ spec §3.2.1 设想「语音 memo → 一个多模态 auto-tool 调用搞定 ASR
 
 **门判据**：用 §4.0 的真语音 WAV，各形态各样本跑 N 次，看分类/路由正确率 + 是否取到可用参数。B 的 spike 接法（tool_choice 透传）若过即转正进生产；A 的 handler 注入若过同样转正。
 
+### 4.3 spike 结论（2026-06-06 实测，3 条真语音 WAV）
+
+> **本节修正 §4.1/§4.2 对形态 A 的成本判断。** §4.1 说「音频+auto 选不了工具」——根因经一手源码定位属实，但根因本身暴露了一条 §4.2 没设想的轻绕路：**不建新 handler，直接把工具声明文本注入 system content**，auto 走纯生成（不靠 grammar/tools 渲染），输出用 `_scrape_tool_name` 抠。§4.2 表里「A=高成本/先建最硬的 audio+tools handler」的判断因此被修正——**形态 A 不必新建 handler，实测可行，且比 B 多省一跳。** 用户据结论（2026-06-06）拍板采形态 A。
+
+#### 实测 setup
+
+- 真语音 WAV 由用户录制后放入 `experiments/2026-06-06-voice-dispatch-spike/wav/`，经重采样转 16k mono PCM16（对齐生产 `blobToWav16kMono` 金标准）。样本：2 条 query（「第一场拍了多少条」「这个剧本一共有几场」）+ 1 条 note（「这条过了」）。
+- 模型 gemma-4-E4B-it-Q4_K_M + mmproj-F16（llama_cpp 0.3.25）。
+- 探针脚本均放 `experiments/2026-06-06-voice-dispatch-spike/`（已 gitignore，不进源码树）。
+
+#### 三个探针结果
+
+**C2 — probe_binary.py（forced audio 二分）**
+
+单工具 forced `route_memo`（kind: note|query），grammar 兜，**不渲染 6 工具声明**。组多模态 messages（AUDIO_SENTINEL + 系统提示），`infer_voice_tool(task_type="memo_route_voice", tool_choice=forced_route_memo)` 走 grammar forced，验证 forced audio 二分通路坐实。
+
+| 样本 | 内容 | forced 工具 | 结果 |
+|------|------|------------|------|
+| query-1 | 第一场拍了多少条 | route_memo | kind=query ✓ |
+| query-2 | 这个剧本一共有几场 | route_memo | kind=query ✓ |
+| note-1 | 这条过了 | route_memo | kind=note ✓ |
+
+正确率 3/3。结论：forced audio 二分稳定可靠，grammar 兜住。**注意**：C2 走的是单二分工具，机制与 corrected-C3 的 6 工具文本注入不同——两条通路分别验证，共同支撑形态 A 的两跳。
+
+**corrected-C3 — probe_c3_text_decl.py（工具声明文本注入 + 纯生成）**
+
+用 `vocab_only=True` 加载 GGUF，通过 `Jinja2ChatFormatter` 渲染 6 工具 + dummy messages，从渲染结果正则提取全部 `<|tool>...<tool|>` 块（GGUF 内嵌 chat_template 的原生工具声明格式），拼接后注入 system content。Gemma4ChatHandler.CHAT_FORMAT 把 system 折进首个 user turn 前缀，模型在推理时「看见」工具声明。`infer_voice` 走 `task_type="voice_dispatch_free"`（无 tools/tool_choice/grammar 参数的专用配置），纯生成，输出用 `_scrape_tool_name` 正则抠工具名。
+
+| 样本 | 内容 | 模型自发吐出 | 抠出工具 | 正确 |
+|------|------|------------|---------|------|
+| note-1 | 这条过了 | `<|tool_call>call:structure_note{...}<tool_call|>` | structure_note | ✓ |
+| query-1 | 第一场拍了多少条 | `<|tool_call>call:count_takes{...}<tool_call|>` | count_takes | ✓ |
+| query-2 | 这个剧本一共有几场 | `<|tool_call>call:query_database{"sql":"SELECT COUNT(*) FROM scenes..."}<tool_call|>` | query_database（自写 SQL）| ✓ |
+
+正确率 3/3。关键发现：**模型在工具声明文本注入后自发吐出格式规范的 function-call 字符串**，`_scrape_tool_name` 可直接抠出工具名和参数 JSON。注意模型还自主写出了合理 SQL（query_database），说明 6 工具语义在 system 文本层面被充分理解。**这条路不需要新建任何 audio+tools handler，复用现有两步走零件。**
+
+**端到端 — probe_qp_voice_e2e.py（全链路打通）**
+
+2 条 query 语音走完 A→B→C→续跳全链路：hop A（`infer_voice` 文本注入 6 工具 + `_scrape_tool_name` 抠名）→ hop B（`infer_voice_tool` forced=抠到的工具名，audio 取参）→ `_run_executor`（真跑 SQLite）→ 续跳 `run_tool_loop`（文本，出自然语言答案）→ `schedule_qp_broadcast`（广播 `qp.answer.{conn_id}`）。
+
+| 样本 | 最终答案 | 正确 |
+|------|---------|------|
+| 第一场拍了多少条 | 「第一场拍了 7 条」 | ✓ |
+| 这个剧本一共有几场 | 「这个剧本一共有 1 场」 | ✓ |
+
+2/2 真答案（对齐测试数据库内容）。**每块都是已验证原语的组合，没有新建任何 handler。**
+
+#### §4.1 原判修正（一手源码，load-bearing）
+
+§4.1 反证 #1 说「音频+auto 选不了工具」——根因经源码精确定位：
+
+- `llama_chat_format.py` `Llava15ChatHandler.__call__` 渲染模板时**只传 messages、不传 tools**（:2912），工具声明从没进过模型上下文。
+- auto（`tool_choice` 非 dict）**不建 grammar、不解析 tool_calls**（:3068-3121，只有 `tool_choice` 为 forced dict 才建 grammar 解析 tool_call）。
+- 因此模型当然不吐 function-call 格式，`_scrape_tool_name` 拿 None，§4.1 结论本身正确。
+
+**但这根因指向了 §4.2 没设想的绕路**：既然 handler 根本不传 tools，那就**绕过 handler**——把工具声明当纯文本折进 system content，走 `infer_voice` 纯生成（无 grammar），用正则抠输出。实测 Gemma-4-E4B 在这条路上自发吐出规范 function-call 格式（corrected-C3 3/3）。
+
+所以：
+- §4.1 反证 #1 根因正确，结论「优雅版在机制上不成立」需修正为「**原设想的 auto+audio handler 路不通，但存在等效的文本注入绕路**」。
+- §4.2 形态 A 成本标「高——须先建 audio+tools handler」被修正为「**中——工具声明文本注入 + 抠输出，不建新 handler，复用现有两步走零件**」。
+- §4.2 的「先跑便宜的 B」策略已完成使命（B 的 forced 通路由 C2 坐实）；A 经 corrected-C3 + e2e 验证可行且更优，形态决策收在 A。
+
+#### 形态决策（用户 2026-06-06 拍板）
+
+**采形态 A（audio-auto，单入口，无独立 ASR）**。
+
+两步走机制（已全部用已验证原语拼成）：
+
+```
+语音 WAV
+  │
+  ▼ hop A：infer_voice（文本注入 6 工具声明 + 场次目录）+ _scrape_tool_name 抠名
+  │
+  ├─ structure_note ─▶ hop B：infer_voice_tool(forced=structure_note, audio) 取参
+  │                    → _parse_tool_call → _persist_np_output（落 NP）
+  │
+  └─ QP 工具（count_takes / query_database / ...）
+       ▼ hop B：infer_voice_tool(forced=工具名, audio) 取参
+       ▼ hop C：_run_executor 真跑（SQLite / 内存）
+       ▼ 续跳：run_tool_loop（纯文本，出自然语言答案，复用现有 5 工具循环）
+       ▼ schedule_qp_broadcast → qp.answer.{conn_id}
+```
+
+hop A = corrected-C3（文本注入 + 纯生成 + 抠名）；hop B = C2（forced audio 取参）；hop C + 续跳 = 现有 `run_tool_loop`（**不改**，e2e 实证直接接上即可）。
+
+hop A 抠到 None（模型未吐 function-call）的兜底：fail-closed 当 note 处理（hop B forced=structure_note，降级到语音 NP 已绿路径）。
+
+音频只在 hop A/B eval。续跳是纯文本（messages 里有 tool_call trace + executor 结果，模型靠上下文收尾，无须重 eval 音频或转写）。e2e 实证可行。
+
+#### 诚实边界
+
+N 小（2 query / 1 note），是**可行性坐实 + 方向全对**，不是准确率基准。hop A 的 `_scrape_tool_name` 正则依赖模型自发吐出规范格式，在噪声语音或极端 prompt 下可能漂移。**上线前需更多样本测 hop A 抠名准确率**，尤其 query/note 边界样本（询问式备注、感叹式查询）。
+
+#### 带进 follow-up 的实现要点
+
+1. **INV2 是否必须**：e2e 实证 voice hop A 用 6 工具自定义入口（文本注入），路由到 query 后续跳直接复用现有 5 工具 `run_tool_loop` 即可跑通。故 INV2（`run_tool_loop` toolset-agnostic 化）是否必须待实现期定——**可能只需 voice 自己的 hop A + 现成 `run_tool_loop` 续跳，不改 `run_tool_loop`**。若确认不必改则 Part E 跳过。
+
+2. **note 分支终结性**：hop A 抠到 `structure_note` → 走 note 分支（hop B forced structure_note → `_finalize_np`/`_persist_np_output` 落库）；抠到 QP 工具 → query 分支。两条分支清晰，不走统一 executor 循环（`structure_note` executor=None，不能进 `_run_executor`）。
+
+3. **conn_id/qp.answer 广播**：query 分支答案复用块③已建的 `schedule_qp_broadcast`（`qp.answer.{conn_id}`），零改动。
+
+4. **音频只在 hop A/B，续跳无需重 eval 音频**：`_worker` 仅 `payload.audio is not None` 才加 audio kwarg，纯文本跳自动恢复；hop 1 回喂前须从 messages 历史里丢掉 `AUDIO_SENTINEL` content part，否则后续纯文本跳 `load_image` raise（multimodal.py:59-62，spec §5.4 已记录）。
+
 ---
 
 ## 5. 语音调度器实现（块④，条件性，形态见 §4）
