@@ -26,7 +26,14 @@ export function StatusChip({
   )
   const content = (
     <>
-      <span className={cn("size-1.5 rounded-full flex-shrink-0", dotColor)} />
+      {/* warn 态（如 LLM 处理中）点呼吸，与 LLM 历史入口左点的处理态脉冲一致。 */}
+      <span
+        className={cn(
+          "size-1.5 rounded-full flex-shrink-0",
+          dotColor,
+          tone === "warn" && "animate-pulse",
+        )}
+      />
       <span className="hidden sm:inline text-xs font-medium text-foreground flex-shrink-0">{label}</span>
       {detail && (
         <span className="text-[10px] font-mono text-muted-foreground truncate min-w-0">{detail}</span>
