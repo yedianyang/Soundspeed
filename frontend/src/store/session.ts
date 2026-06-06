@@ -10,6 +10,8 @@ import type {
   TranscriptSegmentDTO,
 } from "@/types/api"
 
+import type { NoteFailedMsg, NoteProcessedMsg, PendingNote } from "@/types/api"
+
 export type ConnectionState = "connecting" | "open" | "closed" | "no-token"
 
 // 当前录制 take 的实时转录条目（按声道维护）。
@@ -52,7 +54,14 @@ interface SessionState {
   // take 列表：Map<take_id, TakeDTO>。getTakes 全量覆盖（权威），take.changed patch-merge 5 字段。
   takes: Map<number, TakeDTO>
 
-  llm: { state: LlmState }
+  llm: { state: LlmState; taskType: string | null }
+
+  // pending notes: 已提交、等待 NP Pipeline 归置
+  pendingNotes: PendingNote[]
+
+  // note 队列版本号：note.processed 落库后递增，NoteList 据此 refetch resolved（让落定的 note 及时显示，
+  // 不只移除 pending）。提交时不 bump——那时 note 未落库，refetch 拿不到，pending 已由 store 直接显示。
+  notesVersion: number
 
   // take.end 后处理状态条（diarization + Gemma）；done 清空，error 保留到下次录制。null=不显示。
   processing: { phase: TakeProcessingPhase; detail: string | null } | null
@@ -78,7 +87,7 @@ interface SessionState {
   applyTakeChanged: (m: TakeChangedMsg) => void
   seedTakes: (list: TakeDTO[]) => void
   removeTake: (takeId: number) => void
-  setLlm: (state: LlmState) => void
+  setLlm: (state: LlmState, taskType: string | null) => void
   setTakeProcessing: (m: TakeProcessingMsg) => void
   setCurrentTakeId: (id: number | null) => void
   setRecording: (recording: boolean) => void
@@ -86,6 +95,10 @@ interface SessionState {
   setBackendLevel: (rms: number) => void
   setViewerCount: (count: number) => void
   resetSegments: () => void
+  addPendingNote: (n: PendingNote) => void
+  noteProcessed: (m: NoteProcessedMsg) => void
+  noteFailed: (m: NoteFailedMsg) => void
+  retryPending: (clientId: string) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -96,7 +109,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   currentTakeId: null,
   isRecording: false,
   takes: new Map(),
-  llm: { state: "idle" },
+  llm: { state: "idle", taskType: null },
+  pendingNotes: [],
+  notesVersion: 0,
   processing: null,
   deviceWarning: null,
   backendLevel: 0,
@@ -241,7 +256,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       return unbind ? { takes, currentTakeId: null } : { takes }
     }),
 
-  setLlm: (state) => set(() => ({ llm: { state } })),
+  setLlm: (state, taskType) => set(() => ({ llm: { state, taskType } })),
 
   // take.end 后处理状态条：done 清空；diarizing/summarizing/error 显示。
   setTakeProcessing: (m) =>
@@ -252,6 +267,38 @@ export const useSessionStore = create<SessionState>((set) => ({
   // AdminHome 派生「当前 take」后同步进来，作为 applyAsr 跨-take 守卫的权威。
   setCurrentTakeId: (id) =>
     set((state) => (state.currentTakeId === id ? {} : { currentTakeId: id })),
+
+  addPendingNote: (n) =>
+    set((s) => ({ pendingNotes: [...s.pendingNotes, n] })),
+
+  // client_id 精确移除对应 pending（content 被 LLM 改写、ts 前后端不同源，旧的三元匹配必失败 → 永久卡
+  // 「处理中」）。client_id 缺失（异常/旧后端）时不误删，仅 bump version。notesVersion 递增触发 refetch。
+  noteProcessed: (m) =>
+    set((s) => ({
+      pendingNotes: m.client_id
+        ? s.pendingNotes.filter((p) => p.client_id !== m.client_id)
+        : s.pendingNotes,
+      notesVersion: s.notesVersion + 1,
+    })),
+
+  // 4.I：NP 失败 → 按 client_id 把对应 pending 标失败态（保留在列表，渲染红 + reason + 重试），
+  // 而非移除或永久卡「处理中」。client_id 缺失（异常/旧链路）时不误标，仅原样返回。
+  noteFailed: (m) =>
+    set((s) => ({
+      pendingNotes: m.client_id
+        ? s.pendingNotes.map((p) =>
+            p.client_id === m.client_id ? { ...p, failedReason: m.reason } : p,
+          )
+        : s.pendingNotes,
+    })),
+
+  // 重试：把失败 pending 乐观打回「处理中」（清 failedReason），调用方随后用同 client_id 重投。
+  retryPending: (clientId) =>
+    set((s) => ({
+      pendingNotes: s.pendingNotes.map((p) =>
+        p.client_id === clientId ? { ...p, failedReason: undefined } : p,
+      ),
+    })),
 
   setRecording: (recording) =>
     set((state) => (state.isRecording === recording ? {} : { isRecording: recording })),

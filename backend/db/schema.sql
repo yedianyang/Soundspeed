@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS takes (
     start_ts         REAL    NOT NULL,               -- take 开始 Unix 时间戳（秒，含小数）
     end_ts           REAL,                           -- take 结束 Unix 时间戳，进行中时为 NULL
     status           TEXT    NOT NULL DEFAULT 'tbd'
-        CHECK (status IN ('keeper', 'ng', 'hold', 'tbd')),
+        CHECK (status IN ('pass', 'ng', 'keep', 'tbd')),
     performer_issues TEXT,                           -- NP 解析输出，JSON 文本，可选
     audio_quality    TEXT,                           -- NP 解析输出，如 'clean' / 'noisy' / 'clipped'
     script_diff      TEXT,                           -- L2 输出，JSON 文本，剧本偏差报告

@@ -7,6 +7,8 @@ import type {
   AsrMsg,
   DeviceWarningMsg,
   LlmStatusMsg,
+  NoteFailedMsg,
+  NoteProcessedMsg,
   SceneChangedMsg,
   TakeChangedMsg,
   TakeDeletedMsg,
@@ -97,7 +99,22 @@ export function useLiveConnection(): void {
           return
         }
         if (topic === "llm.status") {
-          s.setLlm((payload as LlmStatusMsg).state)
+          const m = payload as LlmStatusMsg
+          s.setLlm(m.state, m.task_type)
+          return
+        }
+        if (topic === "note.processed") {
+          const m = payload as NoteProcessedMsg
+          s.noteProcessed(m)
+          // 刷新受影响的 take：takes 列表（折叠态 take.notes）+ 该 take 详情（展开态 data.notes）。
+          queryClient.invalidateQueries({ queryKey: ["takes"] })
+          queryClient.invalidateQueries({ queryKey: takeQueryKey(m.take_id) })
+          return
+        }
+        if (topic === "note.failed") {
+          // 4.I：NP 失败 → 对应 pending 转失败态（红 + reason + 重试），不再永久卡处理中
+          const m = payload as NoteFailedMsg
+          s.noteFailed(m)
           return
         }
         if (topic === "device.warning") {

@@ -135,7 +135,7 @@ class ScriptUploadPayload:
 class TakeChangedPayload:
     """take.changed 的 payload（1.H L2 pipeline 完成后 publish）。
 
-    status 取值与 takes.status 一致：'keeper' | 'ng' | 'hold' | 'tbd'。
+    status 取值与 takes.status 一致：'pass' | 'ng' | 'keep' | 'tbd'。
     script_diff=None 表示 L2 未完成或失败（降级状态）。
     """
 
@@ -190,6 +190,45 @@ class LlmStatusPayload:
     state: str          # "idle" | "downloading" | "loading" | "running"
     task_type: str | None
     take_id: int | None
+
+# Note 事件（4.x NP Pipeline）
+NOTE_PROCESSED = "note.processed"
+
+
+@dataclass(frozen=True)
+class NoteProcessedPayload:
+    """note.processed 的 payload：NP Pipeline 归置完成后发布。"""
+
+    event_id: int
+    take_id: int
+    category: str
+    content: str
+    ts: float
+    # 前端乐观 pending 的去重键：原样回传，content 被 LLM 改写、ts 不同源也能精确移除对应 pending。
+    client_id: str | None = None
+
+
+# Note 失败兜底（4.I）
+NOTE_FAILED = "note.failed"
+
+
+@dataclass(frozen=True)
+class NoteFailedPayload:
+    """note.failed 的 payload：NP Pipeline 失败时发布，让前端把对应 pending 转失败态而非永久卡死。
+
+    reason 只列机制上可检测的失败：
+      - take_not_found    —— LLM 返回的 take_id 不存在（insert_note 撞 FK）。
+      - parse_error       —— LLM 输出非合法 JSON / 字段缺失（NPParseError）。
+      - timeout           —— infer 排队 + 推理超时（asyncio.TimeoutError）。
+      - model_unavailable —— 多模态模型不可用（mmproj 缺失/下载失败退纯文本，或 mtmd 自检失败）。
+    asr_unclear（音频没听清）需模型自报机制，非后端可直接判定，MVP 不发。
+    upload_failed 由前端网络/上传层失败时自行置位，不经后端。
+    """
+
+    reason: str
+    ts: float
+    # 前端乐观 pending 的去重键：定位要标失败的那条 pending；缺失时前端不误标，仅记日志。
+    client_id: str | None = None
 
 
 @dataclass(frozen=True)

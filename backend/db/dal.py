@@ -12,6 +12,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ class Take:
     take_suffix: str  # 冲突后缀，默认 ''，冲突时 '+' / '++' …（v3）
     start_ts: float
     end_ts: float | None
-    status: str  # 'keeper' | 'ng' | 'hold' | 'tbd'
+    status: str  # 'pass' | 'ng' | 'keep' | 'tbd'
     performer_issues: dict | list | None  # NP 解析输出，DAL 负责 json.loads；写入时也传 dict/list
     audio_quality: str | None
     script_diff: dict | None  # L2 输出，DAL 负责 json.loads；写入时也传 dict
@@ -851,6 +852,90 @@ class DAL:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    # ── notes (take_events + takes.notes 聚合) ───────────────────────────────
+
+    def insert_note(
+        self,
+        take_id: int,
+        category: str,
+        content: str,
+        raw_text: str,
+        ts: float,
+    ) -> int:
+        """写入一条 note 事件（take_events），并原子更新 takes.notes 聚合。
+
+        原子操作（同一事务）：
+        1. INSERT INTO take_events (take_id, event_type, ts, payload)
+           payload = {"category": category, "content": content, "raw_text": raw_text}
+        2. 重建 takes.notes：SELECT 该 take 所有 manual.note 事件的 ts, category, content，
+           按 ts 升序拼接为：
+           [2026-06-12T14:30:01+00:00] @issue 开头有飞机声
+           用 datetime.fromtimestamp(ts, timezone.utc).isoformat() 生成时间戳格式。
+           如果 content 为空，则不追加内容文本（如 \"[ts] @pass\"）。
+           拼接后 UPDATE takes SET notes=?, updated_at=... WHERE take_id=?。
+        """
+        payload = {"category": category, "content": content, "raw_text": raw_text}
+        payload_json = json.dumps(payload)
+        with self._write_tx() as conn:
+            cur = conn.execute(
+                "INSERT INTO take_events (take_id, event_type, ts, payload) "
+                "VALUES (?, 'manual.note', ?, ?);",
+                (take_id, ts, payload_json),
+            )
+            event_id = cur.lastrowid
+
+            # 重建 takes.notes 聚合
+            rows = conn.execute(
+                "SELECT ts, payload FROM take_events "
+                "WHERE take_id = ? AND event_type = 'manual.note' "
+                "ORDER BY ts ASC;",
+                (take_id,),
+            ).fetchall()
+
+            lines = []
+            for r in rows:
+                event_ts = r["ts"]
+                p = json.loads(r["payload"])
+                cat = p.get("category", "")
+                cont = p.get("content", "")
+                ts_str = datetime.fromtimestamp(event_ts, tz=timezone.utc).isoformat()
+                if cont:
+                    lines.append("[{}] @{} {}".format(ts_str, cat, cont))
+                else:
+                    lines.append("[{}] @{}".format(ts_str, cat))
+
+            notes_text = "\n".join(lines) if lines else None
+            conn.execute(
+                f"UPDATE takes SET notes = ?, updated_at = {_NOW_TS_SQL} WHERE take_id = ?;",
+                (notes_text, take_id),
+            )
+        return event_id  # type: ignore[return-value]
+
+    def list_notes(
+        self,
+        take_id: int,
+        category: str | None = None,
+    ) -> list[TakeEvent]:
+        """按 take_id 列出 note 事件（event_type='manual.note'）。
+
+        可选按 category 过滤，按 ts 升序返回。
+        """
+        if category is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM take_events "
+                "WHERE take_id = ? AND event_type = 'manual.note' "
+                "AND json_extract(payload, '$.category') = ? "
+                "ORDER BY ts ASC;",
+                (take_id, category),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM take_events "
+                "WHERE take_id = ? AND event_type = 'manual.note' "
+                "ORDER BY ts ASC;",
+                (take_id,),
+            ).fetchall()
+        return [_row_to_event(r) for r in rows]
     # ── speakers 台账（v5 migration）────────────────────────────────────────────
 
     def insert_speaker(
@@ -1002,10 +1087,10 @@ class DAL:
     def set_take_status(self, take_id: int, status: str) -> None:
         """更新 take 的 status，并在 take_events 写一条 manual.mark 事件。
 
-        status 必须是 'keeper' / 'ng' / 'hold' / 'tbd' 之一，否则抛 ValueError。
+        status 必须是 'pass' / 'ng' / 'keep' / 'tbd' 之一，否则抛 ValueError。
         单事务内完成：UPDATE takes + INSERT take_events（inline，不调 insert_take_event 避免嵌套事务）。
         """
-        _VALID_STATUSES = {"keeper", "ng", "hold", "tbd"}
+        _VALID_STATUSES = {"pass", "ng", "keep", "tbd"}
         if status not in _VALID_STATUSES:
             raise ValueError(
                 f"非法 status 值 {status!r}，必须是 {sorted(_VALID_STATUSES)} 之一"

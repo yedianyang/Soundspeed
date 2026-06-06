@@ -80,15 +80,16 @@ def list_tools(domain: str | None = None) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# 模块级注册：report_script_analysis（Tier 1）
+# 模块级注册：report_script_analysis（L2）、structure_note（文本 NP）（Tier 1）
 # ---------------------------------------------------------------------------
 
 def _bootstrap() -> None:
     """在 module 导入时注册所有 Tier 1 工具。"""
+    from backend.llm.tools.note import NOTE_TOOL_NAME, build_note_tool  # noqa: PLC0415
     from backend.llm.tools.script import build_l2_tool  # noqa: PLC0415
 
-    schema = build_l2_tool()
-    register("report_script_analysis", schema, executor=None)
+    register("report_script_analysis", build_l2_tool(), executor=None)
+    register(NOTE_TOOL_NAME, build_note_tool(), executor=None)
 
 
 _bootstrap()

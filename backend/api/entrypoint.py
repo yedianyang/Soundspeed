@@ -21,6 +21,7 @@ from fastapi import FastAPI
 
 from backend.api.app import create_app
 from backend.core.orchestrator import Orchestrator, create_orchestrator
+from backend.core.session import SessionState
 from backend.db.dal import DAL
 from backend.db.seed import seed_dev_scene
 from backend.llm.service import get_service
@@ -39,6 +40,20 @@ def _resolve_db_path() -> Path:
     """
     env = os.environ.get("SOUNDSPEED_DB")
     return Path(env) if env else _DEFAULT_DB_PATH
+
+
+def restore_active_scene(dal: DAL, session: SessionState) -> None:
+    """启动时从 DB 把活跃场（is_active=1）恢复进内存 session，让重启后 NP 立即有上下文。
+
+    SessionState 是内存态，重启清空；DB 持久。不恢复则 session.scene_id=None →
+    NP（文本/语音）take_context 为空 → 模型无真 take 可归 → 静默 take_not_found，
+    直到有人手动激活场。这里在 build_app 装配时补上。
+    只恢复活跃**场**，不恢复活跃 take——录制进程已随重启消失，take_active 须保持 False。
+    DB 无活跃场则 no-op。
+    """
+    active = dal.get_active_scene_id()
+    if active is not None:
+        session.activate_scene(active)
 
 
 def build_app() -> FastAPI:
@@ -63,6 +78,8 @@ def build_app() -> FastAPI:
 
     llm_service = get_service()
     orchestrator = create_orchestrator(dal, llm_service=llm_service)
+    # 重启后从 DB 恢复活跃场到内存 session，否则 NP（文本/语音）首条都会因空上下文 take_not_found。
+    restore_active_scene(dal, orchestrator.session)
     live_asr = _maybe_wire_live_asr(orchestrator)
     diarization_engine = _maybe_wire_diarization(orchestrator, live_asr)
 

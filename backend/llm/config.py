@@ -12,9 +12,36 @@ tools / tool_choice 字段（Tier 1 function calling）：
   l2_take 的 tools 取自 build_l2_tool()（backend/llm/tools/script.py），该构造器
   只依赖中性的 l2_constants（不 import config / l2_take），无循环 import 风险，
   故此处 module 级直接 import。
+  note_struct 的 tools 取自 build_note_tool()（backend/llm/tools/note.py），该构造器
+  会 lazy import backend.pipelines.np_note（取 category enum），module 级 eager import
+  会触发 config → tools.note → pipelines → config 循环，故经 _build_note_task_config()
+  函数级 lazy import 构造。
 """
 
 from backend.llm.tools.script import build_l2_no_script_tool, build_l2_tool
+
+
+def _build_note_task_config() -> dict:
+    """构造 note_struct 配置，含 tools/tool_choice（文本/语音 NP forced tool-call，对标 l2_take）。
+
+    note 短（512 token 够）；system 仅参考模板，真 system prompt 由 run_np_note/run_np_voice 组装。
+    build_note_tool 函数级 lazy import，避免 config → tools.note → pipelines → config 循环。
+    """
+    from backend.llm.tools.note import NOTE_TOOL_NAME, build_note_tool  # noqa: PLC0415
+
+    return {
+        "max_tokens": 512,
+        "temperature": 0.2,
+        "priority": 2,
+        "system": "将录音师备注归置到正确 take 并结构化为 take_id/category/content。",
+        # Tier 1 function calling：强制走 structure_note 工具
+        "tools": [build_note_tool()],
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": NOTE_TOOL_NAME},
+        },
+    }
+
 
 # task_type -> 配置字典
 # 字段：max_tokens, temperature, priority, system, _reserved（可选）；
@@ -95,13 +122,9 @@ TASK_CONFIG: dict[str, dict] = {
         # TODO(1.G): 接入时按剧本结构化需求细化 system prompt
         "system": "将剧本解析为结构化 JSON。",
     },
-    "note_struct": {
-        "max_tokens": 512,
-        "temperature": 0.2,
-        "priority": 2,
-        # TODO(1.G): 接入时按备注结构化需求细化 system prompt
-        "system": "将录音师备注解析为结构化字段。",
-    },
+    # note_struct：带 tools + 强制 tool_choice，文本（run_np_note/infer_tool）与语音
+    # （run_np_voice/infer_voice_tool）NP 共用——两者都走 forced tool-call，无 content-mode 调用。
+    "note_struct": _build_note_task_config(),
     "agent_init": {
         "_reserved": True,
         "max_tokens": 1024,

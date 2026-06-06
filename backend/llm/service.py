@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,49 +29,54 @@ from backend.llm.config import TASK_CONFIG
 if TYPE_CHECKING:
     from backend.llm.client import LLMClient
 
+logger = logging.getLogger(__name__)
+
 # gen_kwargs 中过滤掉的元字段（不传给 client）
 _META_KEYS = frozenset({"priority", "_reserved", "system"})
 
 # HF 模型坐标（与 client.py 的默认路径对应）
 _HF_REPO_ID = "unsloth/gemma-4-E4B-it-GGUF"
 _HF_FILENAME = "gemma-4-E4B-it-Q4_K_M.gguf"
+# 多模态投影器（vision gemma4v + audio gemma4a，同仓），4.J 单实例多模态用
+_HF_MMPROJ_FILENAME = "mmproj-F16.gguf"
 
 
-def resolve_model_path(download: bool) -> str | None:
-    """解析可用模型路径，按优先级：本地 env > HF cache > 下载。
+def _resolve_hf_path(env_var: str, filename: str, download: bool) -> str | None:
+    """解析 HF 仓库内某文件的本地路径，优先级：本地 env > HF cache > 下载 > None。
 
-    优先级：
-      1. GEMMA_MODEL_PATH env 设置且文件存在 → 直接返回，不调用任何 HF 函数。
-      2. huggingface_hub.try_to_load_from_cache 命中（返回 str）→ 返回缓存路径。
-         注意：返回值可能是哨兵对象（truthy 非 str），用 isinstance(result, str) 判。
-      3. download=True → huggingface_hub.hf_hub_download 触发下载并返回路径。
-      4. 否则 → None（模型不可用，调用方应发 downloading 再 await ensure_model_ready）。
+    1. `env_var` 指向的文件存在 → 直接返回，不调用任何 HF 函数。
+    2. `try_to_load_from_cache` 命中（返回 str）→ 返回缓存路径。
+       注意：返回值可能是哨兵对象（truthy 非 str），用 isinstance(result, str) 判。
+    3. download=True → `hf_hub_download` 触发下载并返回路径。
+    4. 否则 → None（不可用，调用方应发 downloading 再 await ensure_model_ready）。
 
-    此函数是同步的，在 worker thread 内调用（asyncio.to_thread），不阻塞 event loop。
+    同步函数，在 worker thread 内调用（asyncio.to_thread），不阻塞 event loop。
+    base gguf 与 mmproj 同仓（_HF_REPO_ID），仅 env_var / filename 不同。
     """
-    # 优先级 1：env 显式设置且文件存在（用户当前 run，零 HF 调用）
-    env_path = os.environ.get("GEMMA_MODEL_PATH")
+    env_path = os.environ.get(env_var)
     if env_path and Path(env_path).exists():
         return env_path
 
-    # 优先级 2/3：走 HF 路径（lazy import，GEMMA_MODEL_PATH 分支已 return）
     import huggingface_hub  # noqa: PLC0415
 
-    cache_result = huggingface_hub.try_to_load_from_cache(
-        repo_id=_HF_REPO_ID,
-        filename=_HF_FILENAME,
-    )
+    cache_result = huggingface_hub.try_to_load_from_cache(repo_id=_HF_REPO_ID, filename=filename)
     if isinstance(cache_result, str):
         return cache_result  # 缓存命中
 
-    # 优先级 3：触发下载
     if download:
-        return huggingface_hub.hf_hub_download(
-            repo_id=_HF_REPO_ID,
-            filename=_HF_FILENAME,
-        )
+        return huggingface_hub.hf_hub_download(repo_id=_HF_REPO_ID, filename=filename)
 
     return None
+
+
+def resolve_model_path(download: bool) -> str | None:
+    """解析 base gguf 路径（env GEMMA_MODEL_PATH > HF cache > 下载）。"""
+    return _resolve_hf_path("GEMMA_MODEL_PATH", _HF_FILENAME, download)
+
+
+def resolve_mmproj_path(download: bool) -> str | None:
+    """解析多模态投影器 mmproj-F16.gguf 路径（env GEMMA_MMPROJ_PATH > HF cache > 下载）。"""
+    return _resolve_hf_path("GEMMA_MMPROJ_PATH", _HF_MMPROJ_FILENAME, download)
 
 
 @dataclass
@@ -80,7 +86,10 @@ class _InferPayload:
     messages: list[dict]
     task_type: str
     gen_kwargs: dict
+    # function calling（main #25）：True 时 worker 取 tool_calls[0] 而非 content。
     want_tool_call: bool = False
+    # 语音 NP（4.J）：非 None 时随 messages 一并喂多模态 client；文本/tool 路径恒为 None。
+    audio: bytes | None = None
 
 
 class LLMService:
@@ -105,6 +114,7 @@ class LLMService:
         self._worker_task: asyncio.Task[None] | None = None
         self._client: LLMClient | None = None
         self._model_path: str | None = None
+        self._mmproj_path: str | None = None
         self._counter = itertools.count()
 
     @property
@@ -132,8 +142,15 @@ class LLMService:
 
         download=True：缓存未命中时触发 hf_hub_download，阻塞直到下载完成。
         不触发模型加载（加载在 _ensure_client/_worker 内完成）。
+
+        方案 A：单实例升多模态，mmproj 与 base 一并就绪。mmproj 下载失败（离线/缺文件）
+        不阻塞启动——退回纯文本（音频/图像不可用，L2/文本 NP 照常）。
         """
         self._model_path = await asyncio.to_thread(resolve_model_path, True)
+        try:
+            self._mmproj_path = await asyncio.to_thread(resolve_mmproj_path, True)
+        except Exception:  # noqa: BLE001  下载失败容错：退纯文本，不崩启动
+            self._mmproj_path = None
 
     def _ensure_worker(self) -> None:
         """Lazy 启动 worker task，只启动一次。
@@ -155,7 +172,21 @@ class LLMService:
             from backend.llm.client import GemmaClient  # noqa: PLC0415
 
             path = self._model_path or resolve_model_path(download=False)
-            self._client = GemmaClient(model_path=path)
+            # 多模态单实例（方案 A，spec §5.1）：mmproj 优先用已就绪路径 / cache；未缓存则
+            # **运行时自动下载**（在 worker thread 内，阻塞可接受）——修部署态缺口：base 已缓存而
+            # mmproj 未缓存的现存安装（升级路径），首条音频前自动补 mmproj 升多模态，而非静默退纯文本
+            # 致语音永久失败。下载失败（离线）→ 退纯文本，音频路径随后由 note.failed(model_unavailable) 兜底。
+            mmproj = self._mmproj_path
+            if mmproj is None:
+                # resolve_mmproj_path(download=True) 内部先查 env/cache，未命中才真下载，
+                # 故无需先单独探一次 download=False（会多一次 HF cache 查询）。
+                try:
+                    mmproj = resolve_mmproj_path(download=True)
+                except Exception:  # noqa: BLE001  下载失败容错：退纯文本，不崩
+                    logger.warning("mmproj 自动下载失败，退纯文本（音频/图像暂不可用）", exc_info=True)
+                    mmproj = None
+                self._mmproj_path = mmproj
+            self._client = GemmaClient(model_path=path, mmproj_path=mmproj)
         return self._client
 
     async def _submit(
@@ -165,11 +196,13 @@ class LLMService:
         priority: int | None,
         timeout: float | None,
         want_tool_call: bool,
+        audio: bytes | None = None,
     ) -> asyncio.Future:
-        """infer / infer_tool 共享：校验入参、组装 payload、入队、启动 worker。
+        """infer / infer_tool / infer_voice 共享：校验入参、组装 payload、入队、启动 worker。
 
         返回尚未 await 的 Future；调用方负责 asyncio.wait_for(fut, timeout)。
-        校验逻辑两条路径完全相同，唯一区别是 payload.want_tool_call。
+        三条路径校验完全相同，区别仅在 payload.want_tool_call（取 content vs tool_calls）
+        与 payload.audio（语音 NP 随 messages 一并喂多模态 client，文本/tool 恒为 None）。
 
         Raises:
             ValueError: task_type 不在 TASK_CONFIG，或 priority/timeout 非法。
@@ -200,6 +233,7 @@ class LLMService:
             task_type=task_type,
             gen_kwargs=gen_kwargs,
             want_tool_call=want_tool_call,
+            audio=audio,
         )
         counter = next(self._counter)
         await self._queue.put((priority, counter, fut, payload))
@@ -236,11 +270,33 @@ class LLMService:
             LookupError: client 返回 dict 缺少 choices[0]["message"]["content"]。
         """
         fut = await self._submit(
-            messages, task_type, priority, timeout, want_tool_call=False
+            messages, task_type, priority, timeout, want_tool_call=False, audio=None
         )
         # 等待结果，支持超时。
         # 不用 shield：超时后 wait_for 自动 cancel(fut)，
         # worker 下一轮取出时 fut.cancelled() 为 True，直接跳过，节省推理资源。
+        return await asyncio.wait_for(fut, timeout=timeout)
+
+    async def infer_voice(
+        self,
+        messages: list[dict],
+        audio: bytes,
+        task_type: str,
+        priority: int | None = None,
+        timeout: float | None = 60.0,
+    ) -> str:
+        """音频推理入口（语音 NP，4.J）。
+
+        与 infer 共用 _client + _lock + priority 队列、同一调度（不开第二实例），仅多透 audio：
+        字节随 payload 喂多模态 client，由 handler 从音频哨兵取回；messages 内须含音频哨兵
+        content（np_note 组装，§5.3）。音频编码 + 推理略慢，默认 timeout 放宽到 60s。
+
+        Raises 与 infer 一致；另若 client 非多模态（未挂 handler）会在推理时抛 ModelUnavailableError
+        （经 Future 回传）。
+        """
+        fut = await self._submit(
+            messages, task_type, priority, timeout, want_tool_call=False, audio=audio
+        )
         return await asyncio.wait_for(fut, timeout=timeout)
 
     async def infer_tool(
@@ -273,6 +329,26 @@ class LLMService:
         """
         fut = await self._submit(
             messages, task_type, priority, timeout, want_tool_call=True
+        )
+        return await asyncio.wait_for(fut, timeout=timeout)
+
+    async def infer_voice_tool(
+        self,
+        messages: list[dict],
+        audio: bytes,
+        task_type: str,
+        priority: int | None = None,
+        timeout: float | None = 60.0,
+    ) -> dict:
+        """音频 + tool-call 推理入口（语音 NP forced tool-call）。
+
+        = infer_voice（透 audio）∩ infer_tool（取 tool_calls[0]）：_submit 同时带 audio +
+        want_tool_call=True（两者正交）。多模态 handler 在 __call__ 里先把音频 eval 进 KV，
+        再按 forced tool_choice 的 schema grammar 约束生成（输入/输出两阶段不冲突，源码实证）。
+        messages 须含音频哨兵（run_np_voice 组装）。返回 tool_calls[0] dict。
+        """
+        fut = await self._submit(
+            messages, task_type, priority, timeout, want_tool_call=True, audio=audio
         )
         return await asyncio.wait_for(fut, timeout=timeout)
 
@@ -322,10 +398,13 @@ class LLMService:
                 # to_thread：_ensure_client 内的 GemmaClient() 会加载权重（同步阻塞），
                 # 放进 worker thread 避免首次加载冻结 event loop。
                 client = await asyncio.to_thread(self._ensure_client)
+                # 音频仅语音路径携带；文本路径不传 audio kwarg（保持文本调用形状不变）。
+                audio_kwarg = {"audio": payload.audio} if payload.audio is not None else {}
                 async with self._lock:
                     result_dict = await asyncio.to_thread(
                         client.create_chat_completion,
                         messages=payload.messages,
+                        **audio_kwarg,
                         **payload.gen_kwargs,
                     )
                 if payload.want_tool_call:
