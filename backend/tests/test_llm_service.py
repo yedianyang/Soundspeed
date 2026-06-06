@@ -11,6 +11,7 @@ import time
 import pytest
 
 from backend.llm.client import StubClient
+from backend.llm.config import TASK_CONFIG
 from backend.llm.service import LLMService, _reset_service, get_service
 
 
@@ -1078,4 +1079,67 @@ async def test_real_gemma_infer():
         assert len(result) > 0
     finally:
         await svc.aclose()
-        _reset_service()
+
+
+class _RecordingClient:
+    """记录最后一次 create_chat_completion 的 kwargs，返回固定 tool_calls。"""
+
+    def __init__(self) -> None:
+        self.last_kwargs: dict = {}
+
+    def create_chat_completion(self, messages, **kwargs):
+        self.last_kwargs = kwargs
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "c0",
+                                "type": "function",
+                                "function": {"name": "count_takes", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+
+
+@pytest.mark.asyncio
+async def test_infer_tool_tool_choice_override_forwarded() -> None:
+    _reset_service()
+    svc = LLMService()
+    client = _RecordingClient()
+    svc._client = client  # 注入，跳过真实加载
+
+    forced = {"type": "function", "function": {"name": "count_takes"}}
+    await svc.infer_tool(
+        [{"role": "user", "content": "x"}],
+        task_type="query_session",
+        tool_choice=forced,
+    )
+    # 覆盖值透传给 client，盖掉 config 的 "auto"
+    assert client.last_kwargs.get("tool_choice") == forced
+    # 不变量：只改 tool_choice，config 其他 gen_kwargs（tools/max_tokens 等）还在
+    assert "tools" in client.last_kwargs
+    await svc.aclose()
+
+
+@pytest.mark.asyncio
+async def test_infer_tool_choice_defaults_to_config() -> None:
+    _reset_service()
+    svc = LLMService()
+    client = _RecordingClient()
+    svc._client = client
+
+    await svc.infer_tool(
+        [{"role": "user", "content": "x"}],
+        task_type="query_session",
+    )
+    # 不传 override → 用 config 的 "auto"（默认行为不变，回归保护）
+    assert client.last_kwargs.get("tool_choice") == TASK_CONFIG["query_session"]["tool_choice"]
+    await svc.aclose()

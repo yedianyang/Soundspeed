@@ -197,6 +197,7 @@ class LLMService:
         timeout: float | None,
         want_tool_call: bool,
         audio: bytes | None = None,
+        tool_choice: str | dict | None = None,
     ) -> asyncio.Future:
         """infer / infer_tool / infer_voice 共享：校验入参、组装 payload、入队、启动 worker。
 
@@ -226,6 +227,11 @@ class LLMService:
         # 从 TASK_CONFIG 提取 gen_kwargs，过滤掉元字段
         gen_kwargs = {k: v for k, v in cfg.items() if k not in _META_KEYS}
 
+        # 按调用覆盖 tool_choice（QP forced 跳动态强制某工具名，spec §5.4）。
+        # None = 不覆盖，沿用 TASK_CONFIG 的静态 tool_choice（默认行为不变）。
+        if tool_choice is not None:
+            gen_kwargs["tool_choice"] = tool_choice
+
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         payload = _InferPayload(
@@ -248,6 +254,7 @@ class LLMService:
         task_type: str,
         priority: int | None = None,
         timeout: float | None = 30.0,
+        tool_choice: str | dict | None = None,
     ) -> str:
         """统一推理入口。
 
@@ -258,6 +265,7 @@ class LLMService:
                       超出范围抛 ValueError。
             timeout: 最大等待时间（含排队 + 推理）秒数，None 表示不超时。
                      传 0 或负数抛 ValueError。
+            tool_choice: 可选，按调用覆盖 TASK_CONFIG 的 tool_choice；None 沿用配置。
 
         Returns:
             LLM 生成的文本字符串（choices[0]["message"]["content"]）。
@@ -270,7 +278,8 @@ class LLMService:
             LookupError: client 返回 dict 缺少 choices[0]["message"]["content"]。
         """
         fut = await self._submit(
-            messages, task_type, priority, timeout, want_tool_call=False, audio=None
+            messages, task_type, priority, timeout, want_tool_call=False, audio=None,
+            tool_choice=tool_choice,
         )
         # 等待结果，支持超时。
         # 不用 shield：超时后 wait_for 自动 cancel(fut)，
@@ -293,6 +302,9 @@ class LLMService:
 
         Raises 与 infer 一致；另若 client 非多模态（未挂 handler）会在推理时抛 ModelUnavailableError
         （经 Future 回传）。
+
+        tool_choice 固定来自 TASK_CONFIG（note_struct 静态 forced），
+        不参与 QP 动态循环、不支持按调用覆盖。
         """
         fut = await self._submit(
             messages, task_type, priority, timeout, want_tool_call=False, audio=audio
@@ -305,6 +317,7 @@ class LLMService:
         task_type: str,
         priority: int | None = None,
         timeout: float | None = 30.0,
+        tool_choice: str | dict | None = None,
     ) -> dict:
         """tool-call 推理入口。
 
@@ -317,6 +330,7 @@ class LLMService:
             task_type: TASK_CONFIG 中的合法 key（须含 tools/tool_choice 字段）。
             priority: 同 infer，None 时从 TASK_CONFIG 取默认值。
             timeout: 最大等待时间（含排队 + 推理）秒数。
+            tool_choice: 可选，按调用覆盖 TASK_CONFIG 的 tool_choice；None 沿用配置。
 
         Returns:
             tool_calls[0] 字典，含 type、function（name + arguments JSON 字符串）。
@@ -328,7 +342,8 @@ class LLMService:
             LookupError: client 返回的 tool_calls 缺失或为空。
         """
         fut = await self._submit(
-            messages, task_type, priority, timeout, want_tool_call=True
+            messages, task_type, priority, timeout, want_tool_call=True,
+            tool_choice=tool_choice,
         )
         return await asyncio.wait_for(fut, timeout=timeout)
 
@@ -346,6 +361,8 @@ class LLMService:
         want_tool_call=True（两者正交）。多模态 handler 在 __call__ 里先把音频 eval 进 KV，
         再按 forced tool_choice 的 schema grammar 约束生成（输入/输出两阶段不冲突，源码实证）。
         messages 须含音频哨兵（run_np_voice 组装）。返回 tool_calls[0] dict。
+        tool_choice 固定来自 TASK_CONFIG（note_struct 静态 forced），
+        不参与 QP 动态循环、不支持按调用覆盖。
         """
         fut = await self._submit(
             messages, task_type, priority, timeout, want_tool_call=True, audio=audio

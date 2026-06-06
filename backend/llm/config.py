@@ -19,6 +19,7 @@ tools / tool_choice 字段（Tier 1 function calling）：
 """
 
 from backend.llm.tools.script import build_l2_no_script_tool, build_l2_tool
+from backend.llm.tools.transcript import build_qp_tools
 
 
 def _build_note_task_config() -> dict:
@@ -45,14 +46,18 @@ def _build_note_task_config() -> dict:
 
 # task_type -> 配置字典
 # 字段：max_tokens, temperature, priority, system, _reserved（可选）；
-# l2_take 额外含 tools/tool_choice（Tier 1 forced function calling）。
+# l2_take 含 tools/tool_choice（Tier 1 forced FC）；query_session 含 tools/tool_choice（Tier 2 auto 路由）。
 TASK_CONFIG: dict[str, dict] = {
     "query_session": {
         "max_tokens": 1024,
         "temperature": 0.3,
         "priority": 1,
-        # TODO(1.G): 接入时按实际场记查询需求细化 system prompt
         "system": "你是一个场记查询助手，帮助导演和录音师快速查找场记信息。",
+        # QP Tier 2 多工具 auto 路由（D-QP-09）。已 rebase 到含 4.x 的 main：
+        # query_session/l2_take 仍 eager（只有 note_struct 因 np_note 依赖才 lazy），
+        # transcript.py import-neutral，eager 挂 build_qp_tools() 安全，无须 lazy。
+        "tools": build_qp_tools(),
+        "tool_choice": "auto",
     },
     "l2_take": {
         # v0.2 schema 含 corrected_segments，实测短 take 输出 ~2000 token；

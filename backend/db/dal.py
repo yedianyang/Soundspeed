@@ -8,6 +8,7 @@ JSON 字段在 DAL 内部透明处理：写入时 json.dumps，读取时 json.lo
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -29,6 +30,76 @@ _MAX_SUFFIX_ITER = 1000
 # _resolve_base_slot 的 exclude_take_id 哨兵：新 take 尚未 INSERT、无既有 take_id 可排除时传它。
 # 任何真实 take_id ≥ 1（AUTOINCREMENT），故 -1 不会误排除任何行。
 _NO_EXCLUDE_TAKE_ID = -1
+
+# QP 场次编号归一：剥 Scene/场/Sc/S 前缀 + 分隔符，保留数字+后缀，统一大写。
+# (?=\d) 前瞻：前缀只在其后（跨可选分隔符）紧跟数字时才剥，避免误剥 `sce3` 这类。
+_SCENE_PREFIX_RE = re.compile(r"^(?:scene|场|sc|s)[\s_\-]*(?=\d)", re.IGNORECASE)
+# 中文口语「第N场」归一：第一场/第1场/第72场/第十一场 → 阿拉伯数字。
+_CN_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+_SCENE_ORDINAL_RE = re.compile(r"^第\s*([0-9一二三四五六七八九十]+)\s*场")
+
+
+def _cn_numeral_to_arabic(s: str) -> str | None:
+    """中文数字 1-99 → 阿拉伯字符串；纯阿拉伯原样返回；无法解析返回 None。
+
+    覆盖电影场次常见区间：一→1，十→10，十一→11，二十→20，二十一→21，九十九→99。
+    超 99（百/千）或含未知字符返回 None。
+    """
+    if s.isdigit():
+        return s
+    if "十" not in s:
+        return str(_CN_DIGITS[s]) if s in _CN_DIGITS else None
+    tens_part, _, ones_part = s.partition("十")
+    if (tens_part and tens_part not in _CN_DIGITS) or (ones_part and ones_part not in _CN_DIGITS):
+        return None
+    tens = _CN_DIGITS.get(tens_part, 1) if tens_part else 1  # 「十X」→ 十位=1
+    ones = _CN_DIGITS.get(ones_part, 0) if ones_part else 0  # 「X十」→ 个位=0
+    return str(tens * 10 + ones)
+
+# 万能笔 authorizer：只放行 SELECT 系动作，其余 DENY（挡 ATTACH/写/非 data_version PRAGMA）。
+# FTS 影子表（_config/_idx/_data/_docsize）按设计可读：MATCH 内部需要 _config/_idx，
+# 且影子表漏不出 script_lines 之外的剧本内容——模型本就能直接读 script_lines 拿全部台词。
+# 真正边界：action 级（PRAGMA scoped + FUNCTION 整体放行除 load_extension）+ mode=ro +
+#   单句守卫 + 行数封顶 + 超时。
+# FUNCTION 放行范围：bm25/coalesce 等 FTS/标量函数均需放行，但 load_extension 在
+#   authorizer 层独立 DENY（RCE 向量，纵深防御，不依赖 enable_load_extension 未调用）。
+# Accepted risk：SELECT zeroblob/randomblob 大分配内存 DoS——单用户 demo、模型上下文受限、
+#   风险有界，本期不堵。
+_QP_ALLOWED_ACTIONS = frozenset(
+    {
+        sqlite3.SQLITE_SELECT,
+        sqlite3.SQLITE_READ,
+        sqlite3.SQLITE_FUNCTION,
+        sqlite3.SQLITE_RECURSIVE,
+    }
+)
+
+
+def normalize_scene_code(raw: str) -> str:
+    """归一场次编号用于读侧匹配（spec §7.2）。
+
+    trim → 中文口语「第N场」归一 → 剥前缀（Scene/场/Sc/S + 分隔符）→ 大写。
+    例：'Scene_3A'→'3A'，'第一场'→'1'，'第72场'→'72'，'s72'→'72'，'场3'→'3'，'3'→'3'，''→''。
+    读、写两侧都过一遍再精确比对，覆盖「同号不同前缀」的常见变体；
+    剥不掉前缀的原样大写返回（不破坏纯中文/特殊编号）。
+    前缀只在其后（跨可选分隔符）紧跟数字时才剥，避免误剥 `sce3` 这类。
+    中文口语「第一场」「第72场」「第十一场」是 4B 真模型实测高频传法（e2e Task 11 发现）——
+    normalize 在此收编，避免模型用口语场次号查不到而瞎答。中文数字仅支持 1-99（超 99 如
+    「第百场」无法解析、落回前缀剥离/原样）。已知限制：「第3场A」会匹配到「场」即止、返回「3」、
+    **截掉字母后缀 A**（与 Scene_3A→3A 不匹配）；带后缀场次建议用 Scene_3A 这类正式写法。
+    """
+    s = str(raw).strip()
+    if not s:
+        return ""
+    m = _SCENE_ORDINAL_RE.match(s)
+    if m:  # 「第一场」/「第1场」/「第72场」/「第十一场」→ 纯数字
+        arabic = _cn_numeral_to_arabic(m.group(1))
+        if arabic is not None:
+            return arabic
+        # 无法解析（如超 99）→ 落回下面前缀剥离/原样
+    s = _SCENE_PREFIX_RE.sub("", s)
+    return s.strip().upper()
 
 
 # ── 数据类（read 方法的返回类型）────────────────────────────────────────────
@@ -227,6 +298,7 @@ class DAL:
             PRAGMA busy_timeout = 5000;
         """
         apply_migrations(db_path)
+        self._db_path = db_path  # QP 只读连接用（_readonly_conn），不复用共享 self._conn
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         _configure_connection(self._conn)
@@ -239,6 +311,202 @@ class DAL:
         with self._conn:
             self._conn.execute("BEGIN IMMEDIATE;")
             yield self._conn
+
+    # ── QP 只读路径（D-QP-12：临时 mode=ro 连接，不碰共享 self._conn）─────────────
+
+    @contextmanager
+    def _readonly_conn(self) -> Iterator[sqlite3.Connection]:
+        """每次开一个临时 mode=ro 连接，用完 finally close。
+
+        executor 在事件循环外（to_thread worker）跑，复用共享 self._conn 是跨线程
+        并发隐患（D-QP-12）。所有 QP 读（场次目录/策展工具/万能笔）一律走本 helper。
+        """
+        conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        # 只设 busy_timeout。故意不调 _configure_connection / 不设 PRAGMA journal_mode=WAL——
+        # 在 mode=ro 连接上执行 WAL 切换会抛 OperationalError: attempt to write a readonly
+        # database（WAL 要写 -wal/-shm）。ro 连接读已落盘 WAL 内容无需切 journal_mode。
+        conn.execute("PRAGMA busy_timeout = 5000;")
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def list_scenes_readonly(self) -> list[dict]:
+        """QP 场次目录用：按创建序返回全部场次（只读连接）。
+
+        只返 QP 场次目录所需最小列集合（scene_id/scene_code/location/int_ext/
+        time_of_day/shoot_date），不是 list_scenes 的全列只读版。
+        """
+        with self._readonly_conn() as conn:
+            rows = conn.execute(
+                "SELECT scene_id, scene_code, location, int_ext, time_of_day, shoot_date "
+                "FROM scenes ORDER BY created_at, scene_id;"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def resolve_scene_id(self, scene_ref: str) -> int | None:
+        """口语/变体场次引用 → 真实 scene_id：两侧 normalize 后精确匹配。
+
+        找不到返回 None（调用方据此老实说没有，禁止模糊替换，spec §7.3）。
+        数字不同 = 不同场，不跨号匹配（spec §7.5）。
+        """
+        target = normalize_scene_code(scene_ref)
+        if not target:
+            return None
+        # 全表扫：场次量级 O(10¹)，不加 index 可接受，别误当遗漏优化去改。
+        for s in self.list_scenes_readonly():
+            if normalize_scene_code(s["scene_code"]) == target:
+                return int(s["scene_id"])
+        return None
+
+    def count_takes(self, scene_id: int, status: str | None = None) -> int:
+        """统计某场次的有效 take 数（软删过滤；可选 status 过滤）。
+
+        scene 不存在或无 take 时返回 0（缺场由 executor 的 resolve_scene_id 先把关，Task 5）。
+        """
+        sql = "SELECT COUNT(*) AS n FROM takes WHERE scene_id = ? AND deleted_at IS NULL"
+        params: tuple = (scene_id,)
+        if status is not None:
+            sql += " AND status = ?"
+            params = (scene_id, status)
+        with self._readonly_conn() as conn:
+            row = conn.execute(sql + ";", params).fetchone()
+        return int(row["n"])
+
+    def get_scene_info(self, scene_id: int) -> dict | None:
+        """返回场次信息 + 最新剧本的角色数。无此场次返回 None。"""
+        with self._readonly_conn() as conn:
+            row = conn.execute(
+                "SELECT scene_id, scene_code, location, int_ext, time_of_day, shoot_date "
+                "FROM scenes WHERE scene_id = ?;",
+                (scene_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            char_row = conn.execute(
+                "SELECT COUNT(DISTINCT sl.character) AS n "
+                "FROM script_lines sl "
+                "WHERE sl.script_id = ("
+                "  SELECT script_id FROM scripts WHERE scene_id = ? ORDER BY version DESC LIMIT 1"
+                ") AND sl.character IS NOT NULL;",
+                (scene_id,),
+            ).fetchone()
+        info = dict(row)
+        info["character_count"] = int(char_row["n"])
+        return info
+
+    def list_characters(self, scene_id: int) -> list[str]:
+        """返回场次最新版剧本里去重后的角色清单（舞台指示 character=NULL 不计）。
+
+        scene 不存在或无剧本时返回 []（缺场由 executor 的 resolve_scene_id 先把关，Task 5）。
+        多版本剧本时只取最新版（ORDER BY version DESC LIMIT 1），不 union 历史版本。
+        """
+        with self._readonly_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT sl.character AS c "
+                "FROM script_lines sl "
+                "WHERE sl.script_id = ("
+                "  SELECT script_id FROM scripts WHERE scene_id = ? ORDER BY version DESC LIMIT 1"
+                ") AND sl.character IS NOT NULL "
+                "ORDER BY sl.character;",
+                (scene_id,),
+            ).fetchall()
+        return [r["c"] for r in rows]
+
+    def search_script_lines(self, query: str, scene_id: int | None = None) -> list[dict]:
+        """FTS5 MATCH 检索台词（BM25 排序，只读连接）。返回 line_no/character/text dict 列表。"""
+        base = (
+            "SELECT sl.line_no AS line_no, sl.character AS character, sl.text AS text "
+            "FROM script_lines_fts fts "
+            "JOIN script_lines sl ON sl.line_id = fts.rowid "
+        )
+        with self._readonly_conn() as conn:
+            if scene_id is not None:
+                rows = conn.execute(
+                    base
+                    + "JOIN scripts s ON s.script_id = sl.script_id "
+                    "WHERE fts.text MATCH ? AND s.scene_id = ? "
+                    "ORDER BY bm25(script_lines_fts);",
+                    (query, scene_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    base + "WHERE fts.text MATCH ? ORDER BY bm25(script_lines_fts);",
+                    (query,),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def query_readonly(
+        self,
+        sql: str,
+        params: tuple = (),
+        *,
+        max_rows: int = 300,
+        timeout_s: float = 3.0,
+    ) -> dict:
+        """万能笔：执行模型现写的只读 SQL（spec §6 安全墙）。
+
+        安全边界（action 级，无表名 deny）：
+        - PRAGMA 分支最先：只放行 FTS MATCH 内部所需的 data_version，其余 PRAGMA 一律 DENY。
+        - FUNCTION 分支次之：整体放行（bm25 等 FTS/标量函数需要），但独立堵死 load_extension
+          （RCE 向量；即便当前 _readonly_conn 未 enable_load_extension，也在 authorizer 层
+          独立防御，防未来连接配置变动打开缺口）。
+        - _QP_ALLOWED_ACTIONS（SELECT/READ/FUNCTION/RECURSIVE）放行其余，其余 DENY。
+          这挡住了 ATTACH（SQLITE_ATTACH）、写（INSERT/UPDATE/DELETE）、临时表（CREATE）等。
+        - FTS 影子表（_config/_idx/_data/_docsize）按设计可读：MATCH 内部需要 _config/_idx，
+          且影子表漏不出 script_lines 之外信息（模型本就能直接读 script_lines）。
+        - 额外防线：mode=ro 连接挡物理写；单句守卫（sqlite3.Warning）；行数封顶；超时 abort。
+        - Accepted risk：SELECT zeroblob/randomblob 大分配内存 DoS——单用户 demo、上下文受限，
+          本期不堵。
+        错误不抛穿：包成 {"error": ...} 让循环下一跳自纠。
+        成功返回 {"columns": [...], "rows": [...], "row_count": n, "truncated": bool}。
+        """
+        import time
+
+        def _authorizer(
+            action: int, arg1: object, arg2: object, db_name: object, trigger: object
+        ) -> int:
+            # PRAGMA 分支必须在 allowed-actions 检查之前（SQLITE_PRAGMA 不在 allowed 集合）。
+            # 只放行 data_version（FTS MATCH 内部用来检测 DB 并发修改），其余 PRAGMA 全部 DENY。
+            if action == sqlite3.SQLITE_PRAGMA:
+                return sqlite3.SQLITE_OK if arg1 == "data_version" else sqlite3.SQLITE_DENY
+            # FUNCTION 整体放行（bm25 等 FTS/标量函数需要），但独立堵死 load_extension——
+            # 它是 RCE 向量；即便当前 _readonly_conn 未 enable_load_extension，也在
+            # authorizer 层堵死，防未来连接配置变动打开缺口（纵深防御）。
+            if action == sqlite3.SQLITE_FUNCTION:
+                return sqlite3.SQLITE_DENY if arg2 == "load_extension" else sqlite3.SQLITE_OK
+            if action in _QP_ALLOWED_ACTIONS:
+                return sqlite3.SQLITE_OK
+            return sqlite3.SQLITE_DENY
+
+        with self._readonly_conn() as conn:
+            deadline = time.monotonic() + timeout_s
+            conn.set_authorizer(_authorizer)
+            conn.set_progress_handler(
+                lambda: 1 if time.monotonic() > deadline else 0, 1000
+            )
+            try:
+                cur = conn.execute(sql, params)
+                fetched = cur.fetchmany(max_rows + 1)
+                truncated = len(fetched) > max_rows
+                fetched = fetched[:max_rows]
+                columns = [d[0] for d in cur.description] if cur.description else []
+                return {
+                    "columns": columns,
+                    "rows": [dict(r) for r in fetched],
+                    "row_count": len(fetched),
+                    "truncated": truncated,
+                }
+            except sqlite3.Warning as exc:
+                return {"error": f"只能执行单条 SQL 语句：{exc}"}
+            except sqlite3.OperationalError as exc:
+                return {"error": f"查询失败或超时：{exc}"}
+            except sqlite3.DatabaseError as exc:
+                return {"error": f"数据库拒绝该查询（仅允许只读 SELECT）：{exc}"}
+            finally:
+                conn.set_authorizer(None)
+                conn.set_progress_handler(None, 1000)
 
     # ── 资源管理 ──────────────────────────────────────────────────────────────
 
