@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { postNote, postVoiceNote } from "@/lib/api"
 import { CONN_ID } from "@/lib/connId"
+import { randomId } from "@/lib/uuid"
 import { useVoiceRecorder } from "@/hooks/useVoiceRecorder"
 import { useSessionStore } from "@/store/session"
 
@@ -15,11 +16,7 @@ interface MemoInputProps {
 }
 
 // client_id 只需全局唯一（pending 乐观去重/精确移除/标失败的键），不要求密码学强度。
-// crypto.randomUUID 仅在安全源（HTTPS / localhost）可用，局域网 HTTP（iPad/手机经 LAN IP 访问，
-// 见 spec §3.5）下为 undefined，直接调用会抛 TypeError 让 note 提交失败，故加回退。
-function newClientId(): string {
-  return crypto?.randomUUID?.() ?? `nid-${Date.now()}-${Math.random().toString(36).slice(2)}`
-}
+const newClientId = (): string => randomId("nid")
 
 // 底部栏的打字 memo 输入（场记真实输入口）。接 POST /notes；类别走 @语法（如「@keep 第三条好」），
 // 不打前缀默认 note。提交后乐观插入 pending note（队列由上方 NoteList 显示「处理中」），

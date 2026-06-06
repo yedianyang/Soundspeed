@@ -37,10 +37,11 @@ async def classify_memo(
         {"role": "user", "content": text},
     ]
     try:
+        # priority 不显式传：infer_tool 默认从 TASK_CONFIG["memo_route"]["priority"] 取（=1），
+        # 让 config 当单一来源，避免两处分裂。
         tool_call = await service.infer_tool(
             messages,
             task_type="memo_route",
-            priority=1,
             timeout=timeout,
         )
         kind = json.loads(tool_call["function"]["arguments"])["kind"]

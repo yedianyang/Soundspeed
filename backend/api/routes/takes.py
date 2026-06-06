@@ -23,7 +23,6 @@ TakeDTO 有意省略 performer_issues / audio_quality（codex P2）：
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import Literal
@@ -32,7 +31,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.api.auth import require_admin
-from backend.api.routes.query import run_qp_and_broadcast
+from backend.api.routes.query import schedule_qp_broadcast
 from backend.core.events import (
     SCENE_CHANGED,
     TAKE_CHANGED,
@@ -327,23 +326,6 @@ class NoteListOut(BaseModel):
     events: list[NoteOut]
 
 
-# query 分支 fire-and-forget task 持有集：防 asyncio.create_task 结果被 GC（Python 文档建议）。
-_qp_tasks: set[asyncio.Task] = set()
-
-
-def _qp_task_done(task: asyncio.Task) -> None:
-    _qp_tasks.discard(task)
-    if not task.cancelled() and task.exception() is not None:
-        logger.warning("qp 调度 task 异常: %r", task.exception())
-
-
-def _schedule_qp(text: str, conn_id: str, **kwargs) -> None:
-    """调度 run_qp_and_broadcast 为 fire-and-forget task（kwargs: dal/service/cm）。"""
-    task = asyncio.create_task(run_qp_and_broadcast(text, conn_id, **kwargs))
-    _qp_tasks.add(task)
-    task.add_done_callback(_qp_task_done)
-
-
 @router.post("/notes", status_code=202)
 async def create_note(
     body: NoteCreateBody,
@@ -371,7 +353,7 @@ async def create_note(
     if service is not None and body.conn_id and not body.text.lstrip().startswith("@"):
         kind = await classify_memo(note.raw_text, service)
         if kind == "query":
-            _schedule_qp(
+            schedule_qp_broadcast(
                 note.raw_text,
                 body.conn_id,
                 dal=orchestrator.dal,

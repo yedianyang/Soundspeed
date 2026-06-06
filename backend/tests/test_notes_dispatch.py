@@ -1,14 +1,14 @@
 """A5 分流调度器测试：POST /notes 按 classify_memo 结果分流到 QP 或 NP。
 
 四个分支：
-  1. conn_id + classify=query → _schedule_qp 被调、不进 run_np_async、返回 202 kind=query
-  2. conn_id + classify=note  → 不调 _schedule_qp、进 run_np_async
+  1. conn_id + classify=query → schedule_qp_broadcast 被调、不进 run_np_async、返回 202 kind=query
+  2. conn_id + classify=note  → 不调 schedule_qp_broadcast、进 run_np_async
   3. 无 conn_id               → 不调 classify_memo、进 run_np_async
   4. @keep 开头（显式类别）   → 不调 classify_memo、进 run_np_async
 
 monkeypatch 目标：
   backend.api.routes.takes.classify_memo
-  backend.api.routes.takes._schedule_qp
+  backend.api.routes.takes.schedule_qp_broadcast
 
 复用 test_api_notes.py 的 DAL + create_orchestrator + create_app 风格。
 """
@@ -77,7 +77,7 @@ def _setup_scene_and_take(dal: DAL, scene_code: str = "3A") -> int:
 
 
 def test_dispatch_query_branch_schedules_qp_not_np(dal: DAL, monkeypatch) -> None:
-    """conn_id 存在且 classify=query → _schedule_qp 被调（text/conn_id 正确），
+    """conn_id 存在且 classify=query → schedule_qp_broadcast 被调（text/conn_id 正确），
     不进 run_np_async，返回 202 且 kind='query'。
     """
     _setup_scene_and_take(dal)
@@ -89,13 +89,13 @@ def test_dispatch_query_branch_schedules_qp_not_np(dal: DAL, monkeypatch) -> Non
 
     monkeypatch.setattr("backend.api.routes.takes.classify_memo", _fake_classify)
 
-    # 捕获 _schedule_qp 调用
+    # 捕获 schedule_qp_broadcast 调用
     schedule_calls: list[tuple] = []
 
     def _fake_schedule(text, conn_id, **kwargs):
         schedule_calls.append((text, conn_id))
 
-    monkeypatch.setattr("backend.api.routes.takes._schedule_qp", _fake_schedule)
+    monkeypatch.setattr("backend.api.routes.takes.schedule_qp_broadcast", _fake_schedule)
 
     # 捕获 run_np_async（通过 orch 实例——app.state.orchestrator）
     np_calls: list[dict] = []
@@ -119,7 +119,7 @@ def test_dispatch_query_branch_schedules_qp_not_np(dal: DAL, monkeypatch) -> Non
     assert data["status"] == "processing"
     assert data["kind"] == "query"
 
-    assert len(schedule_calls) == 1, f"_schedule_qp 应被调一次，实际 {schedule_calls}"
+    assert len(schedule_calls) == 1, f"schedule_qp_broadcast 应被调一次，实际 {schedule_calls}"
     called_text, called_conn_id = schedule_calls[0]
     assert called_conn_id == "conn-abc"
     # parse_note 不修改纯文本（无 @category）时 raw_text == text
@@ -132,7 +132,7 @@ def test_dispatch_query_branch_schedules_qp_not_np(dal: DAL, monkeypatch) -> Non
 
 
 def test_dispatch_note_branch_goes_to_np(dal: DAL, monkeypatch) -> None:
-    """classify=note → 不调 _schedule_qp，进 run_np_async。"""
+    """classify=note → 不调 schedule_qp_broadcast，进 run_np_async。"""
     _setup_scene_and_take(dal)
     client = _make_dispatch_client(dal, monkeypatch)
 
@@ -146,7 +146,7 @@ def test_dispatch_note_branch_goes_to_np(dal: DAL, monkeypatch) -> None:
     def _fake_schedule(text, conn_id, **kwargs):
         schedule_calls.append((text, conn_id))
 
-    monkeypatch.setattr("backend.api.routes.takes._schedule_qp", _fake_schedule)
+    monkeypatch.setattr("backend.api.routes.takes.schedule_qp_broadcast", _fake_schedule)
 
     np_calls: list[dict] = []
     with client as c:
@@ -164,7 +164,7 @@ def test_dispatch_note_branch_goes_to_np(dal: DAL, monkeypatch) -> None:
         )
 
     assert resp.status_code == 202, resp.text
-    assert schedule_calls == [], f"_schedule_qp 不应被调，实际 {schedule_calls}"
+    assert schedule_calls == [], f"schedule_qp_broadcast 不应被调，实际 {schedule_calls}"
     assert len(np_calls) == 1, f"run_np_async 应被调一次，实际 {np_calls}"
 
 

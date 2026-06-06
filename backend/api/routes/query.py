@@ -5,6 +5,7 @@ post_query（直连 demo，同步返回）与入口调度器 query 分支（fire
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -52,6 +53,37 @@ async def run_qp_and_broadcast(
         QpAnswerPayload(connection_id=conn_id, answer_text=answer),
     )
     return answer
+
+
+# query 分支 fire-and-forget task 持有集：防 asyncio.create_task 结果被 GC（Python 文档建议）。
+_qp_tasks: set[asyncio.Task] = set()
+
+
+def _qp_task_done(task: asyncio.Task) -> None:
+    _qp_tasks.discard(task)
+    exc = None if task.cancelled() else task.exception()
+    if exc is not None:
+        logger.warning("qp 调度 task 异常: %r", exc)
+
+
+def schedule_qp_broadcast(
+    text: str,
+    conn_id: str,
+    *,
+    dal: "DAL",
+    service: "LLMService",
+    cm,
+) -> None:
+    """调度 run_qp_and_broadcast 为 fire-and-forget task（防 GC + 异常吼一声）。
+
+    入口调度器 query 分支用：classify 命中 query 时不阻塞 202 返回。
+    post_query 走同步 await 直返、不经此路。
+    """
+    task = asyncio.create_task(
+        run_qp_and_broadcast(text, conn_id, dal=dal, service=service, cm=cm)
+    )
+    _qp_tasks.add(task)
+    task.add_done_callback(_qp_task_done)
 
 
 @router.post("/query")
