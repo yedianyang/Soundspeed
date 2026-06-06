@@ -4,7 +4,7 @@ import { AlertCircle, Loader2 } from "lucide-react"
 import { speakerColor } from "@/lib/constants"
 import { cn, formatTakeLabel } from "@/lib/utils"
 import { useSessionStore, type LiveSeg } from "@/store/session"
-import { correctSegmentSpeaker, takeQueryKey, useSpeakers, useTake } from "@/lib/api"
+import { correctSegmentSpeaker, takeQueryKey, useScenes, useSpeakers, useTake } from "@/lib/api"
 import { SpeakerLabel } from "./SpeakerLabel"
 import { TakeDivider } from "./TakeDivider"
 
@@ -52,7 +52,18 @@ export function LiveTranscript() {
   const currentTake = useSessionStore((s) =>
     currentTakeId != null ? s.takes.get(currentTakeId) : undefined,
   )
+  const { data: scenes } = useScenes()
   const queryClient = useQueryClient()
+
+  // 分隔条显示完整场镜次：Scene_code · Shot · Take（scene_code 由 scene_id 查 scenes，缺则回退 #id）。
+  const dividerLabel = useMemo(() => {
+    if (!currentTake || currentTake.take_number == null) return ""
+    const sceneCode =
+      scenes?.find((s) => s.scene_id === currentTake.scene_id)?.scene_code ??
+      `#${currentTake.scene_id}`
+    const shotPart = currentTake.shot ? `Shot ${currentTake.shot}` : "Shot —"
+    return `${sceneCode} · ${shotPart} · Take ${formatTakeLabel(currentTake)}`
+  }, [currentTake, scenes])
 
   // take 结束后拉权威 segment（带 segment_id + speaker），与 History 同源 → 编辑天然同步。
   // 录制中不拉：用 store 实时流低延迟显示，避免和实时帧打架。
@@ -114,9 +125,7 @@ export function LiveTranscript() {
 
   return (
     <div className="px-4 py-4 space-y-4">
-      {currentTake?.take_number != null && (
-        <TakeDivider label={formatTakeLabel(currentTake)} />
-      )}
+      {currentTake?.take_number != null && <TakeDivider label={dividerLabel} />}
 
       {hasContent ? (
         <div className="space-y-1.5 leading-relaxed">
