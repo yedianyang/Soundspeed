@@ -48,7 +48,10 @@ export default function EnrollRecorderDialog({ open, onOpenChange, speaker, onEn
   }
 
   // 卸载时若仍在录音，cancel 释放后端设备。父组件用 key 在每次打开时重挂，状态从 idle 复位。
+  // setup 里显式置 true：StrictMode（dev）会 mount→unmount→remount，cleanup 先把 ref 置 false，
+  // 若 remount 不重置，ref 会永久 false，导致 startRecording 误判组件已卸载而卡在 starting。
   useEffect(() => {
+    mountedRef.current = true
     return () => {
       mountedRef.current = false
       clearTimer()
