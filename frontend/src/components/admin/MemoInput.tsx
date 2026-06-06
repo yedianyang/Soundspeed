@@ -4,12 +4,9 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { postNote, postVoiceNote } from "@/lib/api"
 import { CONN_ID } from "@/lib/connId"
-import { randomId } from "@/lib/uuid"
+import { newClientId } from "@/lib/feed-actions"
 import { useVoiceRecorder } from "@/hooks/useVoiceRecorder"
 import { useSessionStore } from "@/store/session"
-
-// client_id 只需全局唯一（pending 乐观去重/精确移除/标失败的键），不要求密码学强度。
-const newClientId = (): string => randomId("nid")
 
 // 底部栏的打字 memo 输入（场记真实输入口）。接 POST /notes 并带 CONN_ID：后端块③调度器自动判
 // note / query（用户发送时不打前缀，回溯地按 kind 渲染）。普通备注 → 乐观 pending → note.processed

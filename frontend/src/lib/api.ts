@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { API_BASE } from "@/lib/config"
 import type { FileNameFormat } from "@/lib/filename-format"
+import { randomId } from "@/lib/uuid"
 import { useSessionStore } from "@/store/session"
 import type {
   ActivateSceneResult,
@@ -481,8 +482,7 @@ export function getTakeNotes(takeId: number): Promise<NoteListResponse> {
 // 只认领 qp.answer.{CONN_ID}，这条广播到无人订阅的 topic 故无害；答案靠同步返回就地 resolveQa。
 // 正常打字 memo 走 postNote(…,CONN_ID) 由后端自动判 note/query，不经此路。
 export function postQuery(text: string): Promise<QueryResponse> {
-  const connId =
-    crypto?.randomUUID?.() ?? `qp-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const connId = randomId("qp")
   return request<QueryResponse>(`/api/v1/query`, {
     method: "POST",
     body: JSON.stringify({ text, conn_id: connId }),

@@ -29,6 +29,14 @@ export interface LiveSeg {
   isPartial: boolean
 }
 
+// QP 答案到达：把命中 client_id 的 qaItem 置 done + answer（其余不动）。resolveQa 与
+// qpAnswerArrived 的命中分支共用同一 transition；archiveUnread+1 的 bump 仍留在各自 set()。
+function resolveQaItems(items: QaItem[], clientId: string, answer: string): QaItem[] {
+  return items.map((q) =>
+    q.client_id === clientId ? { ...q, status: "done", answer } : q,
+  )
+}
+
 function readToken(): string | null {
   const stored =
     typeof localStorage !== "undefined" ? localStorage.getItem(LS_TOKEN_KEY) : null
@@ -388,9 +396,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   addQa: (q) => set((s) => ({ qaItems: [...s.qaItems, q] })),
   resolveQa: (clientId, answer) =>
     set((s) => ({
-      qaItems: s.qaItems.map((q) =>
-        q.client_id === clientId ? { ...q, status: "done", answer } : q,
-      ),
+      qaItems: resolveQaItems(s.qaItems, clientId, answer),
       // QP 新答案进档案 → 未读 +1（打开档案清 0）。
       archiveUnread: s.archiveUnread + 1,
     })),
@@ -407,11 +413,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((s) => {
       if (s.qaItems.some((q) => q.client_id === clientId)) {
         return {
-          qaItems: s.qaItems.map((q) =>
-            q.client_id === clientId
-              ? { ...q, status: "done", answer: answerText }
-              : q,
-          ),
+          qaItems: resolveQaItems(s.qaItems, clientId, answerText),
           archiveUnread: s.archiveUnread + 1,
         }
       }

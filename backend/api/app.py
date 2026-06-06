@@ -44,13 +44,12 @@ from backend.core.events import (
     LLM_STATUS,
     NOTE_FAILED,
     NOTE_PROCESSED,
-    QP_ANSWER,
     SCENE_CHANGED,
     TAKE_CHANGED,
     TAKE_DELETED,
     TAKE_PROCESSING,
     TAKE_SEGMENTS_UPDATED,
-    QpAnswerPayload,
+    broadcast_qp_answer,
 )
 from backend.core.orchestrator import Orchestrator
 
@@ -124,12 +123,7 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
                 cm: Any,
             ) -> None:
                 # client_id 进 payload：前端据此精确撤那条语音 pending（不盲清所有语音 pending）。
-                cm.broadcast(
-                    f"{QP_ANSWER}.{conn_id}",
-                    QpAnswerPayload(
-                        connection_id=conn_id, answer_text=answer, client_id=client_id
-                    ),
-                )
+                broadcast_qp_answer(cm, conn_id, answer, client_id=client_id)
 
             _vd._persist_np_output_callable = _persist_np_wrapper  # type: ignore[assignment]
             _vd._schedule_qp_broadcast = _broadcast_wrapper  # type: ignore[assignment]
