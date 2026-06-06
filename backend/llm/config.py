@@ -26,7 +26,11 @@ tools / tool_choice 字段（Tier 1 function calling）：
 """
 
 from backend.llm.tools.route import ROUTE_TOOL_NAME, build_route_memo_tool
-from backend.llm.tools.script import build_l2_no_script_tool, build_l2_tool
+from backend.llm.tools.script import (
+    build_l2_no_script_tool,
+    build_l2_tool,
+    build_parse_lines_tool,
+)
 from backend.llm.tools.transcript import build_qp_tools
 
 
@@ -147,6 +151,28 @@ TASK_CONFIG: dict[str, dict] = {
             "示例输出：\n"
             '[["罗湘", "我们先聊聊。"], ["", "罗湘走到窗边。"]]'
         ),
+    },
+    "script_parse_fc": {
+        # 单场原生 function calling（黑客松展示 + 照片增补/更新对话框的单场基础）：
+        # 强制调 report_parsed_lines 工具，输出结构由 forced tool_choice 的 JSON grammar 保证。
+        # 只用于单场（一次一调，grammar 成本可忍）；整本逐场热循环仍走 script_parse 快路径
+        # （无 grammar），避免每场都付 grammar 开销叠加。
+        "max_tokens": 4096,
+        "temperature": 0.1,
+        "priority": 3,
+        "system": (
+            "你是剧本解析器。把给定剧本逐行解析，调用 report_parsed_lines 工具报告结果。\n"
+            "- 对白行 → speaker 填角色名，text 填台词\n"
+            "- 非对白行（动作、场景描述、舞台指示，即使句子里出现人名）→ speaker 填空字符串，text 填原文\n"
+            "判断依据：有「角色：台词」形式、或明显是某人说出口的话，才算对白；"
+            "叙述某人动作/神态/场景的是描述。\n"
+            "逐行输出，顺序与原文一致。"
+        ),
+        "tools": [build_parse_lines_tool()],
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": "report_parsed_lines"},
+        },
     },
     # note_struct：带 tools + 强制 tool_choice，文本（run_np_note/infer_tool）与语音
     # （run_np_voice/infer_voice_tool）NP 共用——两者都走 forced tool-call，无 content-mode 调用。

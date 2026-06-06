@@ -41,6 +41,15 @@ _HF_FILENAME = "gemma-4-E4B-it-Q4_K_M.gguf"
 _HF_MMPROJ_FILENAME = "mmproj-F16.gguf"
 
 
+def _text_only() -> bool:
+    """SOUNDSPEED_LLM_TEXT_ONLY=1 → 只加载纯文本 Gemma，跳过 mmproj（不解析/不下载/不占显存）。
+
+    用于「只做文本」的运行档（剧本解析/L2/NP 文本/导入档）：8GB 卡上 base+mmproj+KV 易撑爆，
+    且省掉对 mmproj 的联网校验/下载。视觉（照片 OCR）路径需要 mmproj，勿设此开关。
+    """
+    return os.environ.get("SOUNDSPEED_LLM_TEXT_ONLY") == "1"
+
+
 def _resolve_hf_path(env_var: str, filename: str, download: bool) -> str | None:
     """解析 HF 仓库内某文件的本地路径，优先级：本地 env > HF cache > 下载 > None。
 
@@ -147,6 +156,9 @@ class LLMService:
         不阻塞启动——退回纯文本（音频/图像不可用，L2/文本 NP 照常）。
         """
         self._model_path = await asyncio.to_thread(resolve_model_path, True)
+        if _text_only():
+            self._mmproj_path = None  # 纯文本档：不解析/不下载 mmproj
+            return
         try:
             self._mmproj_path = await asyncio.to_thread(resolve_mmproj_path, True)
         except Exception:  # noqa: BLE001  下载失败容错：退纯文本，不崩启动
@@ -177,7 +189,7 @@ class LLMService:
             # mmproj 未缓存的现存安装（升级路径），首条音频前自动补 mmproj 升多模态，而非静默退纯文本
             # 致语音永久失败。下载失败（离线）→ 退纯文本，音频路径随后由 note.failed(model_unavailable) 兜底。
             mmproj = self._mmproj_path
-            if mmproj is None:
+            if mmproj is None and not _text_only():
                 # resolve_mmproj_path(download=True) 内部先查 env/cache，未命中才真下载，
                 # 故无需先单独探一次 download=False（会多一次 HF cache 查询）。
                 try:
