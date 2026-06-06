@@ -28,7 +28,7 @@ import { STATUS_DOT, STATUS_LABEL } from "@/lib/constants"
 import { stageButton, recordingDisabled } from "@/lib/styles"
 import { cn, formatElapsed } from "@/lib/utils"
 import type { Status } from "@/types/take"
-import type { SceneDTO } from "@/types/api"
+import type { SceneDTO, LlmState } from "@/types/api"
 import TakeSpeakerSelect from "@/components/admin/TakeSpeakerSelect"
 import MemoInput from "@/components/admin/MemoInput"
 
@@ -78,6 +78,8 @@ interface BottomControlBarProps {
   // ── P5：LLM 反馈档案一级入口（QP 问答 + L2 推送全历史）。未读点驱动来自 store.archiveUnread。──
   onOpenArchive: () => void
   archiveUnread: number
+  // LLM 运行态（与 header LLM chip 同源）：非 idle = 正在跑 → 入口左点呈处理态（amber + 脉冲）。
+  llmState: LlmState
 }
 
 export default function BottomControlBar({
@@ -112,6 +114,7 @@ export default function BottomControlBar({
   onNoteAdded,
   onOpenArchive,
   archiveUnread,
+  llmState,
 }: BottomControlBarProps) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [shotDraft, setShotDraft] = useState("")
@@ -395,7 +398,8 @@ export default function BottomControlBar({
             </Button>
 
             {/* LLM 历史一级入口：Mark(TBD) 同款视觉（白底 + 边框 + 阴影 + 左状态点）。
-                左点承载未读 —— 有未读 = 主题色点，无未读 = 灰点。紧跟撤销按钮右侧。 */}
+                左点与 header LLM chip 同步：处理中（非 idle）= amber + 脉冲，呈现正在处理；
+                idle 时有未读 = amber，无未读 = 绿（同 header idle）。紧跟撤销按钮右侧。 */}
             <Button
               variant="ghost"
               size="default"
@@ -406,7 +410,11 @@ export default function BottomControlBar({
               <span
                 className={cn(
                   "size-1.5 rounded-full",
-                  archiveUnread > 0 ? "bg-primary" : "bg-muted-foreground",
+                  llmState !== "idle"
+                    ? "bg-primary animate-pulse"
+                    : archiveUnread > 0
+                      ? "bg-primary"
+                      : "bg-green-500",
                 )}
               />
               <span className="text-sm font-medium text-foreground">LLM 历史</span>
