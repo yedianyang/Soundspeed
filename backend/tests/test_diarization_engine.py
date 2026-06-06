@@ -41,6 +41,31 @@ def test_turns_from_empty_diarization():
     assert DiarizationEngine._turns_from_diarization(_Empty()) == []
 
 
+def test_diarize_passes_num_speakers_to_pipeline():
+    """num_speakers 先验透传到 pyannote pipeline；默认（None）不带该约束。"""
+    calls: dict = {}
+
+    class _FakePipe:
+        def __call__(self, data, num_speakers=None):
+            calls["num_speakers"] = num_speakers
+            return SimpleNamespace(
+                speaker_diarization=SimpleNamespace(
+                    itertracks=lambda yield_label=True: iter(
+                        [(SimpleNamespace(start=0.0, end=1.0), None, "SPEAKER_00")]
+                    )
+                ),
+                speaker_embeddings=None,
+            )
+
+    eng = DiarizationEngine(hf_token="x", pipeline=_FakePipe())
+    pcm = np.zeros(16000 * 2, dtype=np.int16)  # 2s ≥ 1s 守卫
+
+    eng.diarize(pcm, num_speakers=2)
+    assert calls["num_speakers"] == 2  # 选了 2 人 → 约束 pyannote 分 2 个
+    eng.diarize(pcm)
+    assert calls["num_speakers"] is None  # 默认不约束（自动判定）
+
+
 def test_attach_pipeline_embeddings_maps_by_label_order():
     """pyannote 4.0：speaker_embeddings 按 annotation.labels() 顺序，按 label 回填到 turns。"""
     class _Ann:

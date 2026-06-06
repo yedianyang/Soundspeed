@@ -449,6 +449,7 @@ def import_single_scene(
     synthetic_code: str,
     dal: ScriptImportWriteDAL,
     active_scene_id: int | None = None,
+    on_conflict: Literal["skip", "version"] = "skip",
 ) -> dict | None:
     """逐场增量入库（异步解析的每场即时落库用）。
 
@@ -482,8 +483,15 @@ def import_single_scene(
             time_of_day=scene.slugline.time_of_day,
             location=scene.slugline.location,
         )
-        if not created and dal.get_latest_script(scene_id) is not None:
-            return None  # 重复场：本期跳过（不静默替换）
+        if not created:
+            existing = dal.get_latest_script(scene_id)
+            if existing is not None:
+                if on_conflict == "skip":
+                    return None  # 重复场：跳过不替换（默认）
+                # on_conflict="version"（更新全本）：raw_text 没变则幂等跳过、不刷版本；
+                # 变了则 fall through 追加新版本（旧版保留）。
+                if existing.get("raw_text") == raw_text:
+                    return None
 
     script_id = dal.insert_script(scene_id, raw_text)
     for line_no, (character, text) in enumerate(valid_lines, start=1):

@@ -27,6 +27,7 @@ from backend.pipelines.sp_script import (
     _parse_fc_lines,
     _parse_lines_output,
     _parse_slugline,
+    normalize_character,
     parse_scene_block,
     parse_scene_block_fc,
     run_sp_parse,
@@ -231,6 +232,41 @@ async def test_parse_scene_block_merges_standalone_parenthetical():
     lines = scenes[0].lines
     assert len(lines) == 1
     assert (lines[0].character, lines[0].text) == ("夏雨", "（笑）你说得对。")
+
+
+# ── 角色名归一（normalize_character）─────────────────────────────────────────
+
+
+def test_normalize_character_strips_voiceover():
+    assert normalize_character("夏雨（V.O.）") == "夏雨"
+    assert normalize_character("夏雨(V.O.)") == "夏雨"  # 半角括号
+    assert normalize_character("沈默（记忆中的自己）") == "沈默"
+
+
+def test_normalize_character_plain_unchanged():
+    assert normalize_character("顾朗") == "顾朗"
+    assert normalize_character(None) is None
+
+
+def test_normalize_character_paren_only_kept():
+    # 整名就是括号（如旁白），剥后为空 → 保留原名，不归零
+    assert normalize_character("（旁白）") == "（旁白）"
+
+
+def test_normalize_character_multiple_trailing():
+    assert normalize_character("夏雨（青年）（V.O.）") == "夏雨"
+
+
+@pytest.mark.asyncio
+async def test_fc_parse_normalizes_voiceover_character():
+    """FC 解析出『夏雨（V.O.）』落库前归一为『夏雨』（与对白行同一角色合并）。"""
+    svc = _mock_llm_tool(_tool_call([
+        {"speaker": "夏雨", "text": "你来了。"},
+        {"speaker": "夏雨（V.O.）", "text": "那一年的冬天很冷。"},
+    ]))
+    scenes = await parse_scene_block_fc("夏雨：你来了。\n夏雨（V.O.）：那一年的冬天很冷。", svc)
+    chars = [ln.character for ln in scenes[0].lines]
+    assert chars == ["夏雨", "夏雨"]  # 两行归一到同一角色
 
 
 def test_parse_slugline():

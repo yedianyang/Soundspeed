@@ -17,11 +17,20 @@ import {
   useUploadScript,
 } from "@/lib/api"
 import type { SceneDTO } from "@/types/api"
+import SceneUpdateDialog from "@/components/admin/SceneUpdateDialog"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import {
   ChevronLeft,
   ChevronRight,
   Upload,
   Camera,
+  Pencil,
   RotateCcw,
   Check,
   Loader2,
@@ -72,6 +81,8 @@ export function ScriptPanel() {
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
+  const [updateOpen, setUpdateOpen] = useState(false) // 选中场更新对话框
+  const [confirmUpdateAll, setConfirmUpdateAll] = useState(false) // 整本重传「更新全本」确认
 
   // 剧本上传/解析（两段式 + 异步进度，全部从服务器状态派生 → 切 tab 不丢）。
   const upload = useUploadScript()
@@ -165,16 +176,30 @@ export function ScriptPanel() {
   }
 
   // ---- 阶段 2：解析分场（启动后台任务；进度由 latestUpload 轮询派生）----
-  const handleParse = async () => {
+  const doParse = async (onConflict: "skip" | "version") => {
     if (!latestUpload) return
     setUploadError(null)
     setDismissedId(null)
     try {
-      await parse.mutateAsync({ uploadId: latestUpload.upload_id, target: "multi_scene" })
+      await parse.mutateAsync({
+        uploadId: latestUpload.upload_id,
+        target: "multi_scene",
+        onConflict,
+      })
       queryClient.invalidateQueries({ queryKey: scriptUploadsQueryKey() })
     } catch (err) {
       setUploadError(err instanceof ApiError ? err.message : "解析启动失败，请重试")
     }
+  }
+
+  const handleParse = () => {
+    if (!latestUpload) return
+    // 已有剧本 → 再次解析视为「更新全本」，先确认；首次导入直接解析（全新场）。
+    if (scriptScenes.length > 0) {
+      setConfirmUpdateAll(true)
+      return
+    }
+    void doParse("skip")
   }
 
   // 相机仍走本地 mock（拍照 OCR 属后续 ticket，暂不接后端）。
@@ -251,8 +276,52 @@ export function ScriptPanel() {
           >
             <Camera className="size-4" />
           </Button>
+          {!isOcr && hasScriptScenes && viewScene && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              title={`更新本场（SCENE ${viewScene.scene_code ?? "—"}）`}
+              onClick={() => setUpdateOpen(true)}
+            >
+              <Pencil className="size-4" />
+            </Button>
+          )}
         </div>
       </div>
+
+      <SceneUpdateDialog
+        open={updateOpen}
+        onOpenChange={setUpdateOpen}
+        sceneId={viewScene?.scene_id ?? null}
+        sceneCode={viewScene?.scene_code ?? null}
+      />
+
+      {/* 整本重传「更新全本」确认（已有剧本时） */}
+      <Dialog open={confirmUpdateAll} onOpenChange={setConfirmUpdateAll}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>更新全本？</DialogTitle>
+            <DialogDescription>
+              已解析过剧本。继续将按场号逐场对照：命中的场各追加一个新版本（旧版本保留、已录
+              take 的对照不受影响），新场号则新增。内容无变化的场会自动跳过。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setConfirmUpdateAll(false)}>
+              取消
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                setConfirmUpdateAll(false)
+                void doParse("version")
+              }}
+            >
+              更新全本
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* 隐藏的文件输入 */}
       <input
@@ -339,6 +408,18 @@ export function ScriptPanel() {
               {latestUpload.detail ??
                 (latestUpload.status === "parsed" ? "解析完成" : "解析失败")}
             </span>
+            {latestUpload.status === "error" && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 text-xs gap-1 flex-shrink-0"
+                onClick={handleParse}
+                disabled={parse.isPending}
+              >
+                {parse.isPending ? <Loader2 className="size-3 animate-spin" /> : <RotateCcw className="size-3" />}
+                重新解析
+              </Button>
+            )}
             <button
               onClick={() => setDismissedId(latestUpload.upload_id)}
               className="opacity-60 hover:opacity-100"

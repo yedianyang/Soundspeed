@@ -96,11 +96,17 @@ class DiarizationEngine:
         except Exception:
             pass
 
-    def diarize(self, pcm_int16: np.ndarray) -> list[SpeakerTurn]:
+    def diarize(
+        self, pcm_int16: np.ndarray, *, num_speakers: int | None = None
+    ) -> list[SpeakerTurn]:
         """对整段 int16 16kHz 单声道 PCM 进行说话人分离。
 
         返回 SpeakerTurn 列表，按时间升序排列。
         若 pcm_int16 太短（< 1 秒），返回空列表。
+
+        num_speakers：说话人数先验（来自本 take 选定的参演演员数）。给定（≥1）时作为
+            pyannote 的 num_speakers 约束，避免单麦/相似音色下自动聚类把多人塌成一人
+            （用户选了 2 人却只分出 1 人的根因修复）。None → 自动判定（旧行为）。
         """
         if len(pcm_int16) < SAMPLE_RATE:  # < 1 秒
             logger.debug("音频太短 (%d 样本 < 1s)，跳过 diarization", len(pcm_int16))
@@ -115,7 +121,13 @@ class DiarizationEngine:
         waveform = torch.from_numpy(audio_float).unsqueeze(0)  # (1, samples)
 
         self._free_cuda_cache()
-        output = self._pipeline({"waveform": waveform, "sample_rate": SAMPLE_RATE})
+        pipeline_kwargs: dict[str, int] = {}
+        if num_speakers is not None and num_speakers >= 1:
+            pipeline_kwargs["num_speakers"] = num_speakers
+            logger.info("diarization 用人数先验 num_speakers=%d（来自本 take 选定演员）", num_speakers)
+        output = self._pipeline(
+            {"waveform": waveform, "sample_rate": SAMPLE_RATE}, **pipeline_kwargs
+        )
 
         # pyannote.audio 4.0：community-1 返回 DiarizeOutput(speaker_diarization=Annotation,
         # speaker_embeddings=(n_spk, dim) 按 labels() 顺序)。3.x 直接返回 Annotation（无

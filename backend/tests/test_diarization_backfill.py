@@ -116,8 +116,10 @@ class _FakeDal:
 class _FakeEngine:
     def __init__(self, turns):
         self._turns = turns
+        self.seen_num_speakers = "unset"
 
-    def diarize(self, pcm):
+    def diarize(self, pcm, *, num_speakers=None):
+        self.seen_num_speakers = num_speakers
         return self._turns
 
 
@@ -164,6 +166,7 @@ async def test_run_full_chain_writes_speakers_structured_and_triggers_l2():
 
     # backfill 把本 take 挂的演员（candidates）传给了 resolve
     assert registry.seen_candidates == []  # 本测试未挂演员
+    assert engine.seen_num_speakers is None  # 未挂演员 → 不给人数先验，pyannote 自动判定
     # speaker 回填
     assert dal.bulk_calls == [{1: "说话人1", 2: "说话人2"}]
     assert segs[0].speaker == "说话人1" and segs[1].speaker == "说话人2"
@@ -187,6 +190,31 @@ async def test_run_full_chain_writes_speakers_structured_and_triggers_l2():
     assert buf.sample_count == 0
     # L2 gate 在回填后触发
     assert l2_calls == [(10, 2, 3)]
+
+
+@pytest.mark.asyncio
+async def test_run_passes_selected_actor_count_as_num_speakers():
+    """本 take 选了 N 个演员 → diarize 收到 num_speakers=N（修「选了2人却只分出1人」）。"""
+    segs = [_seg(1, None, "你好", 0, 2000), _seg(2, None, "走吧", 2000, 4000)]
+    dal = _FakeDal(
+        segs,
+        take_speakers=[
+            {"speaker_id": 1, "display_name": "顾朗", "embedding": None},
+            {"speaker_id": 2, "display_name": "夏雨", "embedding": None},
+        ],
+    )
+    buf = TakeAudioBuffer()
+    buf.append(np.zeros(16000 * 5, dtype=np.int16), start_frame=0)
+    engine = _FakeEngine([SpeakerTurn(0.0, 2.0, "SPEAKER_00"), SpeakerTurn(2.0, 4.0, "SPEAKER_01")])
+    backfill = DiarizationBackfill(
+        dal=dal, buffer=buf, engine=engine,
+        registry=_FakeRegistry({"SPEAKER_00": "说话人1", "SPEAKER_01": "说话人2"}),
+        publish=lambda t, p: None, l2_trigger=None,
+    )
+
+    await backfill.run(take_id=10, scene_id=2, take_number=1)
+
+    assert engine.seen_num_speakers == 2  # 选了 2 个演员 → 人数先验=2
 
 
 @pytest.mark.asyncio

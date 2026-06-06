@@ -248,6 +248,28 @@ async def list_scenes(
     return {"scenes": dal.list_scenes()}
 
 
+@router.get("/scenes/characters")
+async def list_all_characters(
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict[str, list[str]]:
+    """整部戏（全场次最新剧本）去重角色清单，供声纹注册"选角色"下拉用。
+
+    一个演员的角色横跨多场，故取全场次并集而非单场。无剧本时返回空列表。
+    路径放在 /scenes/{scene_id}/script 之前不冲突（characters 非数字段）。
+    归一角色名（剥（V.O.）等尾部注记）后再去重，覆盖解析归一上线前的历史数据。
+    """
+    from backend.pipelines.sp_script import normalize_character
+
+    dal = request.app.state.orchestrator.dal
+    seen: dict[str, None] = {}
+    for raw in dal.list_all_characters():
+        norm = normalize_character(raw)
+        if norm:
+            seen.setdefault(norm, None)
+    return {"characters": sorted(seen)}
+
+
 # ── 读剧本端点（scene heading 票加，2026-06-01）────────────────────────────────
 
 
@@ -265,6 +287,30 @@ class ScriptOut(BaseModel):
     script_id: int
     version: int
     lines: list[ScriptLineOut]
+
+
+class ScriptLineIn(BaseModel):
+    """提交单场剧本的单行（来自 parse-single 预览结果，character 可空=舞台指示）。"""
+
+    character: str | None = None
+    text: str
+
+
+class UpdateSceneScriptBody(BaseModel):
+    """POST /scenes/{scene_id}/script 请求体：把选中场更新成一个新版本。"""
+
+    raw_text: str  # 本次来源原文（OCR/粘贴），存版本 + 幂等比对用
+    lines: list[ScriptLineIn]  # parse-single 预览确认后的逐行结果
+
+
+class ScriptCommitOut(BaseModel):
+    """选中场更新结果。skipped=True 表示内容与最新版相同、未新建版本。"""
+
+    scene_id: int
+    script_id: int
+    version: int
+    line_count: int
+    skipped: bool
 
 
 @router.get("/scenes/{scene_id}/script")
@@ -287,6 +333,52 @@ async def get_scene_script(
     raw_lines = dal.list_script_lines(script_id)
     lines = [ScriptLineOut(line_no=r["line_no"], character=r["character"], text=r["text"]) for r in raw_lines]
     return {"script": ScriptOut(script_id=script_id, version=version, lines=lines)}
+
+
+@router.post("/scenes/{scene_id}/script")
+async def update_scene_script(
+    scene_id: int,
+    body: UpdateSceneScriptBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> ScriptCommitOut:
+    """把【选中场】的剧本更新成一个新版本（照片/文本增补的落库口）。
+
+    版本追加语义（见 soundspeed_script_reupload_design）：永不删旧版/旧行，只 insert
+    新版本（version 自增），读侧自动切到新版。幂等：raw_text 与该场最新版相同 →
+    skipped=True、不新建版本（防重复点击刷版本）。scene 不存在 → 404；lines 空 → 422。
+    """
+    dal = request.app.state.orchestrator.dal
+    if dal.get_scene_info(scene_id) is None:
+        raise HTTPException(status_code=404, detail="场次不存在")
+    if not body.lines:
+        raise HTTPException(status_code=422, detail="lines 为空，无可更新内容")
+
+    latest = dal.get_latest_script(scene_id)
+    if latest is not None and latest.get("raw_text") == body.raw_text:
+        # 内容无变化：不刷版本，回报最新版现状
+        existing = dal.list_script_lines(latest["script_id"])
+        return ScriptCommitOut(
+            scene_id=scene_id,
+            script_id=latest["script_id"],
+            version=latest["version"],
+            line_count=len(existing),
+            skipped=True,
+        )
+
+    from backend.pipelines.sp_script import normalize_character
+
+    script_id = dal.insert_script(scene_id, body.raw_text)
+    for line_no, ln in enumerate(body.lines, start=1):
+        dal.insert_script_line(script_id, line_no, normalize_character(ln.character), ln.text)
+    new = dal.get_latest_script(scene_id)
+    return ScriptCommitOut(
+        scene_id=scene_id,
+        script_id=script_id,
+        version=new["version"] if new else 1,
+        line_count=len(body.lines),
+        skipped=False,
+    )
 
 
 # ── Note 端点（4.C）────────────────────────────────────────────────────────────
