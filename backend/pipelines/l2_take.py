@@ -122,16 +122,6 @@ _TRANSCRIPT_CHAR_LIMIT = 2500
 # ---------------------------------------------------------------------------
 
 
-def _build_system_prompt(*, no_script: bool = False) -> str:
-    """返回对应 task_type 的 system prompt。
-
-    no_script=True 时返回纯纠错 prompt（l2_take_no_script），
-    no_script=False 时返回有剧本 prompt（l2_take）。
-    """
-    task_type = "l2_take_no_script" if no_script else "l2_take"
-    return TASK_CONFIG[task_type]["system"]
-
-
 def _build_script_lines_block(script_lines: list[dict]) -> str:
     """格式化剧本行为 [行N] 角色：台词 文本。"""
     if not script_lines:
@@ -361,14 +351,10 @@ def _validate_data_dict(data: dict, *, strict: bool = True) -> L2Output:
     )
 
 
-def _parse_llm_output(raw_text: str, *, strict: bool = True) -> L2Output:
+def _parse_llm_output(raw_text: str) -> L2Output:
     """解析 LLM 输出文本为 L2Output（旧文本路径，保留供回退/测试）。
 
     解析流程：strip_markdown_fence → json.loads → _validate_data_dict → L2Output。
-
-    strict 参数透传给 _validate_data_dict：
-    - strict=True（默认）：有剧本路径，三字段必须存在。
-    - strict=False：无剧本路径，script_diff_summary/line_matches 缺失时给默认值。
 
     Raises:
         L2ParseError: 空响应 / JSON 解析失败 / 字段缺失 / 枚举值非法 / line_no 非整数。
@@ -383,7 +369,7 @@ def _parse_llm_output(raw_text: str, *, strict: bool = True) -> L2Output:
     except json.JSONDecodeError as exc:
         raise L2ParseError("LLM response is not valid JSON", cause=exc) from exc
 
-    return _validate_data_dict(data, strict=strict)
+    return _validate_data_dict(data)
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +399,7 @@ async def run_l2_take(
     no_script = not input_data.script_lines
     task_type = "l2_take_no_script" if no_script else "l2_take"
 
-    system_prompt = _build_system_prompt(no_script=no_script)
+    system_prompt = TASK_CONFIG[task_type]["system"]
     user_message = _build_user_message(input_data)
 
     messages = [

@@ -16,6 +16,39 @@ from __future__ import annotations
 # l2_constants 是中性叶子模块（不 import config / l2_take），可在 module 级安全 import。
 from backend.pipelines.l2_constants import _VALID_DIFF_TYPES
 
+# items 子树（idx/original/corrected）两个 builder 完全相同，单点定义。
+_CORRECTED_SEGMENT_ITEMS: dict = {
+    "type": "object",
+    "properties": {
+        "idx": {
+            "type": "integer",
+            "description": "转录段索引（0-indexed）",
+        },
+        "original": {
+            "type": "string",
+            "description": "原始转录文本",
+        },
+        "corrected": {
+            "type": "string",
+            "description": "纠错后文本",
+        },
+    },
+    "required": ["idx", "original", "corrected"],
+}
+
+
+def _corrected_segments_property(description: str) -> dict:
+    """返回 corrected_segments array property 字典，items 子树单点复用。
+
+    两个 builder 只有外层 description 不同（无剧本版 vs 有剧本版），
+    items 子树（idx/original/corrected 三 property + required）完全共享。
+    """
+    return {
+        "type": "array",
+        "description": description,
+        "items": _CORRECTED_SEGMENT_ITEMS,
+    }
+
 
 def build_l2_no_script_tool() -> dict:
     """构造 report_corrections_only OpenAI 风格 tool dict（无剧本纯纠错路径）。
@@ -35,28 +68,9 @@ def build_l2_no_script_tool() -> dict:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "corrected_segments": {
-                        "type": "array",
-                        "description": "需要纠错的转录片段（仅限错别字/口误），无需修正时输出空列表 []",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "idx": {
-                                    "type": "integer",
-                                    "description": "转录段索引（0-indexed）",
-                                },
-                                "original": {
-                                    "type": "string",
-                                    "description": "原始转录文本",
-                                },
-                                "corrected": {
-                                    "type": "string",
-                                    "description": "纠错后文本",
-                                },
-                            },
-                            "required": ["idx", "original", "corrected"],
-                        },
-                    },
+                    "corrected_segments": _corrected_segments_property(
+                        "需要纠错的转录片段（仅限错别字/口误），无需修正时输出空列表 []"
+                    ),
                 },
                 "required": ["corrected_segments"],
             },
@@ -113,28 +127,9 @@ def build_l2_tool() -> dict:
                             "required": ["line_no", "diff_type"],
                         },
                     },
-                    "corrected_segments": {
-                        "type": "array",
-                        "description": "需要纠错的转录片段（仅限错别字/口误，不含剧本差异）",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "idx": {
-                                    "type": "integer",
-                                    "description": "转录段索引（0-indexed）",
-                                },
-                                "original": {
-                                    "type": "string",
-                                    "description": "原始转录文本",
-                                },
-                                "corrected": {
-                                    "type": "string",
-                                    "description": "纠错后文本",
-                                },
-                            },
-                            "required": ["idx", "original", "corrected"],
-                        },
-                    },
+                    "corrected_segments": _corrected_segments_property(
+                        "需要纠错的转录片段（仅限错别字/口误，不含剧本差异）"
+                    ),
                 },
                 "required": ["script_diff_summary", "line_matches", "corrected_segments"],
             },
