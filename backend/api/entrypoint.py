@@ -56,6 +56,20 @@ def restore_active_scene(dal: DAL, session: SessionState) -> None:
         session.activate_scene(active)
 
 
+def _make_take_start_handler(live_asr, enroll_recorder):
+    """TAKE_START 处理器：Capture 优先 —— 先 abort 任何进行中的 enroll 录音（释放
+    设备），再 start live ASR。单 handler 保证顺序，不依赖事件订阅次序。
+
+    abort() 是同步的（join enroll 线程）：现场麦 DeviceSource 阻塞读每块 ~chunk_ms
+    返回，故正常 ~一个音频块内收束；5s 只是卡死线程的上限。
+    """
+    def handler(_payload):
+        if enroll_recorder is not None:
+            enroll_recorder.abort()
+        live_asr.start()
+    return handler
+
+
 def build_app() -> FastAPI:
     """装配完整 FastAPI app 并返回（不启动 uvicorn）。
 
@@ -88,9 +102,22 @@ def build_app() -> FastAPI:
     live_asr = _maybe_wire_live_asr(orchestrator)
     diarization_engine = _maybe_wire_diarization(orchestrator, live_asr)
 
+    enroll_recorder = None
+    if live_asr is not None:
+        from backend.core.events import TAKE_END, TAKE_START
+        from backend.diarization.enroll_recorder import EnrollRecorder
+
+        enroll_recorder = EnrollRecorder(
+            make_source=live_asr.make_source,
+            is_capture_active=lambda: live_asr.running,
+        )
+        orchestrator.subscribe(TAKE_START, _make_take_start_handler(live_asr, enroll_recorder))
+        orchestrator.subscribe(TAKE_END, lambda _p: live_asr.stop())
+
     app = create_app(orchestrator, llm_service=llm_service)
     app.state.live_asr = live_asr  # None 表示未启用实时 ASR（devices 路由据此判断）
     app.state.diarization_engine = diarization_engine  # None 表示未启用（无 HF token）
+    app.state.enroll_recorder = enroll_recorder  # None 表示实时采集未启用
 
     # 真实音频设备枚举/选择端点（独立于实时 ASR 开关，GET 总能枚举）
     from backend.api.routes.asr import router as asr_router
@@ -131,7 +158,6 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
     from backend.audio.device_resolve import resolve_device_index, resolve_device_name
     from backend.audio.devices import get_default_input_index, list_input_devices
     from backend.audio.source import AudioConfig
-    from backend.core.events import TAKE_END, TAKE_START
     from backend.vad.models import VadConfig
 
     # 生效的默认 ASR 模型在此（entrypoint 总是显式传 model_size，config.py 的 dataclass
@@ -221,8 +247,6 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
         detector_factory=_detector_factory,
         default_device=initial_device_name,  # 存名字
     )
-    orchestrator.subscribe(TAKE_START, lambda _p: session.start())
-    orchestrator.subscribe(TAKE_END, lambda _p: session.stop())
 
     # 后台预热模型（首次含下载），不阻塞启动
     threading.Thread(target=runner.warmup, name="asr-warmup", daemon=True).start()

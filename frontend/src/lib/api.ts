@@ -140,6 +140,43 @@ export function enrollSpeaker(speakerId: number, file: File): Promise<SpeakerDTO
   return requestMultipart<SpeakerDTO>(`/api/v1/speakers/${speakerId}/enroll`, fd)
 }
 
+// 无 body 的 POST（enroll start/stop/cancel）：带 token，错误体解析 detail → ApiError，
+// 让弹窗能显示「正在 Capture」「没收到声音」等后端原因。
+async function postNoBody<T>(path: string): Promise<T> {
+  const token = useSessionStore.getState().token
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!res.ok) {
+    let detail = `POST ${path} → ${res.status}`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = String(j.detail)
+    } catch {
+      /* 忽略非 JSON 错误体 */
+    }
+    throw new ApiError(res.status, detail)
+  }
+  if (res.status === 204) return undefined as T
+  const text = await res.text()
+  return (text ? JSON.parse(text) : undefined) as T
+}
+
+// 现场麦录声纹（后端设备，与 Capture 同源）。start → stop 提声纹存库 → 返回 SpeakerDTO；
+// cancel 放弃并释放设备。enrollSpeaker（上传）保留作内部原语。
+export function enrollStart(speakerId: number): Promise<{ status: string; speaker_id: number }> {
+  return postNoBody(`/api/v1/speakers/${speakerId}/enroll/start`)
+}
+
+export function enrollStop(speakerId: number): Promise<SpeakerDTO> {
+  return postNoBody<SpeakerDTO>(`/api/v1/speakers/${speakerId}/enroll/stop`)
+}
+
+export function enrollCancel(speakerId: number): Promise<void> {
+  return postNoBody<void>(`/api/v1/speakers/${speakerId}/enroll/cancel`)
+}
+
 export function endTake(): Promise<void> {
   return request<void>(`/api/v1/take/end`, {
     method: "POST",
@@ -321,6 +358,12 @@ export function selectDevice(index: number): Promise<void> {
     method: "POST",
     body: JSON.stringify({ index }),
   })
+}
+
+// 热插刷新：后端 reinit PortAudio 重扫设备（启动后插的声卡用这个刷出来，免重启后端）。
+// 正在录制（take）时后端返回 409（调用方 catch 显示提示）。返回最新设备列表。
+export function refreshDevices(): Promise<DevicesResponse> {
+  return request<DevicesResponse>(`/api/v1/devices/refresh`, { method: "POST" })
 }
 
 // ── ASR 运行配置（转录语言 + 当前模型）──
