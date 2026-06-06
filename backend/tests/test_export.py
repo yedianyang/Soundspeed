@@ -109,10 +109,10 @@ def tmp_dal(tmp_path):
 
 
 def _seed_take(dal: DAL, scene_code: str, shot: str, *, status="tbd", notes=None,
-               ch1=(), ch2=()):
+               ch1=(), ch2=(), start_ts=1000.0):
     scene_id, _ = dal.get_or_create_scene(scene_code)
-    take_id, take_number = dal.start_take(scene_id, shot, start_ts=1000.0)
-    dal.end_take(take_id, end_ts=1001.0)
+    take_id, take_number = dal.start_take(scene_id, shot, start_ts=start_ts)
+    dal.end_take(take_id, end_ts=start_ts + 1.0)
     if status != "tbd":
         dal.set_take_status(take_id, status)
     if notes is not None:
@@ -287,6 +287,46 @@ def test_export_endpoint_defaults_to_default_format(tmp_dal: DAL, monkeypatch):
     res = c.get("/api/v1/takes/export", headers=_HEADERS)
     grid = _parse_csv(res.content)
     assert grid[2][3] == "01_S1_T001"
+
+
+# ── 导出范围（今天 / 全部，按 take 开录时间 start_ts 过滤）────────────────────────
+
+
+def test_build_export_rows_filters_by_ts_range(tmp_dal: DAL):
+    _seed_take(tmp_dal, "Scene_1", "1", start_ts=1000.0)
+    _seed_take(tmp_dal, "Scene_1", "2", start_ts=5000.0)
+    # 区间 [4000, 6000) 只命中 start_ts=5000 的那条（shot "2"）。
+    rows = build_export_rows(tmp_dal, ts_from=4000.0, ts_to=6000.0)
+    assert [r.shot for r in rows] == ["2"]
+
+
+def test_build_export_rows_ts_range_is_half_open(tmp_dal: DAL):
+    # 下界含、上界不含：start_ts==from 命中，start_ts==to 不命中。
+    _seed_take(tmp_dal, "Scene_1", "1", start_ts=4000.0)
+    _seed_take(tmp_dal, "Scene_1", "2", start_ts=6000.0)
+    rows = build_export_rows(tmp_dal, ts_from=4000.0, ts_to=6000.0)
+    assert [r.shot for r in rows] == ["1"]
+
+
+def test_build_export_rows_no_range_returns_all(tmp_dal: DAL):
+    _seed_take(tmp_dal, "Scene_1", "1", start_ts=1000.0)
+    _seed_take(tmp_dal, "Scene_1", "2", start_ts=5000.0)
+    assert len(build_export_rows(tmp_dal)) == 2
+
+
+def test_export_endpoint_filters_by_ts_range(tmp_dal: DAL, monkeypatch):
+    _seed_take(tmp_dal, "Scene_1", "1", start_ts=1000.0)
+    _seed_take(tmp_dal, "Scene_1", "2", start_ts=5000.0)
+    c = _client(tmp_dal, monkeypatch)
+    res = c.get(
+        "/api/v1/takes/export",
+        params={"ts_from": 4000, "ts_to": 6000},
+        headers=_HEADERS,
+    )
+    assert res.status_code == 200
+    data_rows = _parse_csv(res.content)[2:]
+    assert len(data_rows) == 1
+    assert data_rows[0][1] == "2"  # Shot 列（index 1）
 
 
 def test_export_endpoint_exposes_content_disposition_for_cors(tmp_dal: DAL, monkeypatch):
