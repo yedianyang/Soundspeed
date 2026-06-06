@@ -1,6 +1,7 @@
 import { useEffect } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { getTake, takeQueryKey } from "@/lib/api"
+import { CONN_ID } from "@/lib/connId"
 import { LiveSocket } from "@/lib/ws"
 import { useSessionStore } from "@/store/session"
 import type {
@@ -9,6 +10,7 @@ import type {
   LlmStatusMsg,
   NoteFailedMsg,
   NoteProcessedMsg,
+  QpAnswerMsg,
   SceneChangedMsg,
   TakeChangedMsg,
   TakeDeletedMsg,
@@ -115,6 +117,11 @@ export function useLiveConnection(): void {
           // 4.I：NP 失败 → 对应 pending 转失败态（红 + reason + 重试），不再永久卡处理中
           const m = payload as NoteFailedMsg
           s.noteFailed(m)
+          return
+        }
+        if (topic === `qp.answer.${CONN_ID}`) {
+          // 入口调度器查询答案：广播是 send-to-all，按 CONN_ID 后缀认领本 tab 的答案，其余 tab 过滤掉。
+          s.setQpAnswer((payload as QpAnswerMsg).answer_text)
           return
         }
         if (topic === "device.warning") {
