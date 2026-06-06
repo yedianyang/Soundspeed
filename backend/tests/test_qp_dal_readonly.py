@@ -29,10 +29,21 @@ def dal(tmp_path) -> DAL:
         ("", ""),
         ("sce3", "SCE3"),   # 前缀后未紧跟数字，不误剥
         ("Scene3", "3"),    # 无分隔符、前缀后紧跟数字，正常剥
+        ("第一场", "1"),     # 中文口语序数（QP e2e 实测 4B 高频传法）
+        ("第1场", "1"),      # 中文「第N场」+ 阿拉伯数字
+        ("第72场", "72"),    # 多位阿拉伯
+        ("第十场", "10"),    # 中文数字「十」
     ],
 )
 def test_normalize_scene_code(raw: str, expected: str) -> None:
     assert normalize_scene_code(raw) == expected
+
+
+def test_resolve_scene_id_chinese_ordinal(dal: DAL) -> None:
+    # 库里存 Scene_1，中文口语「第一场」也能对到（QP e2e 真模型实测的关键路径）
+    sid = dal.create_scene("Scene_1")
+    assert dal.resolve_scene_id("第一场") == sid
+    assert dal.resolve_scene_id("第1场") == sid
 
 
 def test_resolve_scene_id_matches_via_normalize(dal: DAL) -> None:

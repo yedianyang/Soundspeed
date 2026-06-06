@@ -34,6 +34,10 @@ _NO_EXCLUDE_TAKE_ID = -1
 # QP 场次编号归一：剥 Scene/场/Sc/S 前缀 + 分隔符，保留数字+后缀，统一大写。
 # (?=\d) 前瞻：前缀只在其后（跨可选分隔符）紧跟数字时才剥，避免误剥 `sce3` 这类。
 _SCENE_PREFIX_RE = re.compile(r"^(?:scene|场|sc|s)[\s_\-]*(?=\d)", re.IGNORECASE)
+# 中文口语「第N场」归一：第一场/第1场/第72场 → 数字（一二三…十 转阿拉伯）。
+_CN_NUM = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
+           "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
+_SCENE_ORDINAL_RE = re.compile(r"^第\s*([0-9一二三四五六七八九十]+)\s*场")
 
 # 万能笔 authorizer：只放行 SELECT 系动作，其余 DENY（挡 ATTACH/写/非 data_version PRAGMA）。
 # FTS 影子表（_config/_idx/_data/_docsize）按设计可读：MATCH 内部需要 _config/_idx，
@@ -57,15 +61,21 @@ _QP_ALLOWED_ACTIONS = frozenset(
 def normalize_scene_code(raw: str) -> str:
     """归一场次编号用于读侧匹配（spec §7.2）。
 
-    trim → 剥前缀（Scene/场/Sc/S + 分隔符）→ 大写。
-    例：'Scene_3A'→'3A'，'s72'→'72'，'场3'→'3'，'3'→'3'，''→''。
+    trim → 中文口语「第N场」归一 → 剥前缀（Scene/场/Sc/S + 分隔符）→ 大写。
+    例：'Scene_3A'→'3A'，'第一场'→'1'，'第72场'→'72'，'s72'→'72'，'场3'→'3'，'3'→'3'，''→''。
     读、写两侧都过一遍再精确比对，覆盖「同号不同前缀」的常见变体；
     剥不掉前缀的原样大写返回（不破坏纯中文/特殊编号）。
     前缀只在其后（跨可选分隔符）紧跟数字时才剥，避免误剥 `sce3` 这类。
+    中文口语「第一场」「第72场」是 4B 真模型实测高频传法（e2e Task 11 发现）——
+    normalize 在此收编，避免模型用口语场次号查不到而瞎答。
     """
-    s = raw.strip()
+    s = str(raw).strip()
     if not s:
         return ""
+    m = _SCENE_ORDINAL_RE.match(s)
+    if m:  # 「第一场」/「第1场」/「第72场」→ 纯数字
+        num = m.group(1)
+        return _CN_NUM.get(num, num)
     s = _SCENE_PREFIX_RE.sub("", s)
     return s.strip().upper()
 
