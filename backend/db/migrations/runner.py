@@ -25,7 +25,8 @@ MIGRATION_FILES: dict[int, str] = {
     6: "v6_take_transcript.sql",
     7: "v7_take_speakers.sql",
     8: "v8_app_settings.sql",
-    9: "v9_script_uploads.sql",
+    # 9 预留给 main 的 v9_status_rename（merge 后填入）；本特性原 v9 撞号改 v10。
+    10: "v10_script_uploads.sql",
 }
 
 

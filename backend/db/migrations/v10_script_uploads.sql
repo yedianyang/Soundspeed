@@ -1,6 +1,7 @@
--- v9: script_uploads —— 上传但尚未分场的原始剧本文档（上传/解析两段拆分）
+-- v10: script_uploads —— 上传但尚未分场的原始剧本文档（上传/解析两段拆分）
 -- 上传只入此表（秒回、不碰 Gemma）；解析步骤读此表 raw_text 跑 LLM → 建 scenes。
-PRAGMA user_version = 9;
+-- 注：原为 v9，与 main 的 v9_status_rename 撞号，按改号规则顺延为 v10。
+PRAGMA user_version = 10;
 
 CREATE TABLE IF NOT EXISTS script_uploads (
     upload_id   INTEGER PRIMARY KEY AUTOINCREMENT,
