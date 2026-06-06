@@ -123,3 +123,23 @@ def test_restart_after_stop():
     assert session.running
     session.stop()
     assert not session.running
+
+
+def test_make_source_uses_current_device():
+    seen: list[object] = []
+    sentinel = _InfiniteSilenceSource()
+    session = LiveAsrSession(
+        runner=_FakeRunner(),
+        publish=lambda topic, payload: None,
+        source_factory=lambda device: (seen.append(device), sentinel)[1],
+        vad_config=_vad_cfg(),
+        detector_factory=lambda: _AmplitudeVad(),
+        default_device="USB Mic",
+    )
+    src = session.make_source()
+    assert src is sentinel
+    assert seen == ["USB Mic"]
+    # 跟随 set_device
+    session.set_device(7)
+    session.make_source()
+    assert seen == ["USB Mic", 7]
