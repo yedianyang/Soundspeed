@@ -25,6 +25,7 @@ tools / tool_choice 字段（Tier 1 function calling）：
   tool-calling/grammar 留给只调一两次的路由 / 场记分析，不进逐场热循环。
 """
 
+from backend.llm.tools.route import ROUTE_TOOL_NAME, build_route_memo_tool
 from backend.llm.tools.script import build_l2_no_script_tool, build_l2_tool
 from backend.llm.tools.transcript import build_qp_tools
 
@@ -150,6 +151,19 @@ TASK_CONFIG: dict[str, dict] = {
     # note_struct：带 tools + 强制 tool_choice，文本（run_np_note/infer_tool）与语音
     # （run_np_voice/infer_voice_tool）NP 共用——两者都走 forced tool-call，无 content-mode 调用。
     "note_struct": _build_note_task_config(),
+    # 入口调度器：forced 二分类 route_memo(kind: note|query)。route.py import-neutral，
+    # eager 挂 build_route_memo_tool() 安全（无 np_note 依赖，无须 lazy）。
+    "memo_route": {
+        "max_tokens": 16,
+        "temperature": 0.1,
+        "priority": 1,
+        "system": "判断这条 memo 是记录备注还是查询信息。",
+        "tools": [build_route_memo_tool()],
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": ROUTE_TOOL_NAME},
+        },
+    },
     "agent_init": {
         "_reserved": True,
         "max_tokens": 1024,

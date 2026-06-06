@@ -233,11 +233,20 @@ export interface NoteListResponse {
   events: NoteDTO[]
 }
 
-// POST /notes 202 响应（NP Pipeline 非阻塞归置）
+// POST /notes 202 响应（NP Pipeline 非阻塞归置）。
+// note 分支带 category/content；入口调度器判定为查询时后端返 {status,kind:"query"}（无 category/content），
+// 故全放宽为可选，调用方据 kind 分支（query 撤掉乐观 pending，答案走 qp.answer 气泡）。
 export interface NoteCreateResponse {
   status: "processing"
-  category: string
-  content: string
+  category?: string
+  content?: string
+  kind?: "query"
+}
+
+// WS qp.answer.{conn_id} payload（入口调度器 query 分支：QP 跑完把答案广播回发起 tab）。
+export interface QpAnswerMsg {
+  connection_id: string
+  answer_text: string
 }
 
 // 前端 pending note（已提交、等待 LLM 归置）

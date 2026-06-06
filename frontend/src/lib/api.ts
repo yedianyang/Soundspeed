@@ -462,10 +462,11 @@ export function postNote(
   text: string,
   ts?: number,
   clientId?: string,
+  connId?: string,
 ): Promise<NoteCreateResponse> {
   return request<NoteCreateResponse>(`/api/v1/notes`, {
     method: "POST",
-    body: JSON.stringify({ text, ts: ts ?? undefined, client_id: clientId }),
+    body: JSON.stringify({ text, ts: ts ?? undefined, client_id: clientId, conn_id: connId }),
   })
 }
 

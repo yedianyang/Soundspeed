@@ -79,6 +79,10 @@ interface SessionState {
   // 连接断开（onClose）归 0，避免显示陈旧值；重连后服务端首帧重填。
   viewerCount: number
 
+  // qp.answer：入口调度器判定为查询时，QP 跑完把答案经 qp.answer.{CONN_ID} 广播回本 tab。
+  // 存最近一条答案 + 到达时间戳（供气泡自动淡出计时）；null=不显示。点击 / 超时调 clearQpAnswer 清空。
+  qpAnswer: { text: string; ts: number } | null
+
   // ── actions ──
   setToken: (t: string | null) => void
   setConnection: (c: ConnectionState) => void
@@ -96,9 +100,12 @@ interface SessionState {
   setViewerCount: (count: number) => void
   resetSegments: () => void
   addPendingNote: (n: PendingNote) => void
+  removePending: (clientId: string) => void
   noteProcessed: (m: NoteProcessedMsg) => void
   noteFailed: (m: NoteFailedMsg) => void
   retryPending: (clientId: string) => void
+  setQpAnswer: (text: string) => void
+  clearQpAnswer: () => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -117,6 +124,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   backendLevel: 0,
   backendLevelTs: 0,
   viewerCount: 0,
+  qpAnswer: null,
 
   setToken: (t) =>
     set(() => ({
@@ -271,6 +279,14 @@ export const useSessionStore = create<SessionState>((set) => ({
   addPendingNote: (n) =>
     set((s) => ({ pendingNotes: [...s.pendingNotes, n] })),
 
+  // 按 client_id 精确移除一条 pending（无 version bump，区别于 noteProcessed）。
+  // 入口调度器判这条 memo 其实是查询（kind=query）时，乐观插的 note pending 要撤掉——
+  // 它不是备注、不会落库、无 note.processed 回灌，留着会永久卡「处理中」。
+  removePending: (clientId) =>
+    set((s) => ({
+      pendingNotes: s.pendingNotes.filter((p) => p.client_id !== clientId),
+    })),
+
   // client_id 精确移除对应 pending（content 被 LLM 改写、ts 前后端不同源，旧的三元匹配必失败 → 永久卡
   // 「处理中」）。client_id 缺失（异常/旧后端）时不误删，仅 bump version。notesVersion 递增触发 refetch。
   noteProcessed: (m) =>
@@ -312,6 +328,12 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   // viewer.count：后端广播的在线观看数；onClose 调 setViewerCount(0) 清陈旧值。
   setViewerCount: (count) => set(() => ({ viewerCount: count })),
+
+  // qp.answer：收到查询答案 → 存值 + 到达时间戳（气泡按此计时淡出）。后到的答案覆盖前一条。
+  setQpAnswer: (text) => set(() => ({ qpAnswer: { text, ts: Date.now() } })),
+
+  // 清空答案气泡（自动淡出超时 / 用户点击关闭）。
+  clearQpAnswer: () => set(() => ({ qpAnswer: null })),
 
   // 清实时转录（REC 开始 / dev 注入开始时调，避免上一条 take 的转录残留）。
   resetSegments: () => set(() => ({ segments: { ch1: [], ch2: [] } })),

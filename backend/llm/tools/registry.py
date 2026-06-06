@@ -93,6 +93,10 @@ def _bootstrap() -> None:
     register("report_script_analysis", build_l2_tool(), executor=None)
     register(NOTE_TOOL_NAME, build_note_tool(), executor=None)  # 4.x note 工具，保留勿删
 
+    from backend.llm.tools.route import ROUTE_TOOL_NAME, build_route_memo_tool  # noqa: PLC0415
+
+    register(ROUTE_TOOL_NAME, build_route_memo_tool(), executor=None)  # 入口调度器 forced 工具
+
     # QP 工具家（Tier 2，executor!=None 首个真实消费者；note/script 仍是 None）
     from backend.llm.tools.transcript import (  # noqa: PLC0415
         build_count_takes_tool,
