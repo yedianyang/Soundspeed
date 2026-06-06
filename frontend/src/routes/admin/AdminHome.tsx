@@ -723,6 +723,9 @@ export default function AdminHome() {
           <InlineFeedbackQueue />
         </div>
 
+        {/* LLM 反馈档案浮层：从输入框上沿向上展开（挂 dock relative 容器内，absolute 相对它定位）。 */}
+        <LLMArchiveSheet open={archiveOpen} onOpenChange={setArchiveOpen} />
+
         <BottomControlBar
         isRecording={isRecording}
         onToggleRecording={handleToggleRecording}
@@ -782,9 +785,6 @@ export default function AdminHome() {
         archiveUnread={archiveUnread}
         />
       </div>
-
-      {/* P5：LLM 反馈档案 Sheet（QP 问答 + L2 推送全历史，底部上拉）。 */}
-      <LLMArchiveSheet open={archiveOpen} onOpenChange={setArchiveOpen} />
     </div>
   )
 }
