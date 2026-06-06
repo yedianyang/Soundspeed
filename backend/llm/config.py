@@ -16,6 +16,13 @@ tools / tool_choice 字段（Tier 1 function calling）：
   会 lazy import backend.pipelines.np_note（取 category enum），module 级 eager import
   会触发 config → tools.note → pipelines → config 循环，故经 _build_note_task_config()
   函数级 lazy import 构造。
+
+剧本解析（script_parse）为何不用 grammar / response_format（2026-06-06 实测拍板）：
+  实测 grammar（GBNF 约束采样）在 Gemma（~25 万词表）上每 token 多花大量 CPU →
+  吞吐从 ~84 tok/s 掉到 ~15 tok/s（5.6×）。故解析热路径**不用 grammar**：代码先按场头
+  切分，再让 Gemma 逐行吐 [说话人, 台词]（完整输出 v5，见 sp_script.parse_scene_block）。
+  容错解析 + 兜底（解析失败 → 冒号启发式，台词不丢、不崩）。
+  tool-calling/grammar 留给只调一两次的路由 / 场记分析，不进逐场热循环。
 """
 
 from backend.llm.tools.script import build_l2_no_script_tool, build_l2_tool
@@ -121,11 +128,24 @@ TASK_CONFIG: dict[str, dict] = {
         },
     },
     "script_parse": {
-        "max_tokens": 2048,
+        # 完整输出（v5，无 grammar）：模型逐行吐 [说话人,台词]。比 classify 准（边吐台词边
+        # 判断动作/对白，实测含人名的描述行也能标对）；无 grammar 故快。max_tokens 给足防截断。
+        "max_tokens": 4096,
         "temperature": 0.1,
         "priority": 3,
-        # TODO(1.G): 接入时按剧本结构化需求细化 system prompt
-        "system": "将剧本解析为结构化 JSON。",
+        # 不设 response_format：grammar 在 Gemma 上每 token CPU 开销大（实测 5.6× 慢），不用。
+        # prompt v5：强调"即使句子含人名，叙述动作/神态的也是描述"——这是 classify 误判的点。
+        "system": (
+            "你是剧本解析器。逐行把剧本解析成 [说话人, 内容] 的数组。\n"
+            "- 对白行 → [\"角色名\", \"台词\"]\n"
+            "- 非对白行（动作、场景描述、舞台指示，即使句子里出现人名）→ [\"\", \"原文\"]\n"
+            "判断依据：有「角色：台词」形式、或明显是某人说出口的话，才算对白；"
+            "叙述某人动作/神态/场景的是描述。\n"
+            "只输出一个 JSON 数组，不要解释。\n\n"
+            "示例输入：\n罗湘：我们先聊聊。\n罗湘走到窗边。\n\n"
+            "示例输出：\n"
+            '[["罗湘", "我们先聊聊。"], ["", "罗湘走到窗边。"]]'
+        ),
     },
     # note_struct：带 tools + 强制 tool_choice，文本（run_np_note/infer_tool）与语音
     # （run_np_voice/infer_voice_tool）NP 共用——两者都走 forced tool-call，无 content-mode 调用。

@@ -1415,32 +1415,74 @@ def _build_db_through(db_path: Path, last_version: int) -> None:
 
     conn = _sql.connect(str(db_path))
     for v in range(1, last_version + 1):
-        conn.executescript((MIGRATIONS_DIR / MIGRATION_FILES[v]).read_text())
+        conn.executescript((MIGRATIONS_DIR / MIGRATION_FILES[v]).read_text(encoding="utf-8"))
     conn.execute(f"PRAGMA user_version = {last_version};")
     conn.commit()
     conn.close()
 
 
 def test_incremental_upgrade_v8_to_latest(tmp_path: Path) -> None:
-    """既有 v8 真实库平滑升级到最新（v9）：user_version=9，核心表 + app_settings 都在、DAL 可读写。"""
+    """既有 v8 真实库平滑升级到最新（v9 status_rename + v10 script_uploads）：
+    user_version=最新、核心表 + app_settings + script_uploads 都在、DAL 可读写。"""
     db_path = tmp_path / "v8_to_latest.db"
     _build_db_through(db_path, 8)
 
     apply_migrations(db_path)
 
+    # 断言版本号：增量迁移会一路升到最新已注册版本
     conn = _raw_conn(db_path)
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 9
+    version = conn.execute("PRAGMA user_version;").fetchone()[0]
+    assert version == max(MIGRATION_FILES)
+
+    # 断言表存在
     names = {
         r["name"]
         for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()
     }
     assert "app_settings" in names
     assert "takes" in names  # v9 整表重建后仍在
+    assert "script_uploads" in names  # v10 新增
     conn.close()
 
+    # 断言可通过 DAL 读写（DAL 自行调用 apply_migrations，幂等）
     dal = DAL(db_path)
     dal.set_setting("audio_input_device", "USB Mic")
     assert dal.get_setting("audio_input_device") == "USB Mic"
+    dal.close()
+
+
+def test_v10_incremental_upgrade_script_uploads(tmp_path: Path) -> None:
+    """既有 v8 库平滑升级（经 v9 status_rename）到 v10：script_uploads 表存在且 DAL 可增删查改。
+
+    用 _build_db_through(8) 造真实库（含 takes），确保中途的 v9_status_rename 整表重建不报错。
+    """
+    db_path = tmp_path / "v8_to_v10.db"
+    _build_db_through(db_path, 8)
+
+    apply_migrations(db_path)
+
+    conn = _raw_conn(db_path)
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == max(MIGRATION_FILES)
+    names = {
+        r["name"]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table';"
+        ).fetchall()
+    }
+    assert "script_uploads" in names
+    conn.close()
+
+    # DAL 可增删查改 script_uploads
+    dal = DAL(db_path)
+    uid = dal.insert_script_upload("剧本.docx", "内 咖啡馆 日\n罗湘：你好。")
+    info = dal.get_script_upload(uid)
+    assert info["filename"] == "剧本.docx"
+    assert info["status"] == "uploaded"
+    assert info["char_count"] > 0
+    assert dal.get_script_upload_raw(uid).startswith("内 咖啡馆")
+    dal.update_script_upload_status(uid, "parsed", "导入 2 场")
+    assert dal.get_script_upload(uid)["status"] == "parsed"
+    assert [u["upload_id"] for u in dal.list_script_uploads()] == [uid]
     dal.close()
 
 

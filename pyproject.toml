@@ -13,6 +13,9 @@ dependencies = [
   "websockets==16.0",
   "huggingface_hub==1.17.0",
   "python-multipart>=0.0.9",
+  # —— 剧本文件提取（3.F：上传 docx/pdf → 文本）：纯 Python 跨平台 ——
+  "python-docx==1.1.2",
+  "pypdf==5.1.0",
   # —— ML 框架：版本在此 pin，平台分流交给 [tool.uv.sources] ——
   # 写 ==2.11.0，绝不要写 +cu128（local version 在 mac 上无法解析）
   "torch==2.11.0",

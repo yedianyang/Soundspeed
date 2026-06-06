@@ -29,6 +29,11 @@ _LLAMA_DEFAULTS: dict[str, object] = {
     "n_gpu_layers": -1,  # 全卸载到 Metal（macOS）
     "seed": 42,
     "verbose": False,
+    # flash attention：关键提速 + 省显存。未开时 llama 对 Gemma 的 V cache 做
+    # padding-to-1024（日志 "FA is not enabled - padding V cache"），KV 撑大、
+    # 8GB 卡上与 whisper/pyannote 同跑会挤爆显存 → KV 溢出到内存 → 解析慢到 ~10tok/s。
+    # 开 FA 后 KV 不再 padding、attention 走 FA kernel，显存与速度双改善。
+    "flash_attn": True,
 }
 
 
