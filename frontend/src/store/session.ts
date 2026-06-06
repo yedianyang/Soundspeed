@@ -121,6 +121,7 @@ interface SessionState {
   dismissReceipt: (clientId: string) => void
   addQa: (q: QaItem) => void
   resolveQa: (clientId: string, answer: string) => void
+  qpAnswerArrived: (clientId: string, answerText: string) => void
   failQa: (clientId: string, reason: string) => void
   dismissQaInline: (clientId: string) => void
   markArchiveRead: () => void
@@ -393,6 +394,50 @@ export const useSessionStore = create<SessionState>((set) => ({
       // QP 新答案进档案 → 未读 +1（打开档案清 0）。
       archiveUnread: s.archiveUnread + 1,
     })),
+
+  // QP 答案到达时把答案落进队列。两种 client_id 来源：
+  //  1. 文本 query：提交时已 addQa 一条 processing qaItem（MemoInput 的 postNote.then 分支）。
+  //     命中它 → 等价 resolveQa（置 done + answer + archiveUnread+1）。
+  //  2. 语音 query：提交 202 只回 kind="dispatching"，那刻不知 note/query，故只插了一条
+  //     kind="voice" 的 pending、没 addQa。答案到达此刻才确定是 query → 撤掉那条语音 pending，
+  //     新建一条 done qaItem 进队列/档案。MVP 局限：qp.answer 只带 answer_text/client_id 不带
+  //     问题原文，语音 pending 的 rawText 为空，故问题文案只能用占位「🎤 语音提问」。
+  //  3. 既无 qaItem 也无 pending（陈旧/旧广播）→ no-op。
+  qpAnswerArrived: (clientId, answerText) =>
+    set((s) => {
+      if (s.qaItems.some((q) => q.client_id === clientId)) {
+        return {
+          qaItems: s.qaItems.map((q) =>
+            q.client_id === clientId
+              ? { ...q, status: "done", answer: answerText }
+              : q,
+          ),
+          archiveUnread: s.archiveUnread + 1,
+        }
+      }
+      const pending = s.pendingNotes.find(
+        (p) => p.client_id === clientId && p.kind === "voice",
+      )
+      if (pending) {
+        return {
+          pendingNotes: s.pendingNotes.filter((p) => p.client_id !== clientId),
+          qaItems: [
+            ...s.qaItems,
+            {
+              client_id: clientId,
+              // 语音 query 无问题原文（rawText 空），用通用占位。content 是「语音备注」的乐观
+              // 文案，对 query 而言是错标，故不用它。
+              question: pending.rawText || "🎤 语音提问",
+              status: "done",
+              answer: answerText,
+              ts: pending.ts,
+            },
+          ],
+          archiveUnread: s.archiveUnread + 1,
+        }
+      }
+      return {}
+    }),
   failQa: (clientId, reason) =>
     set((s) => ({
       qaItems: s.qaItems.map((q) =>

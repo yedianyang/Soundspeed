@@ -490,12 +490,22 @@ export function postQuery(text: string): Promise<QueryResponse> {
 
 // 语音 note（4.K/4.L）：浏览器麦 WAV 直传（multipart，POST /notes/voice）。后端 202
 // fire-and-forget，类别/正文由 Gemma 从音频听+判，不在响应里返回——故返回值无用（Promise<void>）：
-// 前端乐观 pending 占位，结果经 WS note.processed / note.failed 回灌。
-export function postVoiceNote(blob: Blob, clientId: string, ts?: number): Promise<void> {
+// 前端乐观 pending 占位，结果经 WS 回灌。
+//
+// connId（与文本 postNote 对称）：带上 → 后端走 voice dispatch 判 note/query；
+// note 分支照旧经 note.processed / note.failed 回灌，query 分支把答案广播到
+// qp.answer.{conn_id}（复用块③气泡），202 时不返回 kind，故 Promise<void> 不变。
+export function postVoiceNote(
+  blob: Blob,
+  clientId: string,
+  ts?: number,
+  connId?: string,
+): Promise<void> {
   const fd = new FormData()
   fd.append("file", blob, "note.wav")
   fd.append("client_id", clientId)
   if (ts !== undefined) fd.append("ts", String(ts))
+  if (connId) fd.append("conn_id", connId)
   return requestMultipart<void>(`/api/v1/notes/voice`, fd)
 }
 

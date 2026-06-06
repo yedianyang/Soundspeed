@@ -14,8 +14,9 @@ const newClientId = (): string => randomId("nid")
 // 底部栏的打字 memo 输入（场记真实输入口）。接 POST /notes 并带 CONN_ID：后端块③调度器自动判
 // note / query（用户发送时不打前缀，回溯地按 kind 渲染）。普通备注 → 乐观 pending → note.processed
 // 落定转就地回执；判为 query → 撤掉乐观 note、转一条就地 qaItem「正在查询…」，答案经
-// qp.answer.{CONN_ID} WS 按 client_id resolveQa 落到对应那条。类别走 @语法（@ 开头后端跳过分类
-// 强制 note）。麦克风按住录音（4.L）→ 16k WAV → POST /notes/voice → Gemma 原生音频归置。
+// qp.answer.{CONN_ID} WS 到达时由 qpAnswerArrived 按 client_id 落到对应那条。类别走 @语法
+//（@ 开头后端跳过分类强制 note）。麦克风按住录音（4.L）→ 16k WAV → POST /notes/voice →
+// Gemma 原生音频归置；语音判为 query 时无同步 kind，答案到达才 promote 进队列（见 uploadVoice）。
 export default function MemoInput() {
   const [text, setText] = useState("")
   const addPendingNote = useSessionStore((s) => s.addPendingNote)
@@ -80,7 +81,12 @@ export default function MemoInput() {
       voiceBlob: wav,
     })
     try {
-      await postVoiceNote(wav, clientId, ts)
+      // 带 CONN_ID（对齐文本 postNote）：后端 voice dispatch 判这条是 note 还是 query。
+      // 这里不 addQa——202 只回 kind="dispatching"，此刻还不知 note/query，只挂一条 kind="voice"
+      // 的 pending。query 分支的答案不在 202 里返回，等 qp.answer.{CONN_ID} 到达时由
+      // useLiveConnection 调 qpAnswerArrived：撤掉这条语音 pending，promote 成一条 done qaItem
+      // 进就地队列/档案（避免永久卡处理中）。
+      await postVoiceNote(wav, clientId, ts, CONN_ID)
     } catch {
       // 网络层失败 → 标失败态（用 client_id 精确定位），不卡处理中。upload_failed 区别于后端 NP timeout。
       useSessionStore.getState().noteFailed({ reason: "upload_failed", ts, client_id: clientId })
