@@ -150,6 +150,8 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+        # 前端跨域读取 CSV 导出的文件名需暴露 Content-Disposition（非 CORS-safelisted 响应头）。
+        expose_headers=["Content-Disposition"],
     )
 
     app.state.orchestrator = orchestrator

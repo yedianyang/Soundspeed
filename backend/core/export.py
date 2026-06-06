@@ -29,6 +29,34 @@ CSV_HEADER = ["Scene", "Shot", "Take", "FileName", "Note", "Lines", "Mark"]
 _MARK_LABELS = {"pass": "PASS", "ng": "NG", "keep": "KEEP", "tbd": "TBD"}
 
 
+@dataclass(frozen=True)
+class SegFormat:
+    """单段命名格式：前缀 + 补零位数（对齐前端 filename-format.ts SegFormat）。pad=0 不补零。"""
+
+    prefix: str
+    pad: int
+
+
+@dataclass(frozen=True)
+class FileNameFormat:
+    """板式文件名格式（对齐前端 FileNameFormat）。导出 FileName 列按此渲染，与 UI 显示一致。"""
+
+    scene: SegFormat
+    shot: SegFormat
+    take: SegFormat
+    sep: str
+
+
+# 默认格式（01_S1_T001），与前端 DEFAULT_FILENAME_FORMAT 同值。
+# 导出端点不传格式参数时用它，行为与「未接入用户格式」前一致。
+DEFAULT_FILENAME_FORMAT = FileNameFormat(
+    scene=SegFormat("", 2),
+    shot=SegFormat("S", 0),
+    take=SegFormat("T", 3),
+    sep="_",
+)
+
+
 @dataclass
 class ExportRow:
     """CSV 一条数据行（与 CSV_HEADER 一一对应）。"""
@@ -53,21 +81,30 @@ def _pad(value: str, width: int) -> str:
     return value.zfill(width) if width > 0 else value
 
 
-def default_take_filename(scene_code: str | None, shot: str | None, take_number: int | None) -> str:
-    """按默认板式约定生成文件名（01_S1_T001）。缺失段跳过，不留空分隔。
+def take_filename(
+    scene_code: str | None,
+    shot: str | None,
+    take_number: int | None,
+    fmt: FileNameFormat = DEFAULT_FILENAME_FORMAT,
+) -> str:
+    """按 fmt 板式约定生成文件名。缺失段跳过，不留空分隔。
 
-    默认格式（DEFAULT_FILENAME_FORMAT）：scene 前缀'' pad2 / shot 前缀'S' pad0 /
-    take 前缀'T' pad3 / 段间分隔 '_'。take 只用 take_number（不带冲突后缀），与前端
-    formatFileName 一致；后缀只进 Take 列。
+    与前端 formatFileName 同算法（逐段 prefix + padNum，scene 抠数字，sep 连接）：
+    take 只用 take_number（不带冲突后缀），后缀只进 Take 列。
     """
     segs: list[str] = []
     if scene_code:
-        segs.append(_pad(_digits_of(scene_code), 2))
+        segs.append(fmt.scene.prefix + _pad(_digits_of(scene_code), fmt.scene.pad))
     if shot:
-        segs.append("S" + shot)
+        segs.append(fmt.shot.prefix + _pad(shot, fmt.shot.pad))
     if take_number is not None:
-        segs.append("T" + _pad(str(take_number), 3))
-    return "_".join(segs)
+        segs.append(fmt.take.prefix + _pad(str(take_number), fmt.take.pad))
+    return fmt.sep.join(segs)
+
+
+def default_take_filename(scene_code: str | None, shot: str | None, take_number: int | None) -> str:
+    """默认板式（01_S1_T001）文件名 —— take_filename(默认格式) 的薄封装。"""
+    return take_filename(scene_code, shot, take_number, DEFAULT_FILENAME_FORMAT)
 
 
 def _take_label(take_number: int, take_suffix: str) -> str:
@@ -75,10 +112,13 @@ def _take_label(take_number: int, take_suffix: str) -> str:
     return f"{take_number}{take_suffix or ''}"
 
 
-def build_export_rows(dal: DAL) -> list[ExportRow]:
+def build_export_rows(
+    dal: DAL, fmt: FileNameFormat = DEFAULT_FILENAME_FORMAT
+) -> list[ExportRow]:
     """从 DAL 装配导出行（一趟 join takes+scenes + 一趟 ch1 段，不 N+1）。
 
     排序：scene_code → shot → take_number → take_suffix。软删行已被 list_takes 排除。
+    fmt 控制 FileName 列板式（默认 DEFAULT_FILENAME_FORMAT，与 UI 显示一致）。
     """
     scene_codes = {s["scene_id"]: s["scene_code"] for s in dal.list_scenes()}
     lines_by_take = dal.list_ch1_texts_by_take()
@@ -91,7 +131,7 @@ def build_export_rows(dal: DAL) -> list[ExportRow]:
                 scene=scene_code,
                 shot=t.shot,
                 take=_take_label(t.take_number, t.take_suffix),
-                file_name=default_take_filename(scene_code, t.shot, t.take_number),
+                file_name=take_filename(scene_code, t.shot, t.take_number, fmt),
                 note=t.notes or "",
                 # Lines：本 take 的 ch1 段（对白）按 start_frame 升序拼接；ch2 备注不计入。
                 lines="\n".join(lines_by_take.get(t.take_id, [])),
