@@ -42,7 +42,7 @@ import { HistoryTakes } from "./components/HistoryTakes"
 import SettingsDialog from "@/components/admin/SettingsDialog"
 import CreateSceneDialog from "@/components/admin/CreateSceneDialog"
 
-const MOBILE_TABS = ["live", "script", "history", "llm"] as const
+const MOBILE_TABS = ["live", "script", "history"] as const
 
 // 底部「工作槽」（spec §16）：一个待录描述符 {scene_id, shot, take_number}，独立于 History 已存的
 // take 行，不绑定任何 take_id。底部 Scene/Shot/Take 三个 badge 读它；REC/Next 在它的 (scene_id, shot)
@@ -645,7 +645,6 @@ export default function AdminHome() {
               <TabsTrigger value="live">Live</TabsTrigger>
               <TabsTrigger value="script">剧本</TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
-              <TabsTrigger value="llm">LLM 反馈</TabsTrigger>
             </TabsList>
             <div
               className="flex-1 min-h-0 overflow-hidden touch-pan-y"
@@ -664,9 +663,6 @@ export default function AdminHome() {
                 </div>
                 <div className="w-full h-full flex-shrink-0 overflow-y-auto px-3 pb-3">
                   <HistoryTakes />
-                </div>
-                <div className="w-full h-full flex-shrink-0 overflow-y-auto px-3 pb-3">
-                  <LLMFeedback />
                 </div>
               </div>
             </div>
@@ -693,12 +689,10 @@ export default function AdminHome() {
             <TabsList className="w-full flex-shrink-0">
               <TabsTrigger value="script">剧本</TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
-              <TabsTrigger value="llm">LLM 反馈</TabsTrigger>
             </TabsList>
             <div className="flex-1 min-h-0 overflow-y-auto -mx-3 px-3 pb-3">
               {sideTab === "script" && <ScriptPanel />}
               {sideTab === "history" && <HistoryTakes />}
-              {sideTab === "llm" && <LLMFeedback />}
             </div>
           </Tabs>
         </Card>
