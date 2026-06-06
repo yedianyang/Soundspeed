@@ -10,7 +10,7 @@ import type {
   TranscriptSegmentDTO,
 } from "@/types/api"
 
-import type { FeedReceipt, NoteFailedMsg, NoteProcessedMsg, PendingNote } from "@/types/api"
+import type { FeedReceipt, NoteFailedMsg, NoteProcessedMsg, PendingNote, QaItem } from "@/types/api"
 
 export type ConnectionState = "connecting" | "open" | "closed" | "no-token"
 
@@ -62,6 +62,10 @@ interface SessionState {
   // 就地队列的 note 回执（done 态，note.processed 派生，3s 由组件 dismissReceipt 自走）
   feedReceipts: FeedReceipt[]
 
+  // QP 问答项：就地队列渲染（processing/done/failed）+ 留存供档案（P5）。
+  // inlineDismissed 后只在档案显示，不在就地层。query 走同步 HTTP（postQuery），不经 WS。
+  qaItems: QaItem[]
+
   // note 队列版本号：note.processed 落库后递增，NoteList 据此 refetch resolved（让落定的 note 及时显示，
   // 不只移除 pending）。提交时不 bump——那时 note 未落库，refetch 拿不到，pending 已由 store 直接显示。
   notesVersion: number
@@ -103,6 +107,10 @@ interface SessionState {
   noteFailed: (m: NoteFailedMsg) => void
   retryPending: (clientId: string) => void
   dismissReceipt: (clientId: string) => void
+  addQa: (q: QaItem) => void
+  resolveQa: (clientId: string, answer: string) => void
+  failQa: (clientId: string, reason: string) => void
+  dismissQaInline: (clientId: string) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -116,6 +124,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   llm: { state: "idle", taskType: null },
   pendingNotes: [],
   feedReceipts: [],
+  qaItems: [],
   notesVersion: 0,
   processing: null,
   deviceWarning: null,
@@ -312,6 +321,28 @@ export const useSessionStore = create<SessionState>((set) => ({
   // 就地回执 3s 后由组件调用，按 client_id 移除（让回执飘走，不长期占席）。
   dismissReceipt: (clientId) =>
     set((s) => ({ feedReceipts: s.feedReceipts.filter((r) => r.client_id !== clientId) })),
+
+  // QP 问答：提交即乐观插 processing；同步返回填 done；异常填 failed。
+  // query 项就地 lingers（不像 note 回执 3s 自走），点开看长答案，由 dismissQaInline 手动收进档案。
+  addQa: (q) => set((s) => ({ qaItems: [...s.qaItems, q] })),
+  resolveQa: (clientId, answer) =>
+    set((s) => ({
+      qaItems: s.qaItems.map((q) =>
+        q.client_id === clientId ? { ...q, status: "done", answer } : q,
+      ),
+    })),
+  failQa: (clientId, reason) =>
+    set((s) => ({
+      qaItems: s.qaItems.map((q) =>
+        q.client_id === clientId ? { ...q, status: "failed", failedReason: reason } : q,
+      ),
+    })),
+  dismissQaInline: (clientId) =>
+    set((s) => ({
+      qaItems: s.qaItems.map((q) =>
+        q.client_id === clientId ? { ...q, inlineDismissed: true } : q,
+      ),
+    })),
 
   setRecording: (recording) =>
     set((state) => (state.isRecording === recording ? {} : { isRecording: recording })),

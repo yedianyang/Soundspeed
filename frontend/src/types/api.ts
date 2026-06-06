@@ -277,6 +277,23 @@ export interface FeedReceipt {
   ts: number
 }
 
+// POST /api/v1/query 返回（QP tool-loop 同步答案）。后端实际返回 {status, answer}；这里只声明用到的字段。
+export interface QueryResponse {
+  status: string
+  answer: string
+}
+
+// 就地队列 + 档案共用的问答项。done 持久供档案（P5）；inlineDismissed 控制是否还在就地层显示。
+export interface QaItem {
+  client_id: string
+  question: string
+  status: "processing" | "done" | "failed"
+  answer?: string
+  failedReason?: string
+  ts: number
+  inlineDismissed?: boolean
+}
+
 // viewer.count：当前连着 /ws 的客户端总数（含场记自己），连接建立 / 断开时后端广播。
 // 驱动 header 眼睛计数。
 export interface ViewerCountMsg {

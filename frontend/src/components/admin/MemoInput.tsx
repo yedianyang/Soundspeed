@@ -2,7 +2,7 @@ import { useRef, useState } from "react"
 import { Mic, ArrowUp } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
-import { postNote, postVoiceNote } from "@/lib/api"
+import { postNote, postVoiceNote, postQuery } from "@/lib/api"
 import { useVoiceRecorder } from "@/hooks/useVoiceRecorder"
 import { useSessionStore } from "@/store/session"
 import type { NoteCreateResponse } from "@/types/api"
@@ -33,6 +33,28 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
     const trimmed = text.trim()
     if (!trimmed || sending) return
     setSending(true)
+
+    // ⚠ dev 期显式路由：以 "?" 或 "？" 开头 → QP 查询；否则 → NP 备注。
+    // route_memo 单入口（后端按 kind 分流）落地后移除此前缀脚手架（spec §10 调度契约）。
+    if (/^[?？]/.test(trimmed)) {
+      const queryClientId = newClientId()
+      const ts = Date.now() / 1000
+      const question = trimmed.replace(/^[?？]\s*/, "")
+      const { addQa, resolveQa, failQa } = useSessionStore.getState()
+      addQa({ client_id: queryClientId, question, status: "processing", ts })
+      setText("")
+      onNoteAdded?.()
+      try {
+        const r = await postQuery(question)
+        resolveQa(queryClientId, r.answer)
+      } catch (e) {
+        failQa(queryClientId, e instanceof Error ? e.message : "查询失败")
+      } finally {
+        setSending(false)
+      }
+      return
+    }
+
     const clientId = newClientId()
     try {
       const resp: NoteCreateResponse = await postNote(trimmed, undefined, clientId)
@@ -117,7 +139,7 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
         placeholder={
           recorder.recording
             ? "录音中…松开发送，上滑取消"
-            : "Typing memo · 例：第三条结尾好，可以用（@keep / @pass / @ng）"
+            : "Typing memo / 提问 · 第三条结尾好（@keep）｜ 第三场 NG 几条？（? 开头=提问）"
         }
         className="flex-1 bg-transparent border-0 ring-0 rounded-none text-sm focus:outline-none placeholder:text-muted-foreground/70 focus-visible:ring-0"
         value={text}
