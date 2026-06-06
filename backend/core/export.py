@@ -113,18 +113,27 @@ def _take_label(take_number: int, take_suffix: str) -> str:
 
 
 def build_export_rows(
-    dal: DAL, fmt: FileNameFormat = DEFAULT_FILENAME_FORMAT
+    dal: DAL,
+    fmt: FileNameFormat = DEFAULT_FILENAME_FORMAT,
+    ts_from: float | None = None,
+    ts_to: float | None = None,
 ) -> list[ExportRow]:
     """从 DAL 装配导出行（一趟 join takes+scenes + 一趟 ch1 段，不 N+1）。
 
     排序：scene_code → shot → take_number → take_suffix。软删行已被 list_takes 排除。
     fmt 控制 FileName 列板式（默认 DEFAULT_FILENAME_FORMAT，与 UI 显示一致）。
+    ts_from/ts_to 给定时按 take 开录时间 start_ts 过滤，半开区间 [ts_from, ts_to)
+    （用于「导出今天」；省略即全部）。
     """
     scene_codes = {s["scene_id"]: s["scene_code"] for s in dal.list_scenes()}
     lines_by_take = dal.list_ch1_texts_by_take()
 
     rows: list[ExportRow] = []
     for t in dal.list_takes(None):
+        if ts_from is not None and t.start_ts < ts_from:
+            continue
+        if ts_to is not None and t.start_ts >= ts_to:
+            continue
         scene_code = scene_codes.get(t.scene_id, f"#{t.scene_id}")
         rows.append(
             ExportRow(

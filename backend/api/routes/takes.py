@@ -207,9 +207,11 @@ async def export_takes_csv(
     take_prefix: str = "T",
     take_pad: int = Query(3, ge=0, le=6),
     sep: str = "_",
+    ts_from: float | None = None,
+    ts_to: float | None = None,
     _: None = Depends(require_admin),
 ) -> Response:
-    """导出全部 take 为 CSV（场记单）：text/csv + attachment 下载。
+    """导出 take 为 CSV（Sound Report）：text/csv + attachment 下载。
 
     必须注册在 GET /takes/{take_id} 之前——否则 FastAPI 会把 "export" 当 take_id 解析（422）。
     导出日期服务端生成（本地日期），首行写「导出日期：YYYY-MM-DD」，第二行表头。
@@ -217,6 +219,9 @@ async def export_takes_csv(
     FileName 列板式由 7 个 query 参数控制（前端从用户配置的命名格式传入，对齐 UI 显示）；
     全缺省即 DEFAULT_FILENAME_FORMAT（01_S1_T001）。Content-Disposition 经 CORS expose 暴露，
     供前端跨域读取文件名。
+
+    ts_from/ts_to（Unix 秒，半开区间）：导出范围。前端「导出今天」传本地零点起 24h；
+    「导出全部」不传，导全部 take。
     """
     dal = request.app.state.orchestrator.dal
     fmt = FileNameFormat(
@@ -225,7 +230,7 @@ async def export_takes_csv(
         take=SegFormat(take_prefix, take_pad),
         sep=sep,
     )
-    rows = build_export_rows(dal, fmt)
+    rows = build_export_rows(dal, fmt, ts_from=ts_from, ts_to=ts_to)
     export_date = datetime.now().strftime("%Y-%m-%d")
     body = rows_to_csv(rows, export_date)
     filename = f"soundspeed_takes_{export_date}.csv"
