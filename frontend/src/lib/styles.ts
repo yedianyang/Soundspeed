@@ -37,3 +37,17 @@ export const stageButton =
  */
 export const recordingDisabled =
   "opacity-100 bg-destructive/10 border-destructive/30 text-destructive/70 cursor-not-allowed"
+
+/**
+ * 反馈块（就地队列 + LLM 档案）的状态背景块。统一用主题色（primary=amber）的淡背景做状态区分，
+ * 正文一律 text-foreground 保证对比度——状态强弱靠背景深浅、不靠文字变色（primary 当正文在淡底上读不清）。
+ * - answer：LLM 答案（QP），淡主题色底（常态）
+ * - alert：警告/失败（查询失败、note 失败重试），更重主题色底 + ring，与 answer 拉开档差
+ * - note：note 回执，中性灰底，靠色相区分 LLM(amber 底) 与记录(灰底)
+ * layout（flex/gap）、padding、text-size 由调用处按上下文加。
+ */
+export const feedBlock = {
+  answer: "rounded-md bg-primary/10 text-foreground",
+  alert: "rounded-md bg-primary/20 ring-1 ring-primary/30 text-foreground",
+  note: "rounded-md bg-muted text-foreground",
+} as const

@@ -353,12 +353,15 @@ async def create_note(
     if service is not None and body.conn_id and not body.text.lstrip().startswith("@"):
         kind = await classify_memo(note.raw_text, service)
         if kind == "query":
+            # client_id 透传进 qp.answer payload：前端队列据此把答案落到对应那条 qaItem
+            #（乐观插的 note pending 同样按 client_id 在 postNote.then(kind==="query") 撤掉）。
             schedule_qp_broadcast(
                 note.raw_text,
                 body.conn_id,
                 dal=orchestrator.dal,
                 service=service,
                 cm=request.app.state.connection_manager,
+                client_id=body.client_id,
             )
             return {"status": "processing", "kind": "query"}
 

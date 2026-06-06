@@ -37,11 +37,15 @@ async def run_qp_and_broadcast(
     dal: "DAL",
     service: "LLMService",
     cm,
+    client_id: str | None = None,
 ) -> str:
     """跑 QP 两步走循环 → 广播 qp.answer.{conn_id} → 返回答案。
 
     run_qp_query 把 TimeoutError 等放行到这里，兜成友好自然语言、不抛穿（caller 可能是
     fire-and-forget task，没有人接异常）。CancelledError（BaseException）不在此捕获。
+
+    client_id：发起方乐观去重键，透传进 qp.answer payload，供前端队列把答案落到对应 qaItem。
+    直连 /api/v1/query demo 不传，默认 None。
     """
     try:
         answer = await run_qp_query(text=text, dal=dal, service=service)
@@ -50,7 +54,7 @@ async def run_qp_and_broadcast(
         answer = "抱歉，这次查询出错了，请换种说法再试一次。"
     cm.broadcast(
         f"{QP_ANSWER}.{conn_id}",
-        QpAnswerPayload(connection_id=conn_id, answer_text=answer),
+        QpAnswerPayload(connection_id=conn_id, answer_text=answer, client_id=client_id),
     )
     return answer
 
@@ -73,14 +77,17 @@ def schedule_qp_broadcast(
     dal: "DAL",
     service: "LLMService",
     cm,
+    client_id: str | None = None,
 ) -> None:
     """调度 run_qp_and_broadcast 为 fire-and-forget task（防 GC + 异常吼一声）。
 
     入口调度器 query 分支用：classify 命中 query 时不阻塞 202 返回。
     post_query 走同步 await 直返、不经此路。
+
+    client_id：透传给 run_qp_and_broadcast，最终进 qp.answer payload 供前端队列对应。
     """
     task = asyncio.create_task(
-        run_qp_and_broadcast(text, conn_id, dal=dal, service=service, cm=cm)
+        run_qp_and_broadcast(text, conn_id, dal=dal, service=service, cm=cm, client_id=client_id)
     )
     _qp_tasks.add(task)
     task.add_done_callback(_qp_task_done)

@@ -227,8 +227,7 @@ export function ScriptPanel() {
   return (
     <div className="py-4 space-y-3 h-full flex flex-col">
       {/* ========== 工具栏 ========== */}
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-sm font-medium">剧本</span>
+      <div className="flex items-center justify-end gap-2">
         <div className="flex items-center gap-1">
           <Button
             variant="ghost"

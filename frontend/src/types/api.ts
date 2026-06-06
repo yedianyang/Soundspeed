@@ -244,9 +244,13 @@ export interface NoteCreateResponse {
 }
 
 // WS qp.answer.{conn_id} payload（入口调度器 query 分支：QP 跑完把答案广播回发起 tab）。
+// client_id：发起这条 query 的乐观去重键。队列模型据此把答案 resolveQa 到对应那条 qaItem。
+// 文本 query 由 /notes 调度分支透传；语音 query 由 voice dispatch 透传（与 voice-qp 共享契约）。
+// 直连 /api/v1/query demo 不带，故可选。
 export interface QpAnswerMsg {
   connection_id: string
   answer_text: string
+  client_id?: string
 }
 
 // 前端 pending note（已提交、等待 LLM 归置）
@@ -276,6 +280,32 @@ export interface NoteFailedMsg {
   reason: string // take_not_found / parse_error / timeout / model_unavailable（后端 NP 失败）；upload_failed（前端网络/上传层失败，不进后端）
   ts: number
   client_id: string | null // 定位要标失败的 pending；null=异常/旧链路，不误标
+}
+
+// 就地队列的 note 回执（done 态，3s 自走）。由 note.processed 派生。
+export interface FeedReceipt {
+  client_id: string
+  category: string // keep/pass/ng/issue/note
+  content: string
+  rawText: string // 提交原文，「↩ 其实是提问」改判据此重发 query（取自对应 pending；语音/缺失回退 content）
+  ts: number
+}
+
+// POST /api/v1/query 返回（QP tool-loop 同步答案）。后端实际返回 {status, answer}；这里只声明用到的字段。
+export interface QueryResponse {
+  status: string
+  answer: string
+}
+
+// 就地队列 + 档案共用的问答项。done 持久供档案（P5）；inlineDismissed 控制是否还在就地层显示。
+export interface QaItem {
+  client_id: string
+  question: string
+  status: "processing" | "done" | "failed"
+  answer?: string
+  failedReason?: string
+  ts: number
+  inlineDismissed?: boolean
 }
 
 // viewer.count：当前连着 /ws 的客户端总数（含场记自己），连接建立 / 断开时后端广播。

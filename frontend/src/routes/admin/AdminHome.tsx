@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import {
   Eye,
-  Folder,
   Settings,
   Upload,
   X,
@@ -11,9 +10,12 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import BottomControlBar from "@/components/admin/BottomControlBar"
-import NoteList from "@/components/admin/NoteList"
+import InlineFeedbackQueue from "@/components/admin/InlineFeedbackQueue"
+import { LLMArchiveSheet } from "@/components/admin/LLMArchiveSheet"
 import { MARK_ORDER } from "@/lib/constants"
 import { cn, formatTakeLabel } from "@/lib/utils"
+import { formatFileName } from "@/lib/filename-format"
+import { useFileNameFormat } from "@/store/filename"
 import type { Status } from "@/types/take"
 import type { LlmState, TakeStatus, TakeDTO } from "@/types/api"
 import {
@@ -37,12 +39,11 @@ import { StatusChip, LiveLevelMeter } from "./components/StatusChip"
 import { useMicLevel } from "@/hooks/useMicLevel"
 import { LiveTranscript } from "./components/LiveTranscript"
 import { ScriptPanel } from "./components/ScriptPanel"
-import { LLMFeedback } from "./components/LLMFeedback"
 import { HistoryTakes } from "./components/HistoryTakes"
 import SettingsDialog from "@/components/admin/SettingsDialog"
 import CreateSceneDialog from "@/components/admin/CreateSceneDialog"
 
-const MOBILE_TABS = ["live", "script", "history", "llm"] as const
+const MOBILE_TABS = ["live", "script", "history"] as const
 
 // 底部「工作槽」（spec §16）：一个待录描述符 {scene_id, shot, take_number}，独立于 History 已存的
 // take 行，不绑定任何 take_id。底部 Scene/Shot/Take 三个 badge 读它；REC/Next 在它的 (scene_id, shot)
@@ -116,7 +117,7 @@ export default function AdminHome() {
   const [mobileTab, setMobileTab] = useState("live")
   const [sideTab, setSideTab] = useState("script")
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [noteRefresh, setNoteRefresh] = useState(0)
+  const [archiveOpen, setArchiveOpen] = useState(false)
   // 本 take 在场演员（按 Rec 时传 startTake；录制中锁定不可改）
   const [takeSpeakerIds, setTakeSpeakerIds] = useState<number[]>([])
 
@@ -143,6 +144,11 @@ export default function AdminHome() {
   // 后端实际采集那路的真实 RMS（仅录制时 ~5Hz 推），用于电平条混合（见下）。
   const backendLevel = useSessionStore((s) => s.backendLevel)
   const backendLevelTs = useSessionStore((s) => s.backendLevelTs)
+
+  // P5：LLM 反馈档案未读数 + 标记已读（打开 Sheet 时清）。
+  const archiveUnread = useSessionStore((s) => s.archiveUnread)
+  const markArchiveRead = useSessionStore((s) => s.markArchiveRead)
+  const fileFormat = useFileNameFormat((s) => s.format)
 
   // 混合电平判新鲜度需要「现在」，但 Date.now() 是非纯函数不能在 render 调（react-hooks/purity）。
   // 故用 nowTick 状态：收到后端帧后起一个 100ms 轮询 effect 在回调里推进 nowTick（setState 不能在
@@ -568,9 +574,6 @@ export default function AdminHome() {
       <header className="flex-shrink-0 bg-background">
         <div className="px-4 h-11 flex items-center justify-between gap-2 border-b">
           <div className="flex items-center gap-2 min-w-0">
-            <Button variant="ghost" size="icon-sm" className="rounded-full text-muted-foreground flex-shrink-0" title="导入已录制文件">
-              <Folder className="size-4" />
-            </Button>
             <StatusChip label="Input" tone="ok" detail={deviceName} className="min-w-0">
               {/* ch1 实时电平：录制时用后端真实采集 RMS，平时用浏览器常驻电平（见 displayLevel） */}
               <LiveLevelMeter level={displayLevel} count={7} color="bg-green-500" className="ml-0.5" />
@@ -589,14 +592,17 @@ export default function AdminHome() {
                   isRecording ? "bg-destructive animate-pulse" : "bg-muted-foreground/40"
                 )}
               />
+              {/* 按用户配置的文件名格式显示当前条（scene=活跃场，shot/take=最近录的 take；统一 formatFileName）。 */}
               <span className="text-foreground">
-                {activeScene ? activeScene.scene_code : "—"}
+                {formatFileName(
+                  {
+                    scene_code: activeScene?.scene_code,
+                    shot: currentTakeRecord?.shot,
+                    take_number: currentTakeRecord?.take_number,
+                  },
+                  fileFormat,
+                ) || "—"}
               </span>
-              {/* 顺序：Scene → Shot → Take（与 History badge / 底部工作槽一致；显示逻辑统一见 Notion ticket）。 */}
-              {currentTakeRecord?.shot && <span>· {currentTakeRecord.shot}</span>}
-              {currentTakeRecord?.take_number != null && (
-                <span>· T{formatTakeLabel(currentTakeRecord)}</span>
-              )}
             </div>
           </div>
 
@@ -645,7 +651,6 @@ export default function AdminHome() {
               <TabsTrigger value="live">Live</TabsTrigger>
               <TabsTrigger value="script">剧本</TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
-              <TabsTrigger value="llm">LLM 反馈</TabsTrigger>
             </TabsList>
             <div
               className="flex-1 min-h-0 overflow-hidden touch-pan-y"
@@ -664,9 +669,6 @@ export default function AdminHome() {
                 </div>
                 <div className="w-full h-full flex-shrink-0 overflow-y-auto px-3 pb-3">
                   <HistoryTakes />
-                </div>
-                <div className="w-full h-full flex-shrink-0 overflow-y-auto px-3 pb-3">
-                  <LLMFeedback />
                 </div>
               </div>
             </div>
@@ -693,12 +695,10 @@ export default function AdminHome() {
             <TabsList className="w-full flex-shrink-0">
               <TabsTrigger value="script">剧本</TabsTrigger>
               <TabsTrigger value="history">History</TabsTrigger>
-              <TabsTrigger value="llm">LLM 反馈</TabsTrigger>
             </TabsList>
             <div className="flex-1 min-h-0 overflow-y-auto -mx-3 px-3 pb-3">
               {sideTab === "script" && <ScriptPanel />}
               {sideTab === "history" && <HistoryTakes />}
-              {sideTab === "llm" && <LLMFeedback />}
             </div>
           </Tabs>
         </Card>
@@ -718,11 +718,14 @@ export default function AdminHome() {
       <div className="relative flex-shrink-0">
         {/* Note 队列浮层：从底栏 MemoInput 顶部向上延伸，半透明盖在 main 上，上圆角下直角。
             bottom-[calc(100%-26px)]：浮层底边藏进 pill 顶下 17px（26 = 9 缝隙 + 17 藏量），由 pill(z-30)
-            盖住，形成从输入框背后弹出。该距离恒定，不随控制行/REC 高度变。无 note 时 NoteList 返回 null。
-            pointer-events-none 让浮层 padding 区穿透到 main；NoteList 的 Card 自带 pointer-events-auto 可滚。 */}
+            盖住，形成从输入框背后弹出。该距离恒定，不随控制行/REC 高度变。队列为空时 InlineFeedbackQueue 返回 null。
+            pointer-events-none 让浮层 padding 区穿透到 main；InlineFeedbackQueue 的 Card 自带 pointer-events-auto 可滚。 */}
         <div className="pointer-events-none absolute inset-x-0 bottom-[calc(100%-26px)] z-20 px-4">
-          <NoteList takeId={currentTakeId} refreshKey={noteRefresh} />
+          <InlineFeedbackQueue />
         </div>
+
+        {/* LLM 反馈档案浮层：从输入框上沿向上展开（挂 dock relative 容器内，absolute 相对它定位）。 */}
+        <LLMArchiveSheet open={archiveOpen} onOpenChange={setArchiveOpen} />
 
         <BottomControlBar
         isRecording={isRecording}
@@ -773,8 +776,13 @@ export default function AdminHome() {
         // ── 1.x：本 take 在场演员选择（diarization 回填匹配范围）──
         speakerIds={takeSpeakerIds}
         onSpeakerIdsChange={setTakeSpeakerIds}
-        // 打字 memo（已下沉到底栏 MemoInput）提交后刷新 NoteList
-        onNoteAdded={() => setNoteRefresh((k) => k + 1)}
+        // P5：LLM 反馈一级入口 —— 打开档案 Sheet 并清未读。
+        onOpenArchive={() => {
+          setArchiveOpen(true)
+          markArchiveRead()
+        }}
+        archiveUnread={archiveUnread}
+        llmState={llmState}
         />
       </div>
     </div>

@@ -120,8 +120,11 @@ export function useLiveConnection(): void {
           return
         }
         if (topic === `qp.answer.${CONN_ID}`) {
-          // 入口调度器查询答案：广播是 send-to-all，按 CONN_ID 后缀认领本 tab 的答案，其余 tab 过滤掉。
-          s.setQpAnswer((payload as QpAnswerMsg).answer_text)
+          // 入口调度器查询答案：广播 send-to-all，按 CONN_ID 后缀认领本 tab，其余 tab 过滤掉。
+          // 队列模型：按 client_id resolveQa 到对应那条 qaItem（文本 query 由 /notes 分支透传 client_id；
+          // 缺 client_id 的旧广播无对应 qaItem，忽略）。「其实是提问」强制查询走同步 postQuery 不经此路。
+          const m = payload as QpAnswerMsg
+          if (m.client_id) s.resolveQa(m.client_id, m.answer_text)
           return
         }
         if (topic === "device.warning") {
