@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { API_BASE } from "@/lib/config"
+import type { FileNameFormat } from "@/lib/filename-format"
 import { useSessionStore } from "@/store/session"
 import type {
   ActivateSceneResult,
@@ -705,4 +706,61 @@ export function useScriptUploads() {
       return data?.some((u) => u.status === "parsing") ? 1500 : false
     },
   })
+}
+
+// ── 导出场记单 CSV ──
+
+// 从 Content-Disposition 抠 filename；跨域已 expose 该头（后端 CORS）。读不到则回退本地名。
+function filenameFromDisposition(cd: string | null): string | null {
+  if (!cd) return null
+  const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd)
+  return m ? decodeURIComponent(m[1]) : null
+}
+
+// 导出 take 为 CSV 并触发浏览器下载。FileName 列按用户当前命名格式渲染（与 UI 一致）：
+// 把 fmt 摊成 query 传后端，后端用同一算法生成 FileName，CSV 装配/转义/BOM 全在后端。
+// range 给定时只导该 take 开录时间区间（[from, to) Unix 秒，"今天"=本地零点起 24h）；
+// 省略即导全部。不弹 modal——下拉选完直接下载（blob + 隐藏 a 标签）。
+export async function exportTakesCsv(
+  fmt: FileNameFormat,
+  range?: { from: number; to: number },
+): Promise<void> {
+  const token = useSessionStore.getState().token
+  const params = new URLSearchParams({
+    scene_prefix: fmt.scene.prefix,
+    scene_pad: String(fmt.scene.pad),
+    shot_prefix: fmt.shot.prefix,
+    shot_pad: String(fmt.shot.pad),
+    take_prefix: fmt.take.prefix,
+    take_pad: String(fmt.take.pad),
+    sep: fmt.sep,
+  })
+  if (range) {
+    params.set("ts_from", String(range.from))
+    params.set("ts_to", String(range.to))
+  }
+  const res = await fetch(`${API_BASE}/api/v1/takes/export?${params.toString()}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!res.ok) {
+    throw new ApiError(res.status, `GET /api/v1/takes/export → ${res.status}`)
+  }
+
+  const blob = await res.blob()
+  const today = new Date().toISOString().slice(0, 10)
+  const filename =
+    filenameFromDisposition(res.headers.get("Content-Disposition")) ??
+    `soundspeed_takes_${today}.csv`
+
+  const url = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement("a")
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    URL.revokeObjectURL(url)
+  }
 }
