@@ -366,18 +366,32 @@ class LLMService:
         task_type: str,
         priority: int | None = None,
         timeout: float | None = 60.0,
+        tool_choice: dict | str | None = None,
     ) -> dict:
-        """音频 + tool-call 推理入口（语音 NP forced tool-call）。
+        """音频 + tool-call 推理入口（语音 forced tool-call，hop B）。
 
         = infer_voice（透 audio）∩ infer_tool（取 tool_calls[0]）：_submit 同时带 audio +
         want_tool_call=True（两者正交）。多模态 handler 在 __call__ 里先把音频 eval 进 KV，
         再按 forced tool_choice 的 schema grammar 约束生成（输入/输出两阶段不冲突，源码实证）。
         messages 须含音频哨兵（run_np_voice 组装）。返回 tool_calls[0] dict。
-        tool_choice 固定来自 TASK_CONFIG（note_struct 静态 forced），
-        不参与 QP 动态循环、不支持按调用覆盖。
+
+        Args:
+            messages: 标准 chat 消息列表，须含 AUDIO_SENTINEL content part。
+            audio: 原始音频字节（wav/pcm），随 messages 一并喂多模态 client。
+            task_type: TASK_CONFIG 中的合法 key（须含 tools/tool_choice 字段）。
+            priority: 1=用户态, 2=普通, 3=批处理。None 时从 TASK_CONFIG 取默认值。
+            timeout: 最大等待时间（含排队 + 推理）秒数，None 表示不超时。
+            tool_choice: 可选，按调用覆盖 TASK_CONFIG 的 tool_choice；None 沿用配置。
+                         hop B forced 取参时传入具体工具名，镜像 infer_tool 行为。
         """
         fut = await self._submit(
-            messages, task_type, priority, timeout, want_tool_call=True, audio=audio
+            messages,
+            task_type=task_type,
+            priority=priority,
+            timeout=timeout,
+            want_tool_call=True,
+            audio=audio,
+            tool_choice=tool_choice,
         )
         return await asyncio.wait_for(fut, timeout=timeout)
 
