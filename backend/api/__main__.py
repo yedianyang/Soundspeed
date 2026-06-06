@@ -6,6 +6,8 @@
   HOST                监听地址（默认 0.0.0.0）
   PORT                监听端口（默认 8000）
   SOUNDSPEED_DEV      dev 模式（=1 时挂载 /api/v1/debug/asr + 自动播种 active scene）
+  SOUNDSPEED_PROFILE  显存档位（import=Gemma 独占 GPU/录制关；record=录制占 GPU/Gemma 退 CPU）；
+                      只设默认，个别开关显式设置仍优先；8GB 卡三模型不能共存
   SOUNDSPEED_LIVE_ASR 实时 ASR 开关（默认启用；=0 显式关闭）
   SOUNDSPEED_ASR_MODEL  Whisper 模型大小（默认 "medium-q8_0" 量化版；fp16 基线设 "medium"）
   SOUNDSPEED_MODELS_DIR   Whisper 模型存放目录（默认 ./models/whisper/）

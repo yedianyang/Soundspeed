@@ -42,6 +42,44 @@ def _resolve_db_path() -> Path:
     return Path(env) if env else _DEFAULT_DB_PATH
 
 
+# 显存档位：一个 env (SOUNDSPEED_PROFILE) 选一组开关预设，省得手动记一串。
+# 8GB 卡上三模型（Whisper+Pyannote+Gemma）无法共存（见 client.py / engine.py 的 OOM 注释），
+# 故按工作阶段分档：import = Gemma 独占 GPU、录制关；record = 录制占 GPU、Gemma 退 CPU。
+_VRAM_PROFILES: dict[str, dict[str, str]] = {
+    "import": {
+        "SOUNDSPEED_LIVE_ASR": "0",     # 录制关
+        "SOUNDSPEED_DIARIZATION": "0",  # 分离关
+        "SOUNDSPEED_LLM_GPU_LAYERS": "-1",  # Gemma 全 GPU（剧本解析/FC/照片提速）
+    },
+    "record": {
+        "SOUNDSPEED_LIVE_ASR": "1",     # 实时 ASR 开
+        "SOUNDSPEED_DIARIZATION": "1",  # 说话人分离开（Pyannote 默认走 GPU）
+        "SOUNDSPEED_LLM_GPU_LAYERS": "0",   # Gemma 退 CPU，把显存让给 Whisper/Pyannote
+    },
+}
+
+
+def _apply_vram_profile() -> None:
+    """按 SOUNDSPEED_PROFILE 预设一组显存开关（须在任何开关被读取前调用）。
+
+    用 os.environ.setdefault：个别开关已显式设置时仍优先，档位只补默认值。
+    不设 SOUNDSPEED_PROFILE → no-op（行为不变）；未知档位 → 警告 + 跳过。
+    兜底：record 下若 Whisper+Pyannote 仍 OOM，可再单独设 SOUNDSPEED_DIARIZATION_DEVICE=cpu。
+    """
+    profile = os.environ.get("SOUNDSPEED_PROFILE")
+    if not profile:
+        return
+    presets = _VRAM_PROFILES.get(profile)
+    if presets is None:
+        logger.warning(
+            "未知 SOUNDSPEED_PROFILE=%s，忽略（可选：%s）", profile, ", ".join(_VRAM_PROFILES)
+        )
+        return
+    for key, value in presets.items():
+        os.environ.setdefault(key, value)  # 个别 env 显式设置者优先
+    logger.info("显存档位 SOUNDSPEED_PROFILE=%s 生效（个别 env 显式设置者优先）：%s", profile, presets)
+
+
 def restore_active_scene(dal: DAL, session: SessionState) -> None:
     """启动时从 DB 把活跃场（is_active=1）恢复进内存 session，让重启后 NP 立即有上下文。
 
@@ -77,10 +115,13 @@ def build_app() -> FastAPI:
       SOUNDSPEED_DB  数据库文件路径（默认 <repo>/data/soundspeed.db，持久；不存在则自动创建）
       ADMIN_TOKEN    管理员 token（缺失则 resolve_admin_token 随机生成）
       SOUNDSPEED_DEV dev 模式（=1 时挂载 /api/v1/debug/asr + 自动播种 active scene）
+      SOUNDSPEED_PROFILE 显存档位（import=Gemma 独占 GPU/录制关；record=录制占 GPU/Gemma 退 CPU）
 
     llm_service 使用 get_service() 单例（codex P6），lazy 不触发模型加载。
     create_orchestrator 自动绑定 run_l2_take（llm_service 非 None 时）。
     """
+    _apply_vram_profile()  # 先按 SOUNDSPEED_PROFILE 预设显存开关，再读各开关
+
     db_path = _resolve_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)  # 无库/无目录则自动创建持久库
     dal = DAL(db_path)
