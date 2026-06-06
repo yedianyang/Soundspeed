@@ -75,10 +75,25 @@ def l2_input(stub_segments: list[dict], stub_script_lines: list[dict]) -> L2Inpu
     )
 
 
+def _make_tool_call(arguments_json: str) -> dict:
+    """把 JSON 字符串包装成 tool_call dict（infer_tool 的返回格式）。"""
+    return {
+        "id": "call_stub_test",
+        "type": "function",
+        "function": {
+            "name": "report_script_analysis",
+            "arguments": arguments_json,
+        },
+    }
+
+
 def _mock_llm(response: str) -> MagicMock:
-    """创建注入 AsyncMock.infer 的 LLMService mock。"""
+    """创建注入 AsyncMock.infer_tool 的 LLMService mock。
+
+    response: JSON 字符串（直接作为 tool_call.function.arguments）。
+    """
     svc = MagicMock(spec=LLMService)
-    svc.infer = AsyncMock(return_value=response)
+    svc.infer_tool = AsyncMock(return_value=_make_tool_call(response))
     return svc
 
 
@@ -174,9 +189,12 @@ async def test_run_l2_take_invalid_json_raises(l2_input: L2Input) -> None:
 
 @pytest.mark.asyncio
 async def test_run_l2_take_markdown_wrapped_json(l2_input: L2Input) -> None:
-    """LLM 返回 ```json ... ``` 包裹的 JSON，pipeline 能成功解析。"""
-    wrapped = "```json\n" + _normal_response() + "\n```"
-    svc = _mock_llm(wrapped)
+    """FC 路径：tool_call.arguments 是纯 JSON（grammar 保证无 markdown fence），pipeline 能成功解析。
+
+    原旧路径测试「markdown fence → _strip → json.loads」，FC 路径 grammar 约束下不会产生 markdown 包裹，
+    改为直接验证纯 JSON arguments 成功解析。
+    """
+    svc = _mock_llm(_normal_response())
     result = await run_l2_take(l2_input, svc)
 
     assert isinstance(result, L2Output)
@@ -236,9 +254,9 @@ async def test_run_l2_take_transcript_truncated(stub_script_lines: list[dict]) -
     result = await run_l2_take(inp, svc)
 
     assert isinstance(result, L2Output)
-    # 验证 infer 被调用，且 messages[1]["content"] 含截断警告
-    assert svc.infer.called
-    call_args = svc.infer.call_args
+    # 验证 infer_tool 被调用，且 messages[1]["content"] 含截断警告
+    assert svc.infer_tool.called
+    call_args = svc.infer_tool.call_args
     messages = call_args[0][0]  # positional 第一个参数是 messages
     user_message = next(m["content"] for m in messages if m["role"] == "user")
     assert "WARNING: transcript truncated" in user_message
@@ -282,7 +300,7 @@ async def test_run_l2_take_previous_notes_in_prompt(
     svc = _mock_llm(_normal_response())
     await run_l2_take(inp, svc)
 
-    call_args = svc.infer.call_args
+    call_args = svc.infer_tool.call_args
     messages = call_args[0][0]
     user_message = next(m["content"] for m in messages if m["role"] == "user")
     assert "历史偏差参考" in user_message
@@ -304,7 +322,7 @@ async def test_run_l2_take_no_previous_notes_section_absent(
     svc = _mock_llm(_normal_response())
     await run_l2_take(inp, svc)
 
-    call_args = svc.infer.call_args
+    call_args = svc.infer_tool.call_args
     messages = call_args[0][0]
     user_message = next(m["content"] for m in messages if m["role"] == "user")
     assert "历史偏差参考" not in user_message
@@ -320,21 +338,21 @@ async def test_run_l2_take_empty_llm_response_raises(l2_input: L2Input) -> None:
 
 @pytest.mark.asyncio
 async def test_run_l2_take_timeout_propagated(l2_input: L2Input) -> None:
-    """LLMService.infer 抛 asyncio.TimeoutError，pipeline 不吞，让其穿透到 caller。"""
+    """LLMService.infer_tool 抛 asyncio.TimeoutError，pipeline 不吞，让其穿透到 caller。"""
     svc = MagicMock(spec=LLMService)
-    svc.infer = AsyncMock(side_effect=asyncio.TimeoutError())
+    svc.infer_tool = AsyncMock(side_effect=asyncio.TimeoutError())
     with pytest.raises(asyncio.TimeoutError):
         await run_l2_take(l2_input, svc, timeout=0.1)
 
 
 @pytest.mark.asyncio
 async def test_run_l2_take_uses_priority_2(l2_input: L2Input) -> None:
-    """run_l2_take 调用 llm_service.infer 时 priority=2 且 task_type="l2_take"。"""
+    """run_l2_take 调用 llm_service.infer_tool 时 priority=2 且 task_type="l2_take"。"""
     svc = _mock_llm(_normal_response())
     await run_l2_take(l2_input, svc)
 
-    svc.infer.assert_called_once()
-    call_kwargs = svc.infer.call_args
+    svc.infer_tool.assert_called_once()
+    call_kwargs = svc.infer_tool.call_args
     # 检查 keyword 参数
     assert call_kwargs.kwargs.get("task_type") == "l2_take" or call_kwargs[1].get(
         "task_type"
@@ -480,7 +498,7 @@ async def test_user_message_includes_transcript_indices(l2_input: L2Input) -> No
     svc = _mock_llm(_normal_response())
     await run_l2_take(l2_input, svc)
 
-    call_args = svc.infer.call_args
+    call_args = svc.infer_tool.call_args
     messages = call_args[0][0]
     user_message = next(m["content"] for m in messages if m["role"] == "user")
 
@@ -552,3 +570,273 @@ async def test_run_l2_take_corrected_segments_bool_idx(l2_input: L2Input) -> Non
     svc = _mock_llm(response)
     with pytest.raises(L2ParseError, match="non-negative integer"):
         await run_l2_take(l2_input, svc)
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-06 无剧本分支新测试（spec §6.1）
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_script_input(stub_segments: list[dict]) -> L2Input:
+    """script_lines=[] 的无剧本输入。"""
+    return L2Input(
+        take_id=20,
+        scene_id=3,
+        take_number=1,
+        transcript_segments=stub_segments,
+        script_lines=[],
+        previous_notes=[],
+    )
+
+
+def _no_script_response(corrected_segments: list[dict] | None = None) -> str:
+    """无剧本路径 tool 返回 JSON（只含 corrected_segments）。"""
+    return json.dumps(
+        {"corrected_segments": corrected_segments if corrected_segments is not None else []},
+        ensure_ascii=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_script_uses_no_script_task_type(
+    no_script_input: L2Input,
+) -> None:
+    """script_lines=[] 时，infer_tool 收到 task_type='l2_take_no_script'。"""
+    svc = _mock_llm(_no_script_response())
+    await run_l2_take(no_script_input, svc)
+
+    call_kwargs = svc.infer_tool.call_args
+    actual_task_type = call_kwargs.kwargs.get("task_type") or call_kwargs[1].get("task_type")
+    assert actual_task_type == "l2_take_no_script"
+
+
+@pytest.mark.asyncio
+async def test_has_script_uses_l2_take_task_type(l2_input: L2Input) -> None:
+    """script_lines 非空时，infer_tool 收到 task_type='l2_take'（回归）。"""
+    svc = _mock_llm(
+        json.dumps(
+            {"script_diff_summary": "ok", "line_matches": [], "corrected_segments": []},
+            ensure_ascii=False,
+        )
+    )
+    await run_l2_take(l2_input, svc)
+
+    call_kwargs = svc.infer_tool.call_args
+    actual_task_type = call_kwargs.kwargs.get("task_type") or call_kwargs[1].get("task_type")
+    assert actual_task_type == "l2_take"
+
+
+@pytest.mark.asyncio
+async def test_no_script_user_message_no_script_block(
+    no_script_input: L2Input,
+) -> None:
+    """无剧本时，user message 不含「剧本台词」节。"""
+    svc = _mock_llm(_no_script_response())
+    await run_l2_take(no_script_input, svc)
+
+    call_args = svc.infer_tool.call_args
+    messages = call_args[0][0]
+    user_message = next(m["content"] for m in messages if m["role"] == "user")
+    assert "剧本台词" not in user_message
+
+
+@pytest.mark.asyncio
+async def test_no_script_user_message_no_diff_task(
+    no_script_input: L2Input,
+) -> None:
+    """无剧本时，user message 不含「①找出 insertion」任务说明。"""
+    svc = _mock_llm(_no_script_response())
+    await run_l2_take(no_script_input, svc)
+
+    call_args = svc.infer_tool.call_args
+    messages = call_args[0][0]
+    user_message = next(m["content"] for m in messages if m["role"] == "user")
+    assert "insertion" not in user_message
+    assert "①" not in user_message
+
+
+@pytest.mark.asyncio
+async def test_no_script_output_empty_line_matches(
+    no_script_input: L2Input,
+) -> None:
+    """无剧本路径输出解析后，line_matches=[] 且 script_diff_summary is None。"""
+    svc = _mock_llm(_no_script_response())
+    result = await run_l2_take(no_script_input, svc)
+
+    assert result.line_matches == []
+    assert result.script_diff_summary is None
+
+
+@pytest.mark.asyncio
+async def test_filter_identical_corrected_segments(l2_input: L2Input) -> None:
+    """original==corrected 的段被丢弃，不出现在 L2Output.corrected_segments（有剧本路径兜底）。"""
+    response = json.dumps(
+        {
+            "script_diff_summary": None,
+            "line_matches": [],
+            "corrected_segments": [
+                {"idx": 0, "original": "不变文本", "corrected": "不变文本"},  # 应被过滤
+                {"idx": 1, "original": "原始", "corrected": "修正"},            # 应保留
+            ],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    result = await run_l2_take(l2_input, svc)
+
+    assert len(result.corrected_segments) == 1
+    assert result.corrected_segments[0].original == "原始"
+    assert result.corrected_segments[0].corrected == "修正"
+
+
+@pytest.mark.asyncio
+async def test_detail_null_string_normalized(l2_input: L2Input) -> None:
+    """line_matches 中 detail='null' 归一化为 Python None。"""
+    response = json.dumps(
+        {
+            "script_diff_summary": None,
+            "line_matches": [
+                {"line_no": 1, "diff_type": "match", "detail": "null"},
+            ],
+            "corrected_segments": [],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    result = await run_l2_take(l2_input, svc)
+
+    assert result.line_matches[0].detail is None
+
+
+@pytest.mark.asyncio
+async def test_detail_none_string_normalized(l2_input: L2Input) -> None:
+    """line_matches 中 detail='none' 归一化为 Python None。"""
+    response = json.dumps(
+        {
+            "script_diff_summary": None,
+            "line_matches": [
+                {"line_no": 1, "diff_type": "match", "detail": "none"},
+            ],
+            "corrected_segments": [],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    result = await run_l2_take(l2_input, svc)
+
+    assert result.line_matches[0].detail is None
+
+
+@pytest.mark.asyncio
+async def test_detail_empty_string_normalized(l2_input: L2Input) -> None:
+    """line_matches 中 detail='' 归一化为 Python None。"""
+    response = json.dumps(
+        {
+            "script_diff_summary": None,
+            "line_matches": [
+                {"line_no": 1, "diff_type": "match", "detail": ""},
+            ],
+            "corrected_segments": [],
+        },
+        ensure_ascii=False,
+    )
+    svc = _mock_llm(response)
+    result = await run_l2_take(l2_input, svc)
+
+    assert result.line_matches[0].detail is None
+
+
+# ---------------------------------------------------------------------------
+# spec §6.2 smoke gate：真模型行为合规性验证
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_no_script_correction_smoke() -> None:
+    """spec §6.2 smoke gate：4B Gemma 在精简 tool 下不编造 summary/insertion。
+
+    构造无剧本输入，transcript_segments 故意混入繁体 + 错别字：
+    - 段 0：繁体「你覺得這樣怎麼樣」（繁简转换在 ASR 侧 stream_driver._emit 完成，
+      L2 直接收到转录原文，模型是否对繁体段纠错不做强断言）
+    - 段 1：明显同音错别字「那我就在这等候你的好消心」（心→息）
+    - 段 2：正常文本「好的没问题」
+
+    断言（头号风险验证）：
+    - line_matches == []（精简 tool 没有此字段，模型不应编造）
+    - script_diff_summary is None（精简 tool 没有此字段，模型不应编造）
+    - corrected_segments 里无 original == corrected 的项（过滤兜底，验模型未原样透传）
+
+    注意：corrected_segments 的具体内容取决于模型判断（不做强断言），
+    但实际返回值会通过 print 原样输出供 Lead 实证审查。
+    """
+    import os
+
+    model_path = os.environ.get("GEMMA_MODEL_PATH")
+    if not model_path:
+        pytest.skip("GEMMA_MODEL_PATH 未设置，跳过 no-script smoke gate")
+
+    from backend.llm.service import _reset_service, get_service
+
+    _reset_service()
+    svc = get_service()
+    try:
+        inp = L2Input(
+            take_id=999,
+            scene_id=5,
+            take_number=1,
+            transcript_segments=[
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "你覺得這樣怎麼樣",   # 繁体原文，繁简转换在 ASR 侧做，L2 直接收到此值
+                    "start_frame": 0,
+                    "end_frame": 16000,
+                },
+                {
+                    "speaker": "SPEAKER_01",
+                    "text": "那我就在这等候你的好消心",  # 心→息（同音错别字）
+                    "start_frame": 16000,
+                    "end_frame": 32000,
+                },
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "好的没问题",
+                    "start_frame": 32000,
+                    "end_frame": 48000,
+                },
+            ],
+            script_lines=[],
+            previous_notes=[],
+        )
+
+        result = await run_l2_take(inp, svc)
+
+        # ── 原样打印真实返回，供 Lead 实证审查 ──
+        print("\n[smoke] 真实模型返回：")
+        print(f"  script_diff_summary = {result.script_diff_summary!r}")
+        print(f"  line_matches        = {result.line_matches!r}")
+        print("  corrected_segments  =")
+        for cs in result.corrected_segments:
+            print(f"    idx={cs.idx}  {cs.original!r} -> {cs.corrected!r}")
+        if not result.corrected_segments:
+            print("    （空列表，模型认为无需纠错）")
+
+        # ── 头号风险断言 ──
+        assert result.line_matches == [], (
+            f"4B 模型仍编造了 line_matches（精简 tool 无此字段）: {result.line_matches!r}"
+        )
+        assert result.script_diff_summary is None, (
+            f"4B 模型仍编造了 script_diff_summary（精简 tool 无此字段）: "
+            f"{result.script_diff_summary!r}"
+        )
+
+        # original==corrected 已在 _validate_data_dict 过滤，断言过滤后无此类条目
+        for cs in result.corrected_segments:
+            assert cs.original != cs.corrected, (
+                f"corrected_segments 中仍有 original==corrected: {cs!r}"
+            )
+
+    finally:
+        await svc.aclose()
+        _reset_service()

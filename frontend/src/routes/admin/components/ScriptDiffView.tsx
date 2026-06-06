@@ -14,9 +14,9 @@ const DIFF_ORDER: LineMatch["diff_type"][] = [
   "insertion",
 ]
 
-// L2 script_diff 显示。优先级：corrected_segments（原→改，主内容）> line_matches 计数摘要 >
-// script_diff_summary（模型 prose，弱化）。降级：无 diff → 「L2 未完成 / 无剧本」；
-// 无 corrected_segments 且无 line_matches → 「无偏差」。
+// L2 script_diff 显示。以 script_diff_summary（模型 prose）为主内容置顶；
+// corrected_segments（原→改）、line_matches 计数 / detail 作为下方辅助信息（弱化灰字）。
+// 降级：无 diff → 「L2 未完成 / 无剧本」；summary、corrected、matches 都空 → 「无偏差」。
 export function ScriptDiffView({ diff }: { diff: ScriptDiff | null }) {
   if (!diff) {
     return <p className="text-sm text-muted-foreground/60">L2 未完成 / 无剧本</p>
@@ -29,7 +29,8 @@ export function ScriptDiffView({ diff }: { diff: ScriptDiff | null }) {
   const matches = diff.line_matches ?? []
   const detailMatches = matches.filter((m) => m.detail)
 
-  if (corrected.length === 0 && matches.length === 0) {
+  // 只有 summary、corrected、matches 都空时才算无偏差。
+  if (!diff.script_diff_summary && corrected.length === 0 && matches.length === 0) {
     return <p className="text-sm text-muted-foreground/60">无偏差</p>
   }
 
@@ -41,7 +42,14 @@ export function ScriptDiffView({ diff }: { diff: ScriptDiff | null }) {
 
   return (
     <div className="space-y-3">
-      {/* a. corrected_segments —— 主内容：原 → 改 */}
+      {/* script_diff_summary —— 模型 prose，主内容置顶 */}
+      {diff.script_diff_summary && (
+        <p className="text-sm text-foreground leading-relaxed">
+          {diff.script_diff_summary}
+        </p>
+      )}
+
+      {/* a. corrected_segments —— 辅助信息：原 → 改 */}
       {corrected.length > 0 && (
         <div className="space-y-2">
           {corrected.map((seg) => (
@@ -88,14 +96,6 @@ export function ScriptDiffView({ diff }: { diff: ScriptDiff | null }) {
             </div>
           ))}
         </div>
-      )}
-
-      {/* c. script_diff_summary —— 模型 prose，弱化 */}
-      {diff.script_diff_summary && (
-        <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-          <span className="font-mono mr-1">L2 摘要</span>
-          {diff.script_diff_summary}
-        </p>
       )}
     </div>
   )

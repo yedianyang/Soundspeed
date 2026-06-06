@@ -247,6 +247,21 @@ def test_take_end_creates_l2_task_when_deps_injected(tmp_dal: DAL, monkeypatch) 
 # import 炸了。
 
 
+def _recv_until(ws, topic: str, *, max_frames: int = 6) -> dict:
+    """读 WS 帧直到 topic 匹配并返回该帧，跳过前面的 presence 噪声。
+
+    connect 时 ConnectionManager 会先广播一帧 viewer.count（含自己），故所有「连上
+    即收」的转发断言都要跳过它。注意：若目标 topic 因回归永不到达，最后一次
+    receive_json 会阻塞挂死（本文件无 pytest-timeout，与既有转发测试同款风险）；
+    max_frames 仅防持续涌入的噪声帧把循环跑飞，不把挂死变成干净 fail。
+    """
+    for _ in range(max_frames):
+        msg = ws.receive_json()
+        if msg["topic"] == topic:
+            return msg
+    raise AssertionError(f"未在 {max_frames} 帧内收到 topic={topic!r}")
+
+
 def test_ws_without_token_rejected(tmp_dal: DAL, monkeypatch) -> None:
     """/ws 无 token → 握手被拒，close code 1008（不 accept）。
 
@@ -327,11 +342,9 @@ def test_take_changed_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
     CM.broadcast（loop 线程内，走 create_task 路径）→ ws.send_json。
 
     必须先 create_scene：_on_take_start 在 publish 之前 start_take 写库，scene 不存在
-    会让它在 publish 前抛异常并被 publish 吞掉，take.changed 永不发，receive_json 死挂。
+    会让它在 publish 前抛异常并被 publish 吞掉，take.changed 永不发，_recv_until 死挂
+    （挂死风险见 _recv_until docstring）。
     """
-    # 无超时风险：下面 ws.receive_json() 无超时，若上游回归致 take.changed 永不发，
-    # CI 会超时挂死而非干净 fail。当前环境无 pytest-timeout 插件（--markers 无 timeout），
-    # 不引脆弱的 watchdog 线程。TODO: 装 pytest-timeout 后给本函数加 @pytest.mark.timeout(N)。
     scene_id = tmp_dal.create_scene("scene_ws_take")
     tmp_dal.set_active_scene(scene_id)  # 2.C：take/start 需要 active scene
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
@@ -347,8 +360,7 @@ def test_take_changed_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
             )
             assert resp.status_code == 200
 
-            msg = ws.receive_json()
-            assert msg["topic"] == "take.changed"
+            msg = _recv_until(ws, "take.changed")
             assert msg["payload"]["scene_id"] == scene_id
             assert msg["payload"]["take_id"] is not None
             assert msg["payload"]["take_number"] == 1
@@ -361,9 +373,6 @@ def test_asr_final_forwarded_from_background_thread(tmp_dal: DAL, monkeypatch) -
     take 未 active 时 _on_asr_final 直接 return（不写库），桥接转发仍应发生——
     转发是订阅 CM.broadcast，与内置 segment handler 互不影响。
     """
-    # 无超时风险：下面 ws.receive_json() 无超时，若上游回归致 asr.final 永不转发，
-    # CI 会超时挂死而非干净 fail。当前环境无 pytest-timeout 插件（--markers 无 timeout），
-    # 不引脆弱的 watchdog 线程。TODO: 装 pytest-timeout 后给本函数加 @pytest.mark.timeout(N)。
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
     orch = create_orchestrator(tmp_dal)
     app = create_app(orch)
@@ -383,8 +392,7 @@ def test_asr_final_forwarded_from_background_thread(tmp_dal: DAL, monkeypatch) -
             t.start()
             t.join()
 
-            msg = ws.receive_json()
-            assert msg["topic"] == "asr.final.ch1"
+            msg = _recv_until(ws, "asr.final.ch1")
             assert msg["payload"]["text"] == "hello from background"
             assert msg["payload"]["speaker"] == "A"
 
@@ -412,8 +420,7 @@ def test_take_segments_updated_forwarded_from_background_thread(
             t.start()
             t.join()
 
-            msg = ws.receive_json()
-            assert msg["topic"] == "take.segments.updated"
+            msg = _recv_until(ws, "take.segments.updated")
             assert msg["payload"]["take_id"] == 42
             assert msg["payload"]["scene_id"] == 7
 
@@ -430,6 +437,47 @@ def test_ws_disconnect_cleans_up(tmp_dal: DAL, monkeypatch) -> None:
         # 退出 ws 上下文：TestClient join 服务端 task，
         # except WebSocketDisconnect 里 cm.disconnect 跑完才返回 → _active 应空。
         assert len(cm._active) == 0  # type: ignore[attr-defined]
+
+
+def test_viewer_count_broadcast_on_connect(tmp_dal: DAL, monkeypatch) -> None:
+    """连上 /ws → 立即收到 viewer.count，count == 活跃连接数（独连=含自己=1）。
+
+    承重测试：单连接、无并发，确定性绿。它单独就能逼出 connect 路径上的
+    _broadcast_count（口径=全部连接含自己）。RED 时 viewer.count topic 不存在，
+    receive_json 永不收到该帧 → 挂死暴露（同款转发测试风险）。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    app = create_app(create_orchestrator(tmp_dal))
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws:
+            msg = ws.receive_json()
+            assert msg["topic"] == "viewer.count"
+            assert msg["payload"]["count"] == 1
+
+
+def test_viewer_count_updates_on_connect_and_disconnect(
+    tmp_dal: DAL, monkeypatch
+) -> None:
+    """第二个客户端连上 → 两端都见 count==2；它断开后 → 第一端见 count==1。
+
+    覆盖 disconnect 路径的广播。依赖 TestClient 单 portal 驱动两个并发 WS 会话
+    （已知较脆）；故承重断言放在上面的单连接测试，本测试作为 disconnect 行为的
+    端到端补充。_recv_until 跳过两端各自 connect 时的 viewer.count 首帧噪声。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    app = create_app(create_orchestrator(tmp_dal))
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws1:
+            # ws1 独连：首帧 count==1
+            assert ws1.receive_json()["payload"]["count"] == 1
+            with client.websocket_connect(f"/ws?token={_TOKEN}") as ws2:
+                # ws2 连上：connect 向全部活跃连接广播 count==2，两端各收到一帧。
+                assert _recv_until(ws1, "viewer.count")["payload"]["count"] == 2
+                assert _recv_until(ws2, "viewer.count")["payload"]["count"] == 2
+            # ws2 退出 with → disconnect 后广播 count==1，仅 ws1 收到。
+            assert _recv_until(ws1, "viewer.count")["payload"]["count"] == 1
 
 
 # ── 切片 B：codex review BLOCKING 修复回归测试 ─────────────────────────────────
@@ -625,8 +673,7 @@ def test_llm_status_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
             t.start()
             t.join()
 
-            msg = ws.receive_json()
-            assert msg["topic"] == "llm.status"
+            msg = _recv_until(ws, "llm.status")
             assert msg["payload"]["state"] == "loading"
             assert msg["payload"]["task_type"] == "l2_take"
             assert msg["payload"]["take_id"] == 1
@@ -1393,16 +1440,16 @@ def _make_take(tmp_dal: DAL, scene_code: str = "ScenePatch") -> tuple[int, int]:
 
 
 def test_patch_take_status(tmp_dal: DAL, monkeypatch) -> None:
-    """PATCH /takes/{id} status=keeper → 200，状态改变，有 take_events manual.mark。"""
+    """PATCH /takes/{id} status=keep → 200，状态改变，有 take_events manual.mark。"""
     sid, tid = _make_take(tmp_dal, "ScenePatchStatus")
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
-    resp = client.patch(f"/api/v1/takes/{tid}", json={"status": "keeper"}, headers=_AUTH)
+    resp = client.patch(f"/api/v1/takes/{tid}", json={"status": "keep"}, headers=_AUTH)
     assert resp.status_code == 200
-    assert resp.json()["status"] == "keeper"
+    assert resp.json()["status"] == "keep"
     # DAL 里 status 已更新
     updated_take = tmp_dal.get_take(tid)
     assert updated_take is not None
-    assert updated_take.status == "keeper"
+    assert updated_take.status == "keep"
     # take_events 有 manual.mark 记录
     evts = tmp_dal.list_take_events(tid, event_type="manual.mark")
     assert len(evts) >= 1
@@ -1440,7 +1487,7 @@ def test_patch_take_number_suffix_when_conflict(tmp_dal: DAL, monkeypatch) -> No
     tmp_dal.set_active_scene(sid)
     # 两次 start_take 在同 shot="1" 组内，分别拿到 number=1, 2
     t1, _ = tmp_dal.start_take(sid, "1", 1000.0)   # shot="1", number=1
-    tmp_dal.end_take(t1, 1010.0, "keeper")
+    tmp_dal.end_take(t1, 1010.0, "keep")
     t2, _ = tmp_dal.start_take(sid, "1", 1020.0)   # shot="1", number=2
     tmp_dal.end_take(t2, 1030.0, "ng")
 
@@ -1466,9 +1513,9 @@ def test_patch_take_scene_id_cross_scene_conflict_uses_suffix(tmp_dal: DAL, monk
     tmp_dal.set_active_scene(sid1)
 
     t1, _ = tmp_dal.start_take(sid1, "1", 1000.0)   # shot="1", number=1
-    tmp_dal.end_take(t1, 1010.0, "keeper")
+    tmp_dal.end_take(t1, 1010.0, "keep")
     t2, _ = tmp_dal.start_take(sid2, "1", 1020.0)   # shot="1", number=1（不同场）
-    tmp_dal.end_take(t2, 1030.0, "keeper")
+    tmp_dal.end_take(t2, 1030.0, "keep")
 
     client = _make_client(create_orchestrator(tmp_dal), monkeypatch)
     # 把 t1 移到 sid2 且指定 take_number=1（已被 t2 占用），应追加后缀而非 409
@@ -1758,6 +1805,98 @@ def test_debug_reset_db_wrong_token_returns_401(tmp_dal: DAL, monkeypatch) -> No
     assert resp.status_code == 401
 
 
+# ── POST /notes/voice 语音 note 端点（4.K）──────────────────────────────────────
+
+
+def _auth() -> dict:
+    return {"Authorization": f"Bearer {_TOKEN}"}
+
+
+def test_notes_voice_without_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
+    """无 Authorization → 401。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("note.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        data={"client_id": "cid-1"},
+    )
+    assert resp.status_code == 401
+
+
+def test_notes_voice_happy_returns_202_and_calls_orchestrator(tmp_dal: DAL, monkeypatch) -> None:
+    """合法 multipart（file + client_id + ts）→ 202 {status:processing, client_id}，
+    且 orchestrator.run_np_voice_async 收到 audio 字节 + client_id + ts。"""
+    orch = create_orchestrator(tmp_dal)
+    captured: dict = {}
+    orch.run_np_voice_async = lambda **kw: captured.update(kw)  # type: ignore[method-assign]
+    client = _make_client(orch, monkeypatch)
+
+    wav = b"RIFF\x00\x00\x00\x00WAVEfmt fake-pcm16-mono"
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("note.wav", wav, "audio/wav")},
+        data={"client_id": "cid-voice-1", "ts": "123.5"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["status"] == "processing"
+    assert body["client_id"] == "cid-voice-1"
+    assert captured["audio"] == wav
+    assert captured["client_id"] == "cid-voice-1"
+    assert captured["ts"] == 123.5
+
+
+def test_notes_voice_empty_file_returns_400(tmp_dal: DAL, monkeypatch) -> None:
+    """空音频 → 400（不进 NP）。"""
+    orch = create_orchestrator(tmp_dal)
+    called: list = []
+    orch.run_np_voice_async = lambda **kw: called.append(kw)  # type: ignore[method-assign]
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("note.wav", b"", "audio/wav")},
+        data={"client_id": "cid-2"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 400
+    assert called == []
+
+
+def test_notes_voice_oversized_returns_400(tmp_dal: DAL, monkeypatch) -> None:
+    """音频超限 → 400（不进 NP）。"""
+    orch = create_orchestrator(tmp_dal)
+    called: list = []
+    orch.run_np_voice_async = lambda **kw: called.append(kw)  # type: ignore[method-assign]
+    client = _make_client(orch, monkeypatch)
+
+    big = b"RIFF" + b"\x00" * (11 * 1024 * 1024)  # 11MB > 10MB 上限
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("big.wav", big, "audio/wav")},
+        data={"client_id": "cid-3"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 400
+    assert called == []
+
+
+def test_notes_voice_missing_client_id_returns_422(tmp_dal: DAL, monkeypatch) -> None:
+    """client_id 必填，缺失 → 422（FastAPI Form 校验）。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        "/api/v1/notes/voice",
+        files={"file": ("note.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        headers=_auth(),
+    )
+    assert resp.status_code == 422
+
+
 # ── DEVICE_WARNING / AUDIO_LEVEL WS 转发测试 ─────────────────────────────────
 
 
@@ -1782,8 +1921,7 @@ def test_device_warning_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
             t.start()
             t.join()
 
-            msg = ws.receive_json()
-            assert msg["topic"] == "device.warning"
+            msg = _recv_until(ws, "device.warning")
             assert msg["payload"]["message"] == "设备已断开"
             assert msg["payload"]["device_name"] == "MacBook Pro 麦克风"
 
@@ -1806,6 +1944,5 @@ def test_audio_level_forwarded_to_ws(tmp_dal: DAL, monkeypatch) -> None:
             t.start()
             t.join()
 
-            msg = ws.receive_json()
-            assert msg["topic"] == "audio.level"
+            msg = _recv_until(ws, "audio.level")
             assert abs(msg["payload"]["rms"] - 0.42) < 1e-6

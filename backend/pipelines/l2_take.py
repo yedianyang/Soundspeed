@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from backend.llm.config import TASK_CONFIG
+from backend.pipelines.l2_constants import _VALID_DIFF_TYPES  # noqa: F401  # re-exported
 
 if TYPE_CHECKING:
     from backend.llm.service import LLMService
@@ -112,17 +113,13 @@ class L2Output:
 # ---------------------------------------------------------------------------
 
 _TRANSCRIPT_CHAR_LIMIT = 2500
-_VALID_DIFF_TYPES = frozenset({"match", "missing", "substitution", "insertion"})
+# _VALID_DIFF_TYPES 从 l2_constants 导入（module 顶部 import 语句），此处不重复定义。
+# 测试文件 `from backend.pipelines.l2_take import _VALID_DIFF_TYPES` 仍然有效（re-export）。
 
 
 # ---------------------------------------------------------------------------
 # Prompt 构建（§5）
 # ---------------------------------------------------------------------------
-
-
-def _build_system_prompt() -> str:
-    """返回 TASK_CONFIG["l2_take"]["system"]（prompt v1，含完整格式约束）。"""
-    return TASK_CONFIG["l2_take"]["system"]
 
 
 def _build_script_lines_block(script_lines: list[dict]) -> str:
@@ -184,11 +181,24 @@ def _truncate_segments(segments: list[dict]) -> tuple[list[dict], bool]:
 
 
 def _build_user_message(input_data: L2Input) -> str:
-    """组装 user message（§5 模板）。"""
-    truncated_segments, was_truncated = _truncate_segments(input_data.transcript_segments)
+    """组装 user message（§5 模板）。
 
-    script_block = _build_script_lines_block(input_data.script_lines)
+    script_lines 为空时走无剧本路径：不含剧本块、不含 insertion/比对任务，
+    只含转录记录和纯纠错任务。
+    """
+    truncated_segments, was_truncated = _truncate_segments(input_data.transcript_segments)
     transcript_block = _build_transcript_block(truncated_segments, was_truncated)
+
+    if not input_data.script_lines:
+        # 无剧本路径：只含转录记录 + 纯纠错任务
+        return (
+            f"## Take {input_data.take_number} 转录记录（含下标索引）\n\n"
+            f"{transcript_block}\n\n"
+            "任务：识别转录文本中的 ASR 错别字（同音字、形近字误识别），输出到 corrected_segments。"
+        )
+
+    # 有剧本路径（原有逻辑，不变）
+    script_block = _build_script_lines_block(input_data.script_lines)
 
     previous_section = ""
     if input_data.previous_notes:
@@ -230,38 +240,45 @@ def _strip_markdown_fence(text: str) -> str:
     return stripped
 
 
-def _parse_llm_output(raw_text: str) -> L2Output:
-    """解析 LLM 输出文本为 L2Output。
+def _validate_data_dict(data: dict, *, strict: bool = True) -> L2Output:
+    """校验已解析的 dict，构造并返回 L2Output。
 
-    解析流程：strip_markdown_fence → json.loads → validate_fields → L2Output。
+    接受来自 json.loads 的 dict（无论是 FC 路径还是旧文本路径），
+    执行字段存在性校验、枚举值校验、类型校验，最终构造 L2Output。
+
+    strict=True（有剧本路径）：script_diff_summary / line_matches 必须存在，
+        缺失时抛 L2ParseError（保留原有严格校验）。
+    strict=False（无剧本路径）：script_diff_summary / line_matches 缺失时给默认值
+        （None / []），corrected_segments 仍要求必须存在。
+
+    两条路径均执行：
+    - original==corrected 的 corrected_segments 条目被过滤丢弃
+    - line_matches 中 detail 为字符串 "null"/"none"/"" 时归一化为 Python None
 
     Raises:
-        L2ParseError: 空响应 / JSON 解析失败 / 字段缺失 / 枚举值非法 / line_no 非整数。
+        L2ParseError: 字段缺失（strict 模式）/ 枚举值非法 / 类型错误。
     """
-    if not raw_text or not raw_text.strip():
-        raise L2ParseError("LLM returned empty response")
-
-    cleaned = _strip_markdown_fence(raw_text)
-
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise L2ParseError("LLM response is not valid JSON", cause=exc) from exc
-
     if not isinstance(data, dict):
         raise L2ParseError("LLM response JSON is not a dict object")
 
-    # 字段缺失检查（key 完全不存在时抛错，null 值合法）
-    if "script_diff_summary" not in data:
-        raise L2ParseError("LLM response missing required field: 'script_diff_summary'")
-    if "line_matches" not in data:
-        raise L2ParseError("LLM response missing required field: 'line_matches'")
-    if "corrected_segments" not in data:
-        raise L2ParseError("LLM response missing required field: 'corrected_segments'")
-
-    script_diff_summary: str | None = data["script_diff_summary"]
-    raw_matches = data["line_matches"]
-    raw_corrections = data["corrected_segments"]
+    # 字段存在性检查
+    if strict:
+        if "script_diff_summary" not in data:
+            raise L2ParseError("LLM response missing required field: 'script_diff_summary'")
+        if "line_matches" not in data:
+            raise L2ParseError("LLM response missing required field: 'line_matches'")
+        if "corrected_segments" not in data:
+            raise L2ParseError("LLM response missing required field: 'corrected_segments'")
+        script_diff_summary: str | None = data["script_diff_summary"]
+        raw_matches = data["line_matches"]
+        raw_corrections = data["corrected_segments"]
+    else:
+        # 宽松模式：缺失字段给默认值
+        script_diff_summary = data.get("script_diff_summary")  # 缺失 → None
+        raw_matches = data.get("line_matches", [])              # 缺失 → []
+        raw_corrections = data.get("corrected_segments")        # 仍要求必须存在
+        if raw_corrections is None:
+            raise L2ParseError("LLM response missing required field: 'corrected_segments'")
 
     if not isinstance(raw_matches, list):
         raise L2ParseError("LLM response 'line_matches' is not a list")
@@ -288,7 +305,13 @@ def _parse_llm_output(raw_text: str) -> L2Output:
                 f"must be one of {sorted(_VALID_DIFF_TYPES)}"
             )
 
-        detail: str | None = item.get("detail")
+        # detail 归一化：字符串 "null"/"none"/"" → Python None
+        raw_detail = item.get("detail")
+        if isinstance(raw_detail, str):
+            stripped = raw_detail.strip().lower()
+            detail: str | None = None if stripped in ("null", "none", "") else raw_detail
+        else:
+            detail = raw_detail  # None 直接保留
 
         line_matches.append(LineMatch(line_no=line_no, diff_type=diff_type, detail=detail))
 
@@ -315,6 +338,10 @@ def _parse_llm_output(raw_text: str) -> L2Output:
                 f"corrected_segments[{j}].corrected is not a string: {corrected!r}"
             )
 
+        # 过滤无效纠错段（original == corrected）
+        if original == corrected:
+            continue
+
         corrected_segments.append(CorrectedSegment(idx=idx, original=original, corrected=corrected))
 
     return L2Output(
@@ -322,6 +349,27 @@ def _parse_llm_output(raw_text: str) -> L2Output:
         line_matches=line_matches,
         corrected_segments=corrected_segments,
     )
+
+
+def _parse_llm_output(raw_text: str) -> L2Output:
+    """解析 LLM 输出文本为 L2Output（旧文本路径，保留供回退/测试）。
+
+    解析流程：strip_markdown_fence → json.loads → _validate_data_dict → L2Output。
+
+    Raises:
+        L2ParseError: 空响应 / JSON 解析失败 / 字段缺失 / 枚举值非法 / line_no 非整数。
+    """
+    if not raw_text or not raw_text.strip():
+        raise L2ParseError("LLM returned empty response")
+
+    cleaned = _strip_markdown_fence(raw_text)
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise L2ParseError("LLM response is not valid JSON", cause=exc) from exc
+
+    return _validate_data_dict(data)
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +396,10 @@ async def run_l2_take(
         L2ParseError: LLM 输出非合法 JSON / 字段缺失 / 枚举值非法 / 响应为空。
         asyncio.TimeoutError: 排队 + 推理总耗时超 timeout（由 LLMService 抛出，不吞）。
     """
-    system_prompt = _build_system_prompt()
+    no_script = not input_data.script_lines
+    task_type = "l2_take_no_script" if no_script else "l2_take"
+
+    system_prompt = TASK_CONFIG[task_type]["system"]
     user_message = _build_user_message(input_data)
 
     messages = [
@@ -356,12 +407,23 @@ async def run_l2_take(
         {"role": "user", "content": user_message},
     ]
 
-    # asyncio.TimeoutError 从 infer 传出，pipeline 不捕获（让 caller 感知）
-    raw_text: str = await llm_service.infer(
-        messages,
-        task_type="l2_take",
-        priority=2,
-        timeout=timeout,
-    )
+    # FC 路径：调 infer_tool，取 tool_calls[0]，解析 arguments JSON
+    # asyncio.TimeoutError 从 infer_tool 传出，pipeline 不捕获（让 caller 感知）
+    try:
+        tool_call: dict = await llm_service.infer_tool(
+            messages,
+            task_type=task_type,
+            priority=2,
+            timeout=timeout,
+        )
+    except LookupError as exc:
+        raise L2ParseError("tool_calls 缺失或为空，模型未走 function calling 路径", cause=exc) from exc
 
-    return _parse_llm_output(raw_text)
+    try:
+        args_json: str = tool_call["function"]["arguments"]
+        data = json.loads(args_json)
+    except (KeyError, json.JSONDecodeError) as exc:
+        raise L2ParseError("tool_call arguments 解析失败", cause=exc) from exc
+
+    # 有剧本路径用 strict=True（原有严格校验），无剧本路径用 strict=False（宽松）
+    return _validate_data_dict(data, strict=not no_script)

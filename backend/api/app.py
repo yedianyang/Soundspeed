@@ -30,6 +30,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.auth import resolve_admin_token
+from backend.api.routes.query import router as query_router
 from backend.api.routes.takes import router as takes_router
 from backend.api.ws import ConnectionManager
 from backend.api.ws import router as ws_router
@@ -41,6 +42,8 @@ from backend.core.events import (
     AUDIO_LEVEL,
     DEVICE_WARNING,
     LLM_STATUS,
+    NOTE_FAILED,
+    NOTE_PROCESSED,
     SCENE_CHANGED,
     TAKE_CHANGED,
     TAKE_DELETED,
@@ -73,6 +76,8 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
             ASR_PARTIAL_CH2,
             ASR_FINAL_CH1,
             ASR_FINAL_CH2,
+            NOTE_PROCESSED,
+            NOTE_FAILED,
             TAKE_CHANGED,
             TAKE_SEGMENTS_UPDATED,
             TAKE_PROCESSING,
@@ -124,6 +129,7 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(takes_router)
+    app.include_router(query_router)
     app.include_router(ws_router)
 
     # dev-only：SOUNDSPEED_DEV=1 时挂载合成 ASR 注入端点（1.C 落地前验收 1.J transcript 面板）。

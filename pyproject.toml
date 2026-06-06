@@ -27,6 +27,7 @@ dependencies = [
   # —— 编译型 GPU 后端：声明给「能跑的最低形态」，GPU 变体交给 install_accel.py ——
   "llama-cpp-python>=0.3,<0.4",     # mac: PyPI wheel 带 Metal；win: 脚本装 cu124 wheel
   "pywhispercpp==1.5.0",            # mac: wheel 带 Metal；win CUDA: 脚本源码编译
+  "OpenCC==1.3.1",                  # 繁→简确定性转换（C++ 绑定，cp312 预编译 wheel）
 ]
 
 [tool.pytest.ini_options]

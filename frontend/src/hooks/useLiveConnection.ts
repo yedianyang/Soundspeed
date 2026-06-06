@@ -7,11 +7,14 @@ import type {
   AsrMsg,
   DeviceWarningMsg,
   LlmStatusMsg,
+  NoteFailedMsg,
+  NoteProcessedMsg,
   SceneChangedMsg,
   TakeChangedMsg,
   TakeDeletedMsg,
   TakeProcessingMsg,
   TakeSegmentsUpdatedMsg,
+  ViewerCountMsg,
 } from "@/types/api"
 
 // ch 编码在 topic 后缀（asr.partial.ch1 / asr.final.ch2），不在 payload 里。
@@ -38,7 +41,12 @@ export function useLiveConnection(): void {
 
     const socket = new LiveSocket(token, {
       onOpen: () => useSessionStore.getState().setConnection("open"),
-      onClose: () => useSessionStore.getState().setConnection("closed"),
+      onClose: () => {
+        const s = useSessionStore.getState()
+        s.setConnection("closed")
+        // 断开后在线数已失真，归 0 避免显示陈旧值；重连后服务端首帧 viewer.count 重填。
+        s.setViewerCount(0)
+      },
       onReconnect: () => {
         // 断线期间错过的 take.changed（尤其 L2 那条）靠重取 getTakes 对齐（spec §3.3）。
         queryClient.invalidateQueries({ queryKey: ["takes"] })
@@ -91,7 +99,22 @@ export function useLiveConnection(): void {
           return
         }
         if (topic === "llm.status") {
-          s.setLlm((payload as LlmStatusMsg).state)
+          const m = payload as LlmStatusMsg
+          s.setLlm(m.state, m.task_type)
+          return
+        }
+        if (topic === "note.processed") {
+          const m = payload as NoteProcessedMsg
+          s.noteProcessed(m)
+          // 刷新受影响的 take：takes 列表（折叠态 take.notes）+ 该 take 详情（展开态 data.notes）。
+          queryClient.invalidateQueries({ queryKey: ["takes"] })
+          queryClient.invalidateQueries({ queryKey: takeQueryKey(m.take_id) })
+          return
+        }
+        if (topic === "note.failed") {
+          // 4.I：NP 失败 → 对应 pending 转失败态（红 + reason + 重试），不再永久卡处理中
+          const m = payload as NoteFailedMsg
+          s.noteFailed(m)
           return
         }
         if (topic === "device.warning") {
@@ -103,6 +126,11 @@ export function useLiveConnection(): void {
           // 后端实际采集那路音频的归一化 RMS，仅录制时 ~5Hz 推。存值 + 时间戳，电平条按新鲜度
           // 决定用后端 rms 还是浏览器常驻 micLevel。
           s.setBackendLevel((payload as { rms: number }).rms)
+          return
+        }
+        if (topic === "viewer.count") {
+          // 在线观看数：连接建立 / 断开时后端广播，驱动 header 眼睛计数。
+          s.setViewerCount((payload as ViewerCountMsg).count)
           return
         }
       },

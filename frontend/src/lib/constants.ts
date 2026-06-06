@@ -1,22 +1,24 @@
 import type { Status } from "@/types/take"
 
 export const STATUS_DOT: Record<Status, string> = {
-  keeper: "bg-green-500",
+  // #28 配色对调：KEEP=bg-primary（黄/金），PASS=bg-green-500（绿）。
+  // 4.x 把枚举 keeper→keep / hold→pass，沿用 #28 对调后的配色。
+  keep: "bg-primary",
   ng: "bg-destructive",
-  hold: "bg-primary",
+  pass: "bg-green-500",
   tbd: "bg-muted-foreground",
   recording: "bg-destructive animate-pulse",
 }
 
 export const STATUS_LABEL: Record<Status, string> = {
-  keeper: "KEEP",
+  keep: "KEEP",
   ng: "NG",
-  hold: "PASS",
+  pass: "PASS",
   tbd: "TBD",
   recording: "REC",
 }
 
-export const MARK_ORDER: Status[] = ["ng", "keeper", "hold"]
+export const MARK_ORDER: Status[] = ["ng", "keep", "pass"]
 
 export const SPEAKER_OPTIONS = ["SZA", "YY", "Unknown"]
 

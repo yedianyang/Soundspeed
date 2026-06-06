@@ -21,6 +21,7 @@ from fastapi import FastAPI
 
 from backend.api.app import create_app
 from backend.core.orchestrator import Orchestrator, create_orchestrator
+from backend.core.session import SessionState
 from backend.db.dal import DAL
 from backend.db.seed import seed_dev_scene
 from backend.llm.service import get_service
@@ -39,6 +40,20 @@ def _resolve_db_path() -> Path:
     """
     env = os.environ.get("SOUNDSPEED_DB")
     return Path(env) if env else _DEFAULT_DB_PATH
+
+
+def restore_active_scene(dal: DAL, session: SessionState) -> None:
+    """启动时从 DB 把活跃场（is_active=1）恢复进内存 session，让重启后 NP 立即有上下文。
+
+    SessionState 是内存态，重启清空；DB 持久。不恢复则 session.scene_id=None →
+    NP（文本/语音）take_context 为空 → 模型无真 take 可归 → 静默 take_not_found，
+    直到有人手动激活场。这里在 build_app 装配时补上。
+    只恢复活跃**场**，不恢复活跃 take——录制进程已随重启消失，take_active 须保持 False。
+    DB 无活跃场则 no-op。
+    """
+    active = dal.get_active_scene_id()
+    if active is not None:
+        session.activate_scene(active)
 
 
 def build_app() -> FastAPI:
@@ -68,6 +83,8 @@ def build_app() -> FastAPI:
 
     llm_service = get_service()
     orchestrator = create_orchestrator(dal, llm_service=llm_service)
+    # 重启后从 DB 恢复活跃场到内存 session，否则 NP（文本/语音）首条都会因空上下文 take_not_found。
+    restore_active_scene(dal, orchestrator.session)
     live_asr = _maybe_wire_live_asr(orchestrator)
     diarization_engine = _maybe_wire_diarization(orchestrator, live_asr)
 
@@ -95,7 +112,8 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
 
     env：
       SOUNDSPEED_LIVE_ASR=0      显式关闭（默认启用）
-      SOUNDSPEED_ASR_MODEL=medium  whisper.cpp 模型大小（默认 medium）
+      SOUNDSPEED_ASR_MODEL       whisper.cpp 模型大小（默认 medium-q8_0 量化版；
+                                 切回 fp16 基线：SOUNDSPEED_ASR_MODEL=medium）
       SOUNDSPEED_AUDIO_DEVICE    设备名或索引（首次引导用；UI 选过后持久化优先）
       SOUNDSPEED_VAD=energy      VAD 探测器：energy（默认，零依赖）| silero（需 torch venv）
       SOUNDSPEED_MODELS_DIR      Whisper 模型存放目录（默认 ./models/whisper/）
@@ -108,7 +126,7 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
     if os.environ.get("SOUNDSPEED_LIVE_ASR") == "0":
         return None
 
-    from backend.asr import ASRConfig, WhisperRunner
+    from backend.asr import DEFAULT_ASR_MODEL, ASRConfig, WhisperRunner
     from backend.asr.live_session import LiveAsrSession
     from backend.audio.device_resolve import resolve_device_index, resolve_device_name
     from backend.audio.devices import get_default_input_index, list_input_devices
@@ -116,7 +134,9 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
     from backend.core.events import TAKE_END, TAKE_START
     from backend.vad.models import VadConfig
 
-    model_size = os.environ.get("SOUNDSPEED_ASR_MODEL", "medium")
+    # 生效的默认 ASR 模型在此（entrypoint 总是显式传 model_size，config.py 的 dataclass
+    # 默认在生产路径上不生效）。两处都引用 DEFAULT_ASR_MODEL，防默认值漂移。
+    model_size = os.environ.get("SOUNDSPEED_ASR_MODEL", DEFAULT_ASR_MODEL)
     vad_kind = os.environ.get("SOUNDSPEED_VAD", "silero")
     # 项目默认转录语言（zh/en/auto…）；运行时可在设置面板切换（POST /asr/language 覆盖本次）。
     language = os.environ.get("SOUNDSPEED_ASR_LANGUAGE", "zh")

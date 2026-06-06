@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 import numpy as np
+import opencc
 
 from backend.asr.whisper_runner import WhisperRunner
 from backend.core.events import (
@@ -106,6 +107,7 @@ class StreamDriver:
         # 注意：ch1 音频在 run() 的 chunk 循环里逐块全量写 buffer（含静音），不在此处
         # 按语音段写——否则 buffer 是去静音的压缩时间轴，diarization 无法与 ASR 绝对帧对齐。
         text = self._runner.transcribe_pcm(seg.audio)
+        text = _normalize_to_simplified(text)  # 繁→简，幻觉过滤前（繁体幻觉转简后能被简体表拦截）
         if not text.strip():
             return  # 空转录（静音误触/噪声）不推
         if _is_hallucination(text):
@@ -148,3 +150,12 @@ def _is_hallucination(text: str) -> bool:
     if len(t) <= 2:
         return True
     return any(pat in t for pat in _HALLUCINATION_PATTERNS)
+
+
+# 模块级 opencc 单例，避免每次 _emit 重复初始化
+_CC = opencc.OpenCC("t2s")
+
+
+def _normalize_to_simplified(text: str) -> str:
+    """繁体转简体（opencc t2s）。已是简体或英文时完全幂等。"""
+    return _CC.convert(text)

@@ -261,3 +261,41 @@ def test_audio_level_one_per_chunk_multiple_chunks():
     published, _ = _drive(chunks)
     level_events = [t for t, _ in published if t == AUDIO_LEVEL]
     assert len(level_events) == 3
+
+
+# ── 繁简转换测试 ────────────────────────────────────────────────────────────────
+
+
+def test_emit_normalizes_trad_to_simplified():
+    """_emit 产出的 AsrFinalPayload.text 应已是简体（繁体输入被转换）。
+
+    用「漢字測試」（繁体，4 字符，不在幻觉表，不被长度过滤）→ 应转为「汉字测试」。
+    """
+    audio = np.concatenate([_silence(4000), _speech(8000), _silence(8000)])
+    runner = _FakeRunner(text="漢字測試")
+    published, _ = _drive([_chunk(0, 0, [audio])], runner=runner)
+    asr = _asr_events(published)
+    assert len(asr) == 1
+    _, payload = asr[0]
+    assert isinstance(payload, AsrFinalPayload)
+    assert payload.text == "汉字测试"
+
+
+def test_normalize_idempotent_on_simplified():
+    """_normalize_to_simplified 对已是简体或英文文本幂等（输出 == 输入）。"""
+    from backend.asr.stream_driver import _normalize_to_simplified  # noqa: PLC0415
+
+    assert _normalize_to_simplified("汉字测试") == "汉字测试"
+    assert _normalize_to_simplified("hello world") == "hello world"
+
+
+def test_normalize_filters_trad_hallucination():
+    """繁体幻觉「謝謝觀看」在转简后被 _is_hallucination 拦截，不推送 payload。
+
+    选「謝謝觀看」（4 字符）：未转换时不在幻觉表（繁体），转换后得「谢谢观看」命中表。
+    只要转换在过滤之前执行，就应无 ASR 事件输出。
+    """
+    audio = np.concatenate([_silence(4000), _speech(8000), _silence(8000)])
+    runner = _FakeRunner(text="謝謝觀看")
+    published, _ = _drive([_chunk(0, 0, [audio])], runner=runner)
+    assert _asr_events(published) == []

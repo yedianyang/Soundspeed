@@ -15,7 +15,7 @@
   GET 端点同理：DAL 单连接 check_same_thread=False，同步路由跑线程池会与 event-loop 线程
   上的 L2 async 任务并发操作同一 _conn（SQLite 对同一连接对象的并发调用不安全）。
 
-本切片不做 take/end 的 NP Pipeline（architecture §10.1 「L2+NP」中的 NP 属后续 ticket）。
+take/end 的 NP Pipeline 已接入（4.x）：POST /notes 触发 NP，归置 note 到对应 take。
 
 TakeDTO 有意省略 performer_issues / audio_quality（codex P2）：
   这两个字段属 NP Pipeline 输出，1.J-1.L 不暴露，故意不进 DTO。
@@ -23,10 +23,11 @@ TakeDTO 有意省略 performer_issues / audio_quality（codex P2）：
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.api.auth import require_admin
@@ -42,6 +43,9 @@ from backend.core.events import (
     TakeEndPayload,
     TakeStartPayload,
 )
+from backend.pipelines.note_parse import NoteParseError, parse_note
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["takes"])
 
@@ -285,6 +289,193 @@ async def get_scene_script(
     return {"script": ScriptOut(script_id=script_id, version=version, lines=lines)}
 
 
+# ── Note 端点（4.C）────────────────────────────────────────────────────────────
+
+
+class NoteCreateBody(BaseModel):
+    """POST /notes 请求体。"""
+
+    text: str
+    ts: float | None = None
+    # 前端生成的乐观 pending 去重键（crypto.randomUUID），原样回传到 note.processed。
+    client_id: str | None = None
+
+
+class NoteOut(BaseModel):
+    """单条 note 事件响应投影。"""
+
+    event_id: int
+    take_id: int
+    scene_code: str | None
+    take_number: int | None
+    category: str
+    content: str
+    raw_text: str
+    ts: float
+
+
+class NoteListOut(BaseModel):
+    """GET /takes/{take_id}/notes 响应。"""
+
+    take_id: int
+    notes_aggregated: str | None
+    events: list[NoteOut]
+
+
+@router.post("/notes", status_code=202)
+async def create_note(
+    body: NoteCreateBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict:
+    """提交 note：解析 @category → fire-and-forget NP Pipeline → 返回 202。
+
+    NP Pipeline 在后台通过 LLM 判断归属 take 并写库。
+    """
+    orchestrator = request.app.state.orchestrator
+    ts = body.ts or time.time()
+
+    # 1. 规则解析（只提取 @category，不定位 take）
+    try:
+        note = parse_note(body.text, ts)
+    except NoteParseError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 2. fire-and-forget NP Pipeline
+    try:
+        orchestrator.run_np_async(
+            raw_text=note.raw_text,
+            parsed_category=note.category,
+            ts=note.ts,
+            client_id=body.client_id,
+        )
+    except RuntimeError:
+        # 不在 event loop 中（如同步测试环境），fallback 到当前活跃 take。
+        # 端点是 async def → 生产恒在 loop 内，此路不可达；若哪天被改成 def 触发，
+        # 这里会绕过整条 NP（无 LLM 归类、无 take 消歧、无 note.processed WS），故吼一声。
+        logger.warning(
+            "create_note fallback 命中：无 event loop，绕过 NP 直接落当前活跃 take（仅应出现在同步测试）"
+        )
+        dal = request.app.state.orchestrator.dal
+        session = request.app.state.orchestrator.session
+        if session.take_active and session.take_id is not None:
+            event_id = dal.insert_note(
+                take_id=session.take_id,
+                category=note.category,
+                content=note.content,
+                raw_text=note.raw_text,
+                ts=note.ts,
+            )
+            return {
+                "status": "ok",
+                "event_id": event_id,
+                "take_id": session.take_id,
+                "category": note.category,
+                "content": note.content,
+            }
+        raise HTTPException(status_code=409, detail="no active take and no event loop for NP Pipeline")
+
+    return {
+        "status": "processing",
+        "category": note.category,
+        "content": note.content,
+    }
+
+
+# 后端语音上限：48kHz/30s mono PCM16 ≈ 2.9MB，给到 10MB 安全冗余（前端另有 30s/2MB 限制，§3.2）。
+_MAX_VOICE_BYTES = 10 * 1024 * 1024
+
+
+@router.post("/notes/voice", status_code=202)
+async def create_voice_note(
+    request: Request,
+    file: UploadFile = File(...),
+    client_id: str = Form(...),
+    ts: float | None = Form(None),
+    _: None = Depends(require_admin),
+) -> dict:
+    """提交语音 note（4.K）：浏览器麦 WAV 直传 → fire-and-forget 语音 NP → 返回 202。
+
+    与 POST /notes（文本）对称：均 202，归置走后台异步 NP，结果经 WS（note.processed /
+    note.failed）回灌。差异：multipart + 音频字节；类别/编号由 Gemma 从语音里听+判（无 parse_note）。
+    音频来源是前端浏览器麦（getUserMedia，#19），非后端现场录音。
+    """
+    audio = await file.read()
+    if not audio:
+        raise HTTPException(status_code=400, detail="音频为空")
+    if len(audio) > _MAX_VOICE_BYTES:
+        raise HTTPException(status_code=400, detail="音频超限（>10MB）")
+
+    orchestrator = request.app.state.orchestrator
+    resolved_ts = ts if ts is not None else time.time()
+    try:
+        orchestrator.run_np_voice_async(
+            audio=audio,
+            ts=resolved_ts,
+            client_id=client_id,
+        )
+    except RuntimeError:
+        # 不在 event loop 中（如同步测试环境）：语音必须经多模态推理，无直接落库 fallback。
+        raise HTTPException(status_code=503, detail="语音 NP 需在 event loop 中运行")
+
+    return {"status": "processing", "client_id": client_id}
+
+
+@router.get("/takes/{take_id}/notes")
+async def get_take_notes(
+    take_id: int,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> NoteListOut:
+    """返回指定 take 的 note 汇总 + 事件列表。"""
+    dal = request.app.state.orchestrator.dal
+
+    take = dal.get_take(take_id)
+    if take is None:
+        raise HTTPException(status_code=404, detail="take not found")
+
+    events = dal.list_notes(take_id)
+
+    # 查 scene_code + take_number
+    scene_code: str | None = None
+    if take:
+        scenes = dal.list_scenes()
+        for s in scenes:
+            if s["scene_id"] == take.scene_id:
+                scene_code = s.get("scene_code")
+                break
+    take_number: int | None = take.take_number if take else None
+
+    events_out: list[NoteOut] = []
+    for evt in events:
+        payload: dict = evt.payload if isinstance(evt.payload, dict) else {}
+        cat = payload.get("category", "note")
+        ct = payload.get("content", "")
+        raw = payload.get("raw_text", "")
+        if not (isinstance(cat, str) and isinstance(ct, str) and isinstance(raw, str)):
+            cat = str(cat) if cat else "note"
+            ct = str(ct) if ct else ""
+            raw = str(raw) if raw else ""
+        events_out.append(
+            NoteOut(
+                event_id=evt.event_id,
+                take_id=evt.take_id,
+                scene_code=scene_code,
+                take_number=take_number,
+                category=cat,
+                content=ct,
+                raw_text=raw,
+                ts=evt.ts,
+            )
+        )
+
+    return NoteListOut(
+        take_id=take_id,
+        notes_aggregated=take.notes if take else None,
+        events=events_out,
+    )
+
+
 # ── 2.C：建场端点 ────────────────────────────────────────────────────────────
 
 
@@ -380,7 +571,7 @@ async def activate_scene(
 class PatchTakeBody(BaseModel):
     """PATCH /takes/{take_id} 请求体（所有字段可选）。"""
 
-    status: Literal["keeper", "ng", "hold", "tbd"] | None = None
+    status: Literal["pass", "ng", "keep", "tbd"] | None = None
     shot: str | None = None
     scene_id: int | None = None
     take_number: int | None = None

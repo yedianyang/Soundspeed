@@ -1,6 +1,8 @@
 """事件类型常量与 payload dataclass（contract C1 + C3）。
 
-所有 Orchestrator 内部事件在此定义。事件类型字符串值与 contract C1 / WS topic 命名完全一致。
+集中定义所有 WS topic 的事件类型常量与 payload。多数是 Orchestrator 内部事件
+（contract C1）；少数是传输层事件（如 viewer.count，由 ConnectionManager 直接广播、
+不经 orchestrator）。事件类型字符串值与 WS topic 命名完全一致。
 Payload 使用 frozen=True 的 dataclass，防止 handler 间互相篡改。
 """
 from __future__ import annotations
@@ -43,6 +45,12 @@ DEVICE_WARNING = "device.warning"
 
 # 实时 RMS 电平（采集线程每 chunk 推，驱动前端电平条）
 AUDIO_LEVEL = "audio.level"
+
+# 在线观看数（WS 连接建立 / 断开时 ConnectionManager 广播，驱动前端 header 眼睛计数）
+VIEWER_COUNT = "viewer.count"
+
+# QP 查询管线（QP route 直接调 cm.broadcast，不经 orchestrator.publish；topic 带动态 conn_id）
+QP_ANSWER = "qp.answer"  # 实际广播 topic 为 f"{QP_ANSWER}.{conn_id}"，客户端按前缀过滤
 
 
 # ── Payload dataclass ─────────────────────────────────────────────────────────
@@ -130,7 +138,7 @@ class ScriptUploadPayload:
 class TakeChangedPayload:
     """take.changed 的 payload（1.H L2 pipeline 完成后 publish）。
 
-    status 取值与 takes.status 一致：'keeper' | 'ng' | 'hold' | 'tbd'。
+    status 取值与 takes.status 一致：'pass' | 'ng' | 'keep' | 'tbd'。
     script_diff=None 表示 L2 未完成或失败（降级状态）。
     """
 
@@ -186,6 +194,45 @@ class LlmStatusPayload:
     task_type: str | None
     take_id: int | None
 
+# Note 事件（4.x NP Pipeline）
+NOTE_PROCESSED = "note.processed"
+
+
+@dataclass(frozen=True)
+class NoteProcessedPayload:
+    """note.processed 的 payload：NP Pipeline 归置完成后发布。"""
+
+    event_id: int
+    take_id: int
+    category: str
+    content: str
+    ts: float
+    # 前端乐观 pending 的去重键：原样回传，content 被 LLM 改写、ts 不同源也能精确移除对应 pending。
+    client_id: str | None = None
+
+
+# Note 失败兜底（4.I）
+NOTE_FAILED = "note.failed"
+
+
+@dataclass(frozen=True)
+class NoteFailedPayload:
+    """note.failed 的 payload：NP Pipeline 失败时发布，让前端把对应 pending 转失败态而非永久卡死。
+
+    reason 只列机制上可检测的失败：
+      - take_not_found    —— LLM 返回的 take_id 不存在（insert_note 撞 FK）。
+      - parse_error       —— LLM 输出非合法 JSON / 字段缺失（NPParseError）。
+      - timeout           —— infer 排队 + 推理超时（asyncio.TimeoutError）。
+      - model_unavailable —— 多模态模型不可用（mmproj 缺失/下载失败退纯文本，或 mtmd 自检失败）。
+    asr_unclear（音频没听清）需模型自报机制，非后端可直接判定，MVP 不发。
+    upload_failed 由前端网络/上传层失败时自行置位，不经后端。
+    """
+
+    reason: str
+    ts: float
+    # 前端乐观 pending 的去重键：定位要标失败的那条 pending；缺失时前端不误标，仅记日志。
+    client_id: str | None = None
+
 
 @dataclass(frozen=True)
 class TakeDeletedPayload:
@@ -225,3 +272,22 @@ class AudioLevelPayload:
     """
 
     rms: float
+
+
+@dataclass(frozen=True)
+class ViewerCountPayload:
+    """viewer.count 的 payload（在线观看数）。
+
+    count: 当前连着 /ws 的客户端总数（含场记自己这台）。WS 连接建立 / 断开后由
+           ConnectionManager 广播，前端 header 眼睛据此显示。
+    """
+
+    count: int
+
+
+@dataclass(frozen=True)
+class QpAnswerPayload:
+    """qp.answer.{conn_id} 的 payload（QP 完成后广播，客户端按 conn_id 认领）。"""
+
+    connection_id: str
+    answer_text: str
