@@ -2,7 +2,9 @@ import { useMemo } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { AlertCircle, Loader2 } from "lucide-react"
 import { speakerColor } from "@/lib/constants"
-import { cn, formatTakeLabel } from "@/lib/utils"
+import { cn } from "@/lib/utils"
+import { formatFileName } from "@/lib/filename-format"
+import { useFileNameFormat } from "@/store/filename"
 import { useSessionStore, type LiveSeg } from "@/store/session"
 import { correctSegmentSpeaker, takeQueryKey, useScenes, useSpeakers, useTake } from "@/lib/api"
 import { SpeakerLabel } from "./SpeakerLabel"
@@ -53,17 +55,18 @@ export function LiveTranscript() {
     currentTakeId != null ? s.takes.get(currentTakeId) : undefined,
   )
   const { data: scenes } = useScenes()
+  const fileFormat = useFileNameFormat((s) => s.format)
   const queryClient = useQueryClient()
 
-  // 分隔条显示完整场镜次：Scene_code · Shot · Take（scene_code 由 scene_id 查 scenes，缺则回退 #id）。
+  // 分隔条按用户配置的文件名格式显示当前条场镜次（统一 formatFileName，与 History/底栏/titlebar 一致）。
   const dividerLabel = useMemo(() => {
     if (!currentTake || currentTake.take_number == null) return ""
-    const sceneCode =
-      scenes?.find((s) => s.scene_id === currentTake.scene_id)?.scene_code ??
-      `#${currentTake.scene_id}`
-    const shotPart = currentTake.shot ? `Shot ${currentTake.shot}` : "Shot —"
-    return `${sceneCode} · ${shotPart} · Take ${formatTakeLabel(currentTake)}`
-  }, [currentTake, scenes])
+    const sceneCode = scenes?.find((s) => s.scene_id === currentTake.scene_id)?.scene_code ?? null
+    return formatFileName(
+      { scene_code: sceneCode, shot: currentTake.shot, take_number: currentTake.take_number },
+      fileFormat,
+    )
+  }, [currentTake, scenes, fileFormat])
 
   // take 结束后拉权威 segment（带 segment_id + speaker），与 History 同源 → 编辑天然同步。
   // 录制中不拉：用 store 实时流低延迟显示，避免和实时帧打架。

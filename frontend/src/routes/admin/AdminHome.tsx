@@ -14,6 +14,8 @@ import InlineFeedbackQueue from "@/components/admin/InlineFeedbackQueue"
 import { LLMArchiveSheet } from "@/components/admin/LLMArchiveSheet"
 import { MARK_ORDER } from "@/lib/constants"
 import { cn, formatTakeLabel } from "@/lib/utils"
+import { formatFileName } from "@/lib/filename-format"
+import { useFileNameFormat } from "@/store/filename"
 import type { Status } from "@/types/take"
 import type { LlmState, TakeStatus, TakeDTO } from "@/types/api"
 import {
@@ -147,6 +149,7 @@ export default function AdminHome() {
   // P5：LLM 反馈档案未读数 + 标记已读（打开 Sheet 时清）。
   const archiveUnread = useSessionStore((s) => s.archiveUnread)
   const markArchiveRead = useSessionStore((s) => s.markArchiveRead)
+  const fileFormat = useFileNameFormat((s) => s.format)
 
   // 混合电平判新鲜度需要「现在」，但 Date.now() 是非纯函数不能在 render 调（react-hooks/purity）。
   // 故用 nowTick 状态：收到后端帧后起一个 100ms 轮询 effect 在回调里推进 nowTick（setState 不能在
@@ -590,14 +593,17 @@ export default function AdminHome() {
                   isRecording ? "bg-destructive animate-pulse" : "bg-muted-foreground/40"
                 )}
               />
+              {/* 按用户配置的文件名格式显示当前条（scene=活跃场，shot/take=最近录的 take；统一 formatFileName）。 */}
               <span className="text-foreground">
-                {activeScene ? activeScene.scene_code : "—"}
+                {formatFileName(
+                  {
+                    scene_code: activeScene?.scene_code,
+                    shot: currentTakeRecord?.shot,
+                    take_number: currentTakeRecord?.take_number,
+                  },
+                  fileFormat,
+                ) || "—"}
               </span>
-              {/* 顺序：Scene → Shot → Take（与 History badge / 底部工作槽一致；显示逻辑统一见 Notion ticket）。 */}
-              {currentTakeRecord?.shot && <span>· {currentTakeRecord.shot}</span>}
-              {currentTakeRecord?.take_number != null && (
-                <span>· T{formatTakeLabel(currentTakeRecord)}</span>
-              )}
             </div>
           </div>
 
