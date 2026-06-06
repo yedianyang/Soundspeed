@@ -66,6 +66,10 @@ interface SessionState {
   // inlineDismissed 后只在档案显示，不在就地层。query 走同步 HTTP（postQuery），不经 WS。
   qaItems: QaItem[]
 
+  // LLM 反馈档案未读数：L2 推送实时到达（take.changed 带 script_diff null→非 null）/ QP 新答案落定
+  // 时 +1；打开档案 Sheet 时 markArchiveRead 清 0。seedTakes（历史加载/refetch）不 bump——非新事件。
+  archiveUnread: number
+
   // note 队列版本号：note.processed 落库后递增，NoteList 据此 refetch resolved（让落定的 note 及时显示，
   // 不只移除 pending）。提交时不 bump——那时 note 未落库，refetch 拿不到，pending 已由 store 直接显示。
   notesVersion: number
@@ -111,6 +115,7 @@ interface SessionState {
   resolveQa: (clientId: string, answer: string) => void
   failQa: (clientId: string, reason: string) => void
   dismissQaInline: (clientId: string) => void
+  markArchiveRead: () => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -125,6 +130,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   pendingNotes: [],
   feedReceipts: [],
   qaItems: [],
+  archiveUnread: 0,
   notesVersion: 0,
   processing: null,
   deviceWarning: null,
@@ -197,6 +203,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const takes = new Map(state.takes)
       const existing = takes.get(m.take_id)
+      // L2 推送实时到达：script_diff 从无到有（新 take 直接带 diff，或已存在 take 补上 diff）→ 档案未读 +1。
+      const l2Arrived = m.script_diff != null && existing?.script_diff == null
       if (existing) {
         // patch-merge：只覆盖 take.changed 的 5 字段，保留 shot/start_ts/end_ts/notes 等。
         // script_diff 同 seedTakes：不向下降级到 null（与 P1-1 对称的纵深防御）。单条有序 WS 上
@@ -237,7 +245,11 @@ export const useSessionStore = create<SessionState>((set) => ({
           ? m.take_id
           : state.currentTakeId
 
-      return { takes, currentTakeId }
+      return {
+        takes,
+        currentTakeId,
+        archiveUnread: l2Arrived ? state.archiveUnread + 1 : state.archiveUnread,
+      }
     }),
 
   // getTakes 全量覆盖每个 take_id 条目（getTakes 权威）。例外：script_diff 不向下降级到 null——
@@ -345,6 +357,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       qaItems: s.qaItems.map((q) =>
         q.client_id === clientId ? { ...q, status: "done", answer } : q,
       ),
+      // QP 新答案进档案 → 未读 +1（打开档案清 0）。
+      archiveUnread: s.archiveUnread + 1,
     })),
   failQa: (clientId, reason) =>
     set((s) => ({
@@ -358,6 +372,9 @@ export const useSessionStore = create<SessionState>((set) => ({
         q.client_id === clientId ? { ...q, inlineDismissed: true } : q,
       ),
     })),
+
+  // 打开档案 Sheet 时清未读（看过即已读）。
+  markArchiveRead: () => set((s) => (s.archiveUnread === 0 ? {} : { archiveUnread: 0 })),
 
   setRecording: (recording) =>
     set((state) => (state.isRecording === recording ? {} : { isRecording: recording })),

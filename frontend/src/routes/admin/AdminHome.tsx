@@ -12,6 +12,7 @@ import { Card } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import BottomControlBar from "@/components/admin/BottomControlBar"
 import InlineFeedbackQueue from "@/components/admin/InlineFeedbackQueue"
+import { LLMArchiveSheet } from "@/components/admin/LLMArchiveSheet"
 import { MARK_ORDER } from "@/lib/constants"
 import { cn, formatTakeLabel } from "@/lib/utils"
 import type { Status } from "@/types/take"
@@ -37,7 +38,6 @@ import { StatusChip, LiveLevelMeter } from "./components/StatusChip"
 import { useMicLevel } from "@/hooks/useMicLevel"
 import { LiveTranscript } from "./components/LiveTranscript"
 import { ScriptPanel } from "./components/ScriptPanel"
-import { LLMFeedback } from "./components/LLMFeedback"
 import { HistoryTakes } from "./components/HistoryTakes"
 import SettingsDialog from "@/components/admin/SettingsDialog"
 import CreateSceneDialog from "@/components/admin/CreateSceneDialog"
@@ -116,6 +116,7 @@ export default function AdminHome() {
   const [mobileTab, setMobileTab] = useState("live")
   const [sideTab, setSideTab] = useState("script")
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [archiveOpen, setArchiveOpen] = useState(false)
   const [noteRefresh, setNoteRefresh] = useState(0)
   // 本 take 在场演员（按 Rec 时传 startTake；录制中锁定不可改）
   const [takeSpeakerIds, setTakeSpeakerIds] = useState<number[]>([])
@@ -143,6 +144,10 @@ export default function AdminHome() {
   // 后端实际采集那路的真实 RMS（仅录制时 ~5Hz 推），用于电平条混合（见下）。
   const backendLevel = useSessionStore((s) => s.backendLevel)
   const backendLevelTs = useSessionStore((s) => s.backendLevelTs)
+
+  // P5：LLM 反馈档案未读数 + 标记已读（打开 Sheet 时清）。
+  const archiveUnread = useSessionStore((s) => s.archiveUnread)
+  const markArchiveRead = useSessionStore((s) => s.markArchiveRead)
 
   // 混合电平判新鲜度需要「现在」，但 Date.now() 是非纯函数不能在 render 调（react-hooks/purity）。
   // 故用 nowTick 状态：收到后端帧后起一个 100ms 轮询 effect 在回调里推进 nowTick（setState 不能在
@@ -769,8 +774,17 @@ export default function AdminHome() {
         onSpeakerIdsChange={setTakeSpeakerIds}
         // 打字 memo（已下沉到底栏 MemoInput）提交后刷新 NoteList
         onNoteAdded={() => setNoteRefresh((k) => k + 1)}
+        // P5：LLM 反馈一级入口 —— 打开档案 Sheet 并清未读。
+        onOpenArchive={() => {
+          setArchiveOpen(true)
+          markArchiveRead()
+        }}
+        archiveUnread={archiveUnread}
         />
       </div>
+
+      {/* P5：LLM 反馈档案 Sheet（QP 问答 + L2 推送全历史，底部上拉）。 */}
+      <LLMArchiveSheet open={archiveOpen} onOpenChange={setArchiveOpen} />
     </div>
   )
 }

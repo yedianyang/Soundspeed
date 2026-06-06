@@ -5,6 +5,7 @@ import {
   Trash2,
   Undo2,
   ChevronDown,
+  Sparkles,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -74,6 +75,10 @@ interface BottomControlBarProps {
 
   // 打字 memo 提交后回调（触发 NoteList 刷新已落库 notes）。
   onNoteAdded?: () => void
+
+  // ── P5：LLM 反馈档案一级入口（QP 问答 + L2 推送全历史）。未读点驱动来自 store.archiveUnread。──
+  onOpenArchive: () => void
+  archiveUnread: number
 }
 
 export default function BottomControlBar({
@@ -106,6 +111,8 @@ export default function BottomControlBar({
   sceneBusy = false,
   takeBusy = false,
   onNoteAdded,
+  onOpenArchive,
+  archiveUnread,
 }: BottomControlBarProps) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [shotDraft, setShotDraft] = useState("")
@@ -415,12 +422,29 @@ export default function BottomControlBar({
         )}
       </div>
 
-      {/* Log */}
+      {/* Log 行 + LLM 反馈一级入口 */}
       <div className="px-4 pb-1.5 pt-0.5 border-t">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap py-1">
-            <span className="size-1.5 rounded-full bg-green-500 flex-shrink-0" />
-            <span>debug log</span>
+          <div className="flex items-center gap-2">
+            {/* LLM 反馈一级入口（带未读点）：点开 QP 问答 + L2 推送全历史档案 Sheet。
+                ✦ 暖色与就地层 QP 答案同基调；未读点 amber，沿用配色语言。 */}
+            <button
+              type="button"
+              onClick={onOpenArchive}
+              className="relative flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+              title="LLM 反馈：QP 问答 + L2 推送全历史"
+            >
+              <Sparkles className="size-3.5 text-amber-500/80" />
+              <span>LLM 反馈</span>
+              {archiveUnread > 0 && (
+                <span className="absolute top-0.5 right-1.5 size-1.5 rounded-full bg-amber-500" />
+              )}
+            </button>
+            <span className="text-muted-foreground/30 text-[11px]">·</span>
+            <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap py-1">
+              <span className="size-1.5 rounded-full bg-green-500 flex-shrink-0" />
+              <span>debug log</span>
+            </div>
           </div>
           <span className="text-[10px] font-mono text-muted-foreground/50">
             powered by Gemma 4
