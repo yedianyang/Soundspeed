@@ -341,3 +341,56 @@ def test_export_endpoint_exposes_content_disposition_for_cors(tmp_dal: DAL, monk
     assert res.status_code == 200
     expose = res.headers.get("access-control-expose-headers", "")
     assert "Content-Disposition" in expose
+
+
+# ── 排序数字感知（Scene/Shot 数字编号 >=10 按数值序，不字典序）────────────────────
+
+
+def test_build_export_rows_orders_scene_numerically_past_9(tmp_dal: DAL):
+    # scene_code 数字 >=10 必须按数值序：Scene_2 排在 Scene_10 前（裸串序会反，因 '10' < '2'）。
+    _seed_take(tmp_dal, "Scene_10", "1")
+    _seed_take(tmp_dal, "Scene_2", "1")
+    rows = build_export_rows(tmp_dal)
+    assert [r.scene for r in rows] == ["Scene_2", "Scene_10"]
+
+
+def test_build_export_rows_orders_shot_numerically_past_9(tmp_dal: DAL):
+    # 同场内 shot 数字 >=10 也按数值序：shot "2" 排在 "10" 前。
+    _seed_take(tmp_dal, "Scene_1", "2")
+    _seed_take(tmp_dal, "Scene_1", "10")
+    rows = build_export_rows(tmp_dal)
+    assert [r.shot for r in rows] == ["2", "10"]
+
+
+# ── CSV 公式注入净化（OWASP：= + - @ \t \r 开头的格前缀单引号）──────────────────────
+
+
+def test_rows_to_csv_sanitizes_formula_injection():
+    from backend.core.export import ExportRow
+
+    row = ExportRow(
+        scene="Scene_1", shot="1", take="1", file_name="01_S1_T001",
+        note='=HYPERLINK("http://evil","点我")',
+        lines="@SUM(A1:A9)",
+        mark="PASS",
+    )
+    blob = rows_to_csv([row], "2026-06-07")
+    grid = _parse_csv(blob)
+    data = grid[2]
+    # 公式触发字符开头 → 前缀单引号中和（Excel 当纯文本，不执行公式/DDE）。
+    assert data[4] == '\'=HYPERLINK("http://evil","点我")'
+    assert data[5] == "'@SUM(A1:A9)"
+
+
+def test_rows_to_csv_keeps_safe_text_unchanged():
+    from backend.core.export import ExportRow
+
+    row = ExportRow(
+        scene="Scene_1", shot="1", take="1", file_name="01_S1_T001",
+        note="正常备注", lines="第一句", mark="PASS",
+    )
+    blob = rows_to_csv([row], "2026-06-07")
+    grid = _parse_csv(blob)
+    # 不以公式字符开头的安全文本原样保留（净化不误伤）。
+    assert grid[2][4] == "正常备注"
+    assert grid[2][5] == "第一句"

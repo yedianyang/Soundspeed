@@ -28,6 +28,9 @@ CSV_HEADER = ["Scene", "Shot", "Take", "FileName", "Note", "Lines", "Mark"]
 # status → Mark 列显示（对齐前端 STATUS_LABEL：大写英文）。
 _MARK_LABELS = {"pass": "PASS", "ng": "NG", "keep": "KEEP", "tbd": "TBD"}
 
+# Excel/Sheets 公式触发字符：以这些开头的单元格会被当公式执行（CSV 注入），导出前需中和。
+_CSV_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
 
 @dataclass(frozen=True)
 class SegFormat:
@@ -147,7 +150,9 @@ def build_export_rows(
                 mark=_MARK_LABELS.get(t.status, t.status.upper()),
             )
         )
-    rows.sort(key=lambda r: (r.scene, r.shot, _take_sort_key(r.take)))
+    rows.sort(
+        key=lambda r: (_natural_sort_key(r.scene), _natural_sort_key(r.shot), _take_sort_key(r.take))
+    )
     return rows
 
 
@@ -157,6 +162,29 @@ def _take_sort_key(take_label: str) -> tuple[int, str]:
     if m:
         return int(m.group(1)), m.group(2)
     return 0, take_label
+
+
+def _natural_sort_key(value: str) -> tuple[int, int, str]:
+    """数字感知排序键：抠首个数字段按数值排，无数字编号排其后按字典序。
+
+    让 Scene_2 排在 Scene_10 前、shot '2' 排在 '10' 前（裸字符串排序会反，因 '10' < '2'）。
+    纯字母/无数字编号落到第二组，组内稳定字典序。
+    """
+    m = re.search(r"\d+", value)
+    if m:
+        return (0, int(m.group(0)), value)
+    return (1, 0, value)
+
+
+def _sanitize_cell(value: str) -> str:
+    """中和 CSV 公式注入：以公式触发字符开头的格前缀单引号（OWASP 标准缓解）。
+
+    note/lines 是用户自由文本，Excel 是导出明确目标（带 BOM）。以 = + - @ 开头的内容会被
+    Excel/Sheets 当公式执行（=HYPERLINK / DDE 命令）。前缀 ' 让 Excel 视为纯文本。
+    """
+    if value and value.startswith(_CSV_INJECTION_PREFIXES):
+        return "'" + value
+    return value
 
 
 def rows_to_csv(rows: list[ExportRow], export_date: str) -> bytes:
@@ -171,5 +199,11 @@ def rows_to_csv(rows: list[ExportRow], export_date: str) -> bytes:
     writer.writerow([f"导出日期：{export_date}"])
     writer.writerow(CSV_HEADER)
     for r in rows:
-        writer.writerow([r.scene, r.shot, r.take, r.file_name, r.note, r.lines, r.mark])
+        # 用户自由文本（note/lines）防 CSV 公式注入；系统生成列一并过，便宜且无副作用。
+        writer.writerow(
+            [
+                _sanitize_cell(c)
+                for c in (r.scene, r.shot, r.take, r.file_name, r.note, r.lines, r.mark)
+            ]
+        )
     return codecs.BOM_UTF8 + buf.getvalue().encode("utf-8")

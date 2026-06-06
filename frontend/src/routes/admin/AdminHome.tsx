@@ -164,14 +164,18 @@ export default function AdminHome() {
   // 顶栏导出 Sound Report：下拉两项——今天 / 全部（不弹 modal）。
   // FileName 列按当前命名格式渲染，与 UI 一致；"今天" 按 take 开录时间落在本地今天过滤。
   const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
   const handleExport = async (scope: "today" | "all") => {
     if (exporting) return
     setExporting(true)
+    setExportError(null)
     try {
       const range = scope === "today" ? todayRange() : undefined
       await exportTakesCsv(fileFormat, scope, range)
     } catch (err) {
+      // 不能只 console：顶栏图标下拉无内联错误位，失败会完全不可见（401/CORS 是已知坑）。
       console.error("导出 CSV 失败", err)
+      setExportError(`导出失败：${err instanceof Error ? err.message : "未知错误"}`)
     } finally {
       setExporting(false)
     }
@@ -682,6 +686,20 @@ export default function AdminHome() {
               className="ml-auto flex-shrink-0 text-amber-600/70 hover:text-amber-600"
               title="忽略提示"
               onClick={() => setDeviceWarning(null)}
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+        )}
+        {/* 导出失败可见反馈：顶栏图标下拉本身无内联错误位，否则失败完全静默。可手动 dismiss。 */}
+        {exportError && (
+          <div className="px-4 py-1 flex items-center gap-1.5 border-b bg-destructive/10">
+            <span className="text-xs text-destructive min-w-0 truncate">{exportError}</span>
+            <button
+              type="button"
+              className="ml-auto flex-shrink-0 text-destructive/70 hover:text-destructive"
+              title="忽略提示"
+              onClick={() => setExportError(null)}
             >
               <X className="size-3.5" />
             </button>
