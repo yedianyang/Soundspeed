@@ -199,4 +199,14 @@ TASK_CONFIG: dict[str, dict] = {
         # TASK_CONFIG system 模板需 agent_init 落地时补，当前为占位符
         "system": "You are a helpful assistant.",
     },
+    # hop A 纯生成：无 tools / tool_choice / grammar，让模型自发吐 function-call 文本。
+    # 工具声明通过 system content 以原生 <|tool>...<tool|> 格式注入（corrected-C3 实证）。
+    # max_tokens=256 对齐计划（function-call 输出 50-100 token，256 足够；对齐 Task A2 Step 3）。
+    "voice_dispatch_free": {
+        "max_tokens": 256,
+        "temperature": 0.1,
+        "priority": 1,
+        "system": "",
+        # 无 tools / tool_choice / grammar：纯生成，让模型自发吐 function-call 文本
+    },
 }
