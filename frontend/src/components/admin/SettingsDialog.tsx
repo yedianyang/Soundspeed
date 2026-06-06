@@ -222,7 +222,7 @@ function PrefixSelect({
       value={value === "" ? PREFIX_NONE : value}
       onValueChange={(v) => onChange(v === PREFIX_NONE ? "" : v)}
     >
-      <SelectTrigger className="h-9">
+      <SelectTrigger className="h-9 w-full">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
@@ -290,9 +290,9 @@ function FileNameFormatSettings() {
         </SelectContent>
       </Select>
 
-      {/* 分项配置 */}
-      <div className="grid grid-cols-3 gap-2">
-        <div className="grid gap-1">
+      {/* 全部压一行：Scene/Shot/Take 前缀紧凑靠左，Take 补零 + 分隔符靠右（中间留空隙）。 */}
+      <div className="flex items-end gap-2 flex-wrap">
+        <div className="grid gap-1 w-[4.75rem]">
           <span className="text-[11px] text-muted-foreground">Scene 前缀</span>
           <PrefixSelect
             value={format.scene.prefix}
@@ -300,26 +300,7 @@ function FileNameFormatSettings() {
             onChange={(v) => updateSeg("scene", { prefix: v })}
           />
         </div>
-        <div className="grid gap-1">
-          <span className="text-[11px] text-muted-foreground">Scene 补零</span>
-          <PadSelect value={format.scene.pad} onChange={(v) => updateSeg("scene", { pad: v })} />
-        </div>
-        <div className="grid gap-1">
-          <span className="text-[11px] text-muted-foreground">分隔符</span>
-          <Select value={format.sep} onValueChange={(v) => setFormat({ ...format, sep: v })}>
-            <SelectTrigger className="h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {SEPARATORS.map((s) => (
-                <SelectItem key={s} value={s}>
-                  {SEP_LABEL[s] ?? s}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="grid gap-1">
+        <div className="grid gap-1 w-[4.75rem]">
           <span className="text-[11px] text-muted-foreground">Shot 前缀</span>
           <PrefixSelect
             value={format.shot.prefix}
@@ -327,7 +308,7 @@ function FileNameFormatSettings() {
             onChange={(v) => updateSeg("shot", { prefix: v })}
           />
         </div>
-        <div className="grid gap-1">
+        <div className="grid gap-1 w-[4.75rem]">
           <span className="text-[11px] text-muted-foreground">Take 前缀</span>
           <PrefixSelect
             value={format.take.prefix}
@@ -335,9 +316,26 @@ function FileNameFormatSettings() {
             onChange={(v) => updateSeg("take", { prefix: v })}
           />
         </div>
-        <div className="grid gap-1">
-          <span className="text-[11px] text-muted-foreground">Take 补零</span>
-          <PadSelect value={format.take.pad} onChange={(v) => updateSeg("take", { pad: v })} />
+        <div className="ml-auto flex items-end gap-2">
+          <div className="grid gap-1 w-[5.5rem]">
+            <span className="text-[11px] text-muted-foreground">Take 补零</span>
+            <PadSelect value={format.take.pad} onChange={(v) => updateSeg("take", { pad: v })} />
+          </div>
+          <div className="grid gap-1 w-[5.5rem]">
+            <span className="text-[11px] text-muted-foreground">分隔符</span>
+            <Select value={format.sep} onValueChange={(v) => setFormat({ ...format, sep: v })}>
+              <SelectTrigger className="h-9 w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {SEPARATORS.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {SEP_LABEL[s] ?? s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </div>
       </div>
     </div>

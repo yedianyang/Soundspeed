@@ -22,19 +22,23 @@ export const TAKE_PREFIXES = ["T", "Tk", "Take", ""] as const
 export const SEPARATORS = ["_", "-", " · ", " "] as const
 export const PAD_OPTIONS = [0, 1, 2, 3] as const
 
-// 默认：贴用户给的 01_S1_T001。
+// 默认：Sc1_S1_T001（补零只给 Take；Scene/Shot 不补零）。
 export const DEFAULT_FILENAME_FORMAT: FileNameFormat = {
-  scene: { prefix: "", pad: 2 },
+  scene: { prefix: "Sc", pad: 0 },
   shot: { prefix: "S", pad: 0 },
   take: { prefix: "T", pad: 3 },
   sep: "_",
 }
 
-// 几个开箱预设（设置页「预设」快选）。
+// 几个开箱预设（设置页「预设」快选）。补零只用在 Take（Scene/Shot pad 固定 0）。
 export const FILENAME_PRESETS: { label: string; value: FileNameFormat }[] = [
   {
-    label: "01_S1_T001",
-    value: { scene: { prefix: "", pad: 2 }, shot: { prefix: "S", pad: 0 }, take: { prefix: "T", pad: 3 }, sep: "_" },
+    label: "Sc1_S1_T001",
+    value: { scene: { prefix: "Sc", pad: 0 }, shot: { prefix: "S", pad: 0 }, take: { prefix: "T", pad: 3 }, sep: "_" },
+  },
+  {
+    label: "1_S1_T001",
+    value: { scene: { prefix: "", pad: 0 }, shot: { prefix: "S", pad: 0 }, take: { prefix: "T", pad: 3 }, sep: "_" },
   },
   {
     label: "Sc1-S1-T01",
@@ -43,10 +47,6 @@ export const FILENAME_PRESETS: { label: string; value: FileNameFormat }[] = [
   {
     label: "Scene1 · Shot1 · Take1",
     value: { scene: { prefix: "Scene", pad: 0 }, shot: { prefix: "Shot", pad: 0 }, take: { prefix: "Take", pad: 0 }, sep: " · " },
-  },
-  {
-    label: "001_001_001",
-    value: { scene: { prefix: "", pad: 3 }, shot: { prefix: "", pad: 3 }, take: { prefix: "", pad: 3 }, sep: "_" },
   },
 ]
 
