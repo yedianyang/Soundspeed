@@ -552,6 +552,225 @@ async def test_run_l2_take_fc_calls_infer_tool_not_infer(l2_input: L2Input) -> N
 
 
 # ---------------------------------------------------------------------------
+# 缺口③：seg_idx + 并置文档（juxtaposition）
+# ---------------------------------------------------------------------------
+
+
+def test_build_l2_tool_line_matches_has_seg_idx() -> None:
+    """line_matches.items 含 seg_idx（integer 数组），但不入 required。"""
+    from backend.llm.tools.script import build_l2_tool
+
+    params = build_l2_tool()["function"]["parameters"]
+    item = params["properties"]["line_matches"]["items"]
+    assert item["properties"]["seg_idx"]["type"] == "array"
+    assert item["properties"]["seg_idx"]["items"]["type"] == "integer"
+    assert "seg_idx" not in item["required"]  # 漏说行可省略
+
+
+def _args_with_seg_idx() -> dict:
+    """两行剧本：行1 match 对应转录段0，行2 substitution 对应转录段1。"""
+    return {
+        "script_diff_summary": "行2配角把台词说短了。",
+        "line_matches": [
+            {"line_no": 1, "diff_type": "match", "detail": None, "seg_idx": [0]},
+            {"line_no": 2, "diff_type": "substitution", "detail": "你必须留下来。", "seg_idx": [1]},
+        ],
+        "corrected_segments": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_parses_seg_idx(l2_input: L2Input) -> None:
+    """LineMatch.seg_idx 从 tool arguments 正确解析为 tuple[int]。"""
+    svc = _mock_tool_llm(_args_with_seg_idx())
+    result = await run_l2_take(l2_input, svc)
+
+    by_no = {m.line_no: m for m in result.line_matches}
+    assert by_no[1].seg_idx == (0,)
+    assert by_no[2].seg_idx == (1,)
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_seg_idx_filters_invalid(l2_input: L2Input) -> None:
+    """seg_idx 含非整数/负数/bool → 容错过滤，不抛错。"""
+    args = _args_with_seg_idx()
+    args["line_matches"][0]["seg_idx"] = [0, -1, "x", True, 1]
+    svc = _mock_tool_llm(args)
+    result = await run_l2_take(l2_input, svc)
+
+    by_no = {m.line_no: m for m in result.line_matches}
+    assert by_no[1].seg_idx == (0, 1)  # -1/"x"/True 被过滤
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_builds_juxtaposition(l2_input: L2Input) -> None:
+    """有剧本路径：juxtaposition 以剧本行为骨架，贴上对齐转录原文 + speaker。"""
+    svc = _mock_tool_llm(_args_with_seg_idx())
+    result = await run_l2_take(l2_input, svc)
+
+    jx = result.juxtaposition
+    assert len(jx) == 2  # 骨架 = 2 行剧本
+    # 行1：剧本台词 + 实际说的（转录段0原文）+ speaker
+    assert jx[0].line_no == 1
+    assert jx[0].character == "主角"
+    assert jx[0].script_text == "我不想走，请别拦着我。"
+    assert jx[0].spoken_text == "我不想走，请别拦着我。"  # 转录段0
+    assert jx[0].speaker == "SPEAKER_00"
+    # 行2：剧本台词与实际说的并置（实际取转录段1原文，非 detail）
+    assert jx[1].spoken_text == "你必须留下来。"  # 转录段1原文
+    assert jx[1].speaker == "SPEAKER_01"
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_juxtaposition_missing_line_no_spoken(l2_input: L2Input) -> None:
+    """漏说的行（seg_idx=[]）在并置里 spoken_text/speaker 为 None。"""
+    args = {
+        "script_diff_summary": "行2漏说。",
+        "line_matches": [
+            {"line_no": 1, "diff_type": "match", "detail": None, "seg_idx": [0]},
+            {"line_no": 2, "diff_type": "missing", "detail": None, "seg_idx": []},
+        ],
+        "corrected_segments": [],
+    }
+    result = await run_l2_take(l2_input, _mock_tool_llm(args))
+
+    jx = {j.line_no: j for j in result.juxtaposition}
+    assert jx[2].spoken_text is None
+    assert jx[2].speaker is None
+    assert jx[2].script_text == "你必须留下来，不然一切都完了。"  # 剧本侧仍呈现
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_juxtaposition_backbone_covers_omitted_lines(l2_input: L2Input) -> None:
+    """LLM 漏给某行 line_match，骨架仍把该剧本行列出（spoken=None）。"""
+    args = {
+        "script_diff_summary": "只报了行1。",
+        "line_matches": [
+            {"line_no": 1, "diff_type": "match", "detail": None, "seg_idx": [0]},
+        ],
+        "corrected_segments": [],
+    }
+    result = await run_l2_take(l2_input, _mock_tool_llm(args))
+
+    jx = {j.line_no: j for j in result.juxtaposition}
+    assert set(jx) == {1, 2}  # 行2 即便 LLM 没报也在
+    assert jx[2].spoken_text is None
+    assert jx[2].diff_type is None  # 无对应 line_match
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_juxtaposition_insertion_appended(l2_input: L2Input) -> None:
+    """insertion（line_no=-1）追加在并置末尾，剧本侧留空，实际侧取转录原文。"""
+    args = {
+        "script_diff_summary": "末尾多说一句。",
+        "line_matches": [
+            {"line_no": 1, "diff_type": "match", "detail": None, "seg_idx": [0]},
+            {"line_no": 2, "diff_type": "match", "detail": None, "seg_idx": []},
+            {"line_no": -1, "diff_type": "insertion", "detail": None, "seg_idx": [1]},
+        ],
+        "corrected_segments": [],
+    }
+    result = await run_l2_take(l2_input, _mock_tool_llm(args))
+
+    jx = result.juxtaposition
+    assert jx[-1].line_no == -1
+    assert jx[-1].script_text is None
+    assert jx[-1].spoken_text == "你必须留下来。"  # 转录段1原文
+    assert jx[-1].diff_type == "insertion"
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_juxtaposition_insertion_detail_fallback(l2_input: L2Input) -> None:
+    """insertion 没给 seg_idx 时退回用 detail 文本兜底。"""
+    args = {
+        "script_diff_summary": "多说一句但没给下标。",
+        "line_matches": [
+            {"line_no": 1, "diff_type": "match", "detail": None, "seg_idx": [0]},
+            {"line_no": 2, "diff_type": "match", "detail": None, "seg_idx": [1]},
+            {"line_no": -1, "diff_type": "insertion", "detail": "导演我们再来一条"},
+        ],
+        "corrected_segments": [],
+    }
+    result = await run_l2_take(l2_input, _mock_tool_llm(args))
+
+    assert result.juxtaposition[-1].spoken_text == "导演我们再来一条"
+
+
+def test_resolve_spoken_multi_segment_joins_and_takes_first_speaker() -> None:
+    """多段 seg_idx：原文按序拼接，speaker 取首个非空段。"""
+    from backend.pipelines.l2_take import _resolve_spoken
+
+    segs = [
+        {"speaker": "顾朗", "text": "你来了"},
+        {"speaker": "顾朗", "text": "我等你很久了"},
+    ]
+    text, speaker = _resolve_spoken(segs, (0, 1))
+    assert text == "你来了我等你很久了"
+    assert speaker == "顾朗"
+
+
+def test_resolve_spoken_out_of_range_idx_skipped() -> None:
+    """越界下标静默跳过；全越界 → (None, None)。"""
+    from backend.pipelines.l2_take import _resolve_spoken
+
+    segs = [{"speaker": "A", "text": "x"}]
+    assert _resolve_spoken(segs, (5, 9)) == (None, None)
+    assert _resolve_spoken(segs, (0, 5)) == ("x", "A")
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_no_script_has_empty_juxtaposition(stub_segments: list[dict]) -> None:
+    """无剧本路径：juxtaposition 为空列表（前端显示无剧本）。"""
+    inp = L2Input(
+        take_id=1, scene_id=1, take_number=1,
+        transcript_segments=stub_segments, script_lines=[], previous_notes=[],
+    )
+    svc = MagicMock(spec=LLMService)
+    tool_call = {
+        "type": "function",
+        "function": {
+            "name": "report_corrections_only",
+            "arguments": json.dumps({"corrected_segments": []}),
+        },
+    }
+    svc.infer_tool = AsyncMock(return_value=tool_call)
+    result = await run_l2_take(inp, svc)
+    assert result.juxtaposition == []
+
+
+# ---------------------------------------------------------------------------
+# L2 超时（含首次 CPU 模型加载）：默认 300s，SOUNDSPEED_L2_TIMEOUT 可覆盖
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_default_timeout_is_300(l2_input: L2Input, monkeypatch) -> None:
+    """不传 timeout 且无 env → infer_tool 收到 300s（CPU 上首条 take 含懒加载，60s 不够）。"""
+    monkeypatch.delenv("SOUNDSPEED_L2_TIMEOUT", raising=False)
+    svc = _mock_tool_llm(_normal_tool_arguments())
+    await run_l2_take(l2_input, svc)
+    assert svc.infer_tool.call_args.kwargs["timeout"] == 300.0
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_timeout_env_override(l2_input: L2Input, monkeypatch) -> None:
+    """SOUNDSPEED_L2_TIMEOUT 覆盖默认超时。"""
+    monkeypatch.setenv("SOUNDSPEED_L2_TIMEOUT", "123")
+    svc = _mock_tool_llm(_normal_tool_arguments())
+    await run_l2_take(l2_input, svc)
+    assert svc.infer_tool.call_args.kwargs["timeout"] == 123.0
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_explicit_timeout_wins(l2_input: L2Input, monkeypatch) -> None:
+    """显式传 timeout 优先于 env（测试可用小值驱动超时场景）。"""
+    monkeypatch.setenv("SOUNDSPEED_L2_TIMEOUT", "999")
+    svc = _mock_tool_llm(_normal_tool_arguments())
+    await run_l2_take(l2_input, svc, timeout=5.0)
+    assert svc.infer_tool.call_args.kwargs["timeout"] == 5.0
+
+
+# ---------------------------------------------------------------------------
 # Layer 5：真模型 smoke（Layer 0 渲染验证并入此处）
 # ---------------------------------------------------------------------------
 

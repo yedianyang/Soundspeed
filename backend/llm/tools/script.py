@@ -170,10 +170,18 @@ def build_l2_tool() -> dict:
                                     "type": "string",
                                     "description": "具体差异描述，substitution 时写出实际说的内容",
                                 },
+                                "seg_idx": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                    "description": (
+                                        "本行对应的转录记录下标（0-indexed，见转录记录前的序号），"
+                                        "可多段；演员漏说该行填 []；insertion 填实际多说内容的下标。"
+                                    ),
+                                },
                             },
-                            # detail 不入 required：match 行无差异可省略，避免 grammar
-                            # 逼模型给每行都生成填充文本。validator 用 .get("detail")
-                            # 容忍缺失（None）。
+                            # detail / seg_idx 不入 required：match 行无差异可省略 detail，
+                            # missing 行 seg_idx 为 []；不入 required 避免 grammar 逼模型给每行
+                            # 都填充。validator 用 .get(...) 容忍缺失（detail→None / seg_idx→[]）。
                             "required": ["line_no", "diff_type"],
                         },
                     },

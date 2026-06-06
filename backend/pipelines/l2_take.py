@@ -16,7 +16,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from backend.llm.config import TASK_CONFIG
@@ -54,11 +55,31 @@ class LineMatch:
 
     diff_type 取值：match / missing / substitution / insertion。
     insertion 类型 line_no 固定为 -1（无对应剧本行）。
+    seg_idx：本行对应的转录段下标（truncate 后列表，0-indexed），用于把"实际说的"
+        原文逐字 join 进并置文档（_build_juxtaposition）。漏说 → 空 tuple。
     """
 
     line_no: int
     diff_type: str
     detail: str | None
+    seg_idx: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class JuxtaLine:
+    """并置文档的一行：剧本台词 ‖ 实际说的（缺口③ 的核心交付）。
+
+    以剧本行为骨架逐行排列，把对齐到的转录原文贴到右侧；剧本有而没说 →
+    spoken_text=None；实际多说（剧本无此行）→ line_no=-1、script_text=None。
+    diff_type 是 line_matches 的副产物（前端这版不展示），无对应匹配时为 None。
+    """
+
+    line_no: int                # 剧本行号；-1 = insertion（剧本无此行）
+    character: str | None       # 角色（剧本侧）；insertion 为 None
+    script_text: str | None     # 剧本台词；insertion 为 None
+    spoken_text: str | None     # 实际说的（转录原文，逐字）；漏说为 None
+    speaker: str | None         # 谁说的（转录 speaker=角色名/说话人N）；漏说为 None
+    diff_type: str | None       # 副产物，前端可忽略；无对应 line_match 为 None
 
 
 @dataclass(frozen=True)
@@ -106,6 +127,9 @@ class L2Output:
     script_diff_summary: str | None
     line_matches: list[LineMatch]
     corrected_segments: list[CorrectedSegment]
+    # 并置文档（缺口③）：剧本行骨架 + 对齐的实际台词。由 run_l2_take 在解析后组装
+    # （需要 script_lines + 截断后 segments），_validate_data_dict 不填，默认空列表。
+    juxtaposition: list[JuxtaLine] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +337,18 @@ def _validate_data_dict(data: dict, *, strict: bool = True) -> L2Output:
         else:
             detail = raw_detail  # None 直接保留
 
-        line_matches.append(LineMatch(line_no=line_no, diff_type=diff_type, detail=detail))
+        # seg_idx 容错解析（best-effort，不抛错）：只保留合法非负整数，过滤 bool。
+        raw_seg = item.get("seg_idx")
+        seg_idx: tuple[int, ...] = ()
+        if isinstance(raw_seg, list):
+            seg_idx = tuple(
+                x for x in raw_seg
+                if isinstance(x, int) and not isinstance(x, bool) and x >= 0
+            )
+
+        line_matches.append(
+            LineMatch(line_no=line_no, diff_type=diff_type, detail=detail, seg_idx=seg_idx)
+        )
 
     corrected_segments: list[CorrectedSegment] = []
     for j, cs_item in enumerate(raw_corrections):
@@ -373,6 +408,86 @@ def _parse_llm_output(raw_text: str) -> L2Output:
 
 
 # ---------------------------------------------------------------------------
+# 并置文档组装（缺口③）
+# ---------------------------------------------------------------------------
+
+
+def _resolve_spoken(
+    segments: list[dict], seg_idx: tuple[int, ...]
+) -> tuple[str | None, str | None]:
+    """按 seg_idx 从（截断后）转录段取真实原文 + speaker。
+
+    多段按下标顺序拼接（中文无空格，直接相连）；speaker 取首个非空段的 speaker。
+    无有效下标 → (None, None)，对应"漏说该行"。越界下标静默跳过（LLM best-effort）。
+    """
+    parts: list[str] = []
+    speaker: str | None = None
+    for i in seg_idx:
+        if 0 <= i < len(segments):
+            seg = segments[i]
+            parts.append(seg.get("text", ""))
+            if speaker is None:
+                speaker = seg.get("speaker")
+    if not parts:
+        return None, None
+    return "".join(parts), speaker
+
+
+def _build_juxtaposition(
+    script_lines: list[dict],
+    segments: list[dict],
+    line_matches: list[LineMatch],
+) -> list[JuxtaLine]:
+    """组装并置文档：剧本行为骨架，逐行贴上对齐的实际台词，末尾追加 insertion。
+
+    - 骨架用 script_lines（保证整段剧本都呈现，不依赖 LLM 是否给齐 line_matches）；
+    - 每行的实际台词来自该行 line_match 的 seg_idx → 转录原文（漏说 → None）；
+    - insertion（line_no=-1）实际多说的内容追加在末尾，剧本侧留空；seg_idx 缺失时
+      退回用 detail 文本兜底。
+    """
+    match_by_no: dict[int, LineMatch] = {}
+    insertions: list[LineMatch] = []
+    for m in line_matches:
+        if m.line_no == -1:
+            insertions.append(m)
+        elif m.line_no not in match_by_no:
+            match_by_no[m.line_no] = m  # 同行号重复时取首条
+
+    rows: list[JuxtaLine] = []
+    for line in script_lines:
+        line_no = line["line_no"]
+        m = match_by_no.get(line_no)
+        spoken_text, speaker = _resolve_spoken(segments, m.seg_idx if m else ())
+        rows.append(
+            JuxtaLine(
+                line_no=line_no,
+                character=line.get("character"),
+                script_text=line.get("text"),
+                spoken_text=spoken_text,
+                speaker=speaker,
+                diff_type=m.diff_type if m else None,
+            )
+        )
+
+    for m in insertions:
+        spoken_text, speaker = _resolve_spoken(segments, m.seg_idx)
+        if spoken_text is None and m.detail:  # seg_idx 缺失 → detail 兜底
+            spoken_text = m.detail
+        rows.append(
+            JuxtaLine(
+                line_no=-1,
+                character=None,
+                script_text=None,
+                spoken_text=spoken_text,
+                speaker=speaker,
+                diff_type="insertion",
+            )
+        )
+
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # 核心函数
 # ---------------------------------------------------------------------------
 
@@ -380,14 +495,17 @@ def _parse_llm_output(raw_text: str) -> L2Output:
 async def run_l2_take(
     input_data: L2Input,
     llm_service: "LLMService",
-    timeout: float = 60.0,
+    timeout: float | None = None,
 ) -> L2Output:
     """执行一次 L2 Pipeline：台词 diff 检测。
 
     Args:
         input_data: L2 输入，含转录记录、剧本行、历史偏差。
         llm_service: 注入的 LLMService 实例（不调 get_service()）。
-        timeout: 最大等待时间（含排队 + 推理），默认 60s。
+        timeout: 最大等待时间（含排队 + 首次模型加载 + 推理）。None → 取
+            SOUNDSPEED_L2_TIMEOUT（默认 300s）。L2 是 take 后台批处理、不在用户等待路径，
+            CPU 上首条 take 含 Gemma 懒加载（GPU 失败回落 CPU 再载）+ CPU 推理，
+            60s 不够（实测 TimeoutError，详见 soundspeed_diarization_runtime）。
 
     Returns:
         L2Output，含 script_diff_summary 和 line_matches。
@@ -396,6 +514,8 @@ async def run_l2_take(
         L2ParseError: LLM 输出非合法 JSON / 字段缺失 / 枚举值非法 / 响应为空。
         asyncio.TimeoutError: 排队 + 推理总耗时超 timeout（由 LLMService 抛出，不吞）。
     """
+    if timeout is None:
+        timeout = float(os.environ.get("SOUNDSPEED_L2_TIMEOUT", "300"))
     no_script = not input_data.script_lines
     task_type = "l2_take_no_script" if no_script else "l2_take"
 
@@ -426,4 +546,14 @@ async def run_l2_take(
         raise L2ParseError("tool_call arguments 解析失败", cause=exc) from exc
 
     # 有剧本路径用 strict=True（原有严格校验），无剧本路径用 strict=False（宽松）
-    return _validate_data_dict(data, strict=not no_script)
+    output = _validate_data_dict(data, strict=not no_script)
+
+    # 并置文档（缺口③）：仅有剧本路径组装。seg_idx 引用截断后转录段，故此处用同一
+    # _truncate_segments（纯函数、确定性，与 _build_user_message 的截断一致）取原文。
+    if no_script:
+        return output
+    truncated_segments, _ = _truncate_segments(input_data.transcript_segments)
+    juxtaposition = _build_juxtaposition(
+        input_data.script_lines, truncated_segments, output.line_matches
+    )
+    return replace(output, juxtaposition=juxtaposition)

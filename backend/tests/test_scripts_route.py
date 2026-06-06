@@ -76,6 +76,21 @@ def _patch_parse(monkeypatch, blocks, per_block_scenes):
     monkeypatch.setattr("backend.api.routes.scripts.parse_scene_block", _fake_block)
 
 
+# ── 无号场内容指纹（_block_fingerprint）──────────────────────────────────────
+
+
+def test_block_fingerprint_stable_and_ws_insensitive():
+    """同源块（含空白抖动）→ 同指纹；不同内容 → 不同指纹。无号场重传复用同场的基础。"""
+    from backend.api.routes.scripts import _block_fingerprint
+
+    a = _block_fingerprint("场1 内 咖啡馆 日\n罗湘：你好。")
+    b = _block_fingerprint("场1 内 咖啡馆 日\n 罗湘：你好。 ")  # 换行/缩进抖动
+    c = _block_fingerprint("场2 外 广场 夜\n阿明：再见。")
+    assert a == b  # 去空白后内容相同 → 指纹相同（重传幂等）
+    assert a != c  # 内容不同 → 指纹不同
+    assert len(a) == 12 and all(ch in "0123456789abcdef" for ch in a)
+
+
 # ── 阶段 1：上传（只入库，不碰 LLM）─────────────────────────────────────────
 
 

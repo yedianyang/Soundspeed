@@ -94,3 +94,89 @@ def test_exception_in_llm_still_restores_handler() -> None:
             messages=[{"role": "user", "content": "x"}], tools=[{"function": {"name": "t"}}]
         )
     assert c._llm.chat_handler == "MULTIMODAL"  # 异常路径也还原
+
+
+# ---------------------------------------------------------------------------
+# GPU→CPU 加载回落（_load_with_cpu_fallback）：GPU 优先、显存装不下回落 CPU
+# ---------------------------------------------------------------------------
+
+
+def test_load_fallback_retries_cpu_on_gpu_oom():
+    """想上 GPU 但 OOM（Failed to load model）→ 自动用 n_gpu_layers=0 重试。"""
+    calls: list = []
+
+    def fake_llama(model_path, **params):
+        calls.append(params.get("n_gpu_layers"))
+        if params.get("n_gpu_layers") != 0:
+            raise RuntimeError("Failed to load model from file: x.gguf (CUBLAS_ALLOC_FAILED)")
+        return "cpu_llm"
+
+    out = GemmaClient._load_with_cpu_fallback(fake_llama, "x.gguf", {"n_gpu_layers": -1})
+    assert out == "cpu_llm"
+    assert calls == [-1, 0]  # 先 GPU(-1) 失败，回落 CPU(0)
+
+
+def test_load_fallback_keeps_gpu_when_it_fits():
+    """GPU 加载成功（大显存设备）→ 不触发回落，留在 GPU。"""
+    calls: list = []
+
+    def fake_llama(model_path, **params):
+        calls.append(params.get("n_gpu_layers"))
+        return "gpu_llm"
+
+    out = GemmaClient._load_with_cpu_fallback(fake_llama, "x.gguf", {"n_gpu_layers": -1})
+    assert out == "gpu_llm"
+    assert calls == [-1]  # 一次成功，无回落
+
+
+def test_load_fallback_cpu_failure_reraises():
+    """本就纯 CPU(0) 还失败 → 非显存问题，照抛不吞。"""
+    def fake_llama(model_path, **params):
+        raise RuntimeError("disk gone")
+
+    with pytest.raises(RuntimeError, match="disk gone"):
+        GemmaClient._load_with_cpu_fallback(fake_llama, "x.gguf", {"n_gpu_layers": 0})
+
+
+# ---------------------------------------------------------------------------
+# 显存预判（_resolve_gpu_layers）：占满走 CPU、够用留 GPU（Windows 主动判定）
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_gpu_layers_cpu_when_vram_full(monkeypatch, tmp_path):
+    """可用显存 < 需求 → 退 CPU(0)。"""
+    import torch
+
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"x" * (1 << 20))  # 1MB
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (1 << 29, 8 << 30))  # 0.5GB free
+    assert GemmaClient._resolve_gpu_layers(-1, str(f)) == 0
+
+
+def test_resolve_gpu_layers_gpu_when_vram_free(monkeypatch, tmp_path):
+    """可用显存充足 → 保持 GPU(-1)。"""
+    import torch
+
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"x" * (1 << 20))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (8 << 30, 8 << 30))  # 8GB free
+    assert GemmaClient._resolve_gpu_layers(-1, str(f)) == -1
+
+
+def test_resolve_gpu_layers_zero_passthrough(tmp_path):
+    """已是 CPU(0) → 不查显存，直接 0。"""
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"x")
+    assert GemmaClient._resolve_gpu_layers(0, str(f)) == 0
+
+
+def test_resolve_gpu_layers_no_cuda_keeps_wanted(monkeypatch, tmp_path):
+    """无 CUDA → 保持原意图（不强制改）。"""
+    import torch
+
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"x")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert GemmaClient._resolve_gpu_layers(-1, str(f)) == -1

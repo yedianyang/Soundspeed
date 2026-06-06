@@ -59,6 +59,136 @@ def test_healthz_returns_200(tmp_dal: DAL, monkeypatch) -> None:
     assert resp.status_code == 200
 
 
+def test_list_all_characters_endpoint(tmp_dal: DAL, monkeypatch) -> None:
+    """GET /api/v1/scenes/characters → 整部戏跨场去重角色清单（注册弹窗下拉用）。"""
+    s1 = tmp_dal.create_scene("Scene_1")
+    scr1 = tmp_dal.insert_script(s1, "场一")
+    tmp_dal.insert_script_line(scr1, 1, "夏雨", "你来了。")
+    tmp_dal.insert_script_line(scr1, 2, None, "（坐下）")  # 舞台指示，排除
+    s2 = tmp_dal.create_scene("Scene_2")
+    scr2 = tmp_dal.insert_script(s2, "场二")
+    tmp_dal.insert_script_line(scr2, 1, "顾朗", "走。")
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.get(
+        "/api/v1/scenes/characters",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert resp.status_code == 200
+    assert set(resp.json()["characters"]) == {"夏雨", "顾朗"}
+
+
+def test_list_all_characters_endpoint_normalizes_variants(tmp_dal: DAL, monkeypatch) -> None:
+    """端点归一括号注记后去重：夏雨 与 夏雨（V.O.）合并成一个夏雨。"""
+    s1 = tmp_dal.create_scene("Scene_1")
+    scr1 = tmp_dal.insert_script(s1, "场一")
+    tmp_dal.insert_script_line(scr1, 1, "夏雨", "你来了。")
+    tmp_dal.insert_script_line(scr1, 2, "夏雨（V.O.）", "那年冬天。")  # 历史数据变体
+    tmp_dal.insert_script_line(scr1, 3, "顾朗", "嗯。")
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.get(
+        "/api/v1/scenes/characters",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["characters"] == ["夏雨", "顾朗"]  # 变体合并，sorted
+
+
+def test_list_all_characters_endpoint_requires_auth(tmp_dal: DAL, monkeypatch) -> None:
+    """GET /api/v1/scenes/characters 无 token → 401。"""
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.get("/api/v1/scenes/characters")
+    assert resp.status_code == 401
+
+
+def test_update_scene_script_appends_new_version(tmp_dal: DAL, monkeypatch) -> None:
+    """POST /scenes/{id}/script 追加新版本（version+1），读侧切到新内容。"""
+    sid = tmp_dal.create_scene("S1")
+    tmp_dal.insert_script(sid, "旧原文")  # v1
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        f"/api/v1/scenes/{sid}/script",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+        json={
+            "raw_text": "新原文",
+            "lines": [
+                {"character": "夏雨", "text": "你来了。"},
+                {"character": None, "text": "（夏雨坐下）"},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["version"] == 2 and body["skipped"] is False and body["line_count"] == 2
+    latest = tmp_dal.get_latest_script(sid)
+    assert latest["version"] == 2
+    assert [r["character"] for r in tmp_dal.list_script_lines(latest["script_id"])] == ["夏雨", None]
+
+
+def test_update_scene_script_idempotent_same_raw_text(tmp_dal: DAL, monkeypatch) -> None:
+    """raw_text 与最新版相同 → skipped=True，不新建版本。"""
+    sid = tmp_dal.create_scene("S1")
+    scr = tmp_dal.insert_script(sid, "原文A")
+    tmp_dal.insert_script_line(scr, 1, "夏雨", "你来了。")
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        f"/api/v1/scenes/{sid}/script",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+        json={"raw_text": "原文A", "lines": [{"character": "夏雨", "text": "你来了。"}]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["skipped"] is True
+    assert tmp_dal.get_latest_script(sid)["version"] == 1  # 未刷版本
+
+
+def test_update_scene_script_normalizes_character(tmp_dal: DAL, monkeypatch) -> None:
+    """提交时 character 归一（夏雨（V.O.）→ 夏雨）。"""
+    sid = tmp_dal.create_scene("S1")
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        f"/api/v1/scenes/{sid}/script",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+        json={"raw_text": "x", "lines": [{"character": "夏雨（V.O.）", "text": "旁白。"}]},
+    )
+    assert resp.status_code == 200
+    latest = tmp_dal.get_latest_script(sid)
+    assert tmp_dal.list_script_lines(latest["script_id"])[0]["character"] == "夏雨"
+
+
+def test_update_scene_script_404_missing_scene(tmp_dal: DAL, monkeypatch) -> None:
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    resp = client.post(
+        "/api/v1/scenes/99999/script",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+        json={"raw_text": "x", "lines": [{"character": "A", "text": "t"}]},
+    )
+    assert resp.status_code == 404
+
+
+def test_update_scene_script_422_empty_lines(tmp_dal: DAL, monkeypatch) -> None:
+    sid = tmp_dal.create_scene("S1")
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    resp = client.post(
+        f"/api/v1/scenes/{sid}/script",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+        json={"raw_text": "x", "lines": []},
+    )
+    assert resp.status_code == 422
+
+
 def test_take_start_without_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
     """POST /api/v1/take/start 无 Authorization 头 → 401。"""
     orch = create_orchestrator(tmp_dal)

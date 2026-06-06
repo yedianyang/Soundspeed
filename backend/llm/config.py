@@ -90,7 +90,7 @@ TASK_CONFIG: dict[str, dict] = {
             "  {\n"
             '    "script_diff_summary": "<str 或 null>",\n'
             '    "line_matches": [\n'
-            '      {"line_no": <int>, "diff_type": "<match|missing|substitution|insertion>", "detail": "<str 或 null>"}\n'
+            '      {"line_no": <int>, "diff_type": "<match|missing|substitution|insertion>", "detail": "<str 或 null>", "seg_idx": [<int>...]}\n'
             "    ],\n"
             '    "corrected_segments": [\n'
             '      {"idx": <int>, "original": "<str>", "corrected": "<str>"}\n'
@@ -100,6 +100,9 @@ TASK_CONFIG: dict[str, dict] = {
             "- insertion 类型（演员台词剧本无对应行）line_no 必须填 -1，禁止填剧本行号。\n"
             "- missing 类型 detail 必须为 null，禁止填任何字符串。\n"
             "- match 类型 detail 必须为 null。\n"
+            "- seg_idx 是本行实际对应的转录记录下标数组（0-indexed，见转录记录每段前的序号）："
+            "match/substitution 填实际说出该行的转录段下标（一行被拆成多段就填多个）；"
+            "missing（漏说）填 []；insertion 填演员多说内容所在的转录段下标。\n"
             "- corrected_segments 每条的 corrected 必须是修正后的字符串，禁止为 null；无法确认修正时直接不输出该条。\n"
             "- corrected_segments 只列出真正有修改的 segment，未改动的不出现；无需修正时输出空列表 []。\n"
             "- idx 是转录记录列表的下标（从 0 开始），对应 user message 中转录记录前的序号。"

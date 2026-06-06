@@ -42,6 +42,7 @@ from backend.core.script_import import (
     NoActiveSceneError,
     _clean_lines,
     apply_import,
+    import_single_scene,
     plan_import,
 )
 from backend.db.dal import DAL
@@ -796,3 +797,43 @@ def test_real_dal_apply_multi_scene_duplicate_code_within_batch(tmp_dal: DAL) ->
     assert script is not None
     assert script["version"] == 2
     assert "后半段" in script["raw_text"]
+
+
+# ---------------------------------------------------------------------------
+# 更新全本（on_conflict="version"）：命中已有场追加新版本 / 同内容幂等
+# ---------------------------------------------------------------------------
+
+
+def test_import_single_scene_default_skips_on_conflict(tmp_dal: DAL) -> None:
+    """默认 on_conflict='skip'：命中已有且已有脚本的场 → 返回 None，不刷版本（回归）。"""
+    s = _scene("1", [("夏雨", "你来了。")])
+    r1 = import_single_scene(s, target="multi_scene", synthetic_code="x", dal=tmp_dal)
+    assert r1 is not None
+    r2 = import_single_scene(s, target="multi_scene", synthetic_code="x", dal=tmp_dal)
+    assert r2 is None  # 默认跳过
+    assert tmp_dal.get_latest_script(r1["scene_id"])["version"] == 1
+
+
+def test_import_single_scene_version_appends_on_change(tmp_dal: DAL) -> None:
+    """on_conflict='version'：命中已有场且内容变了 → 同场追加新版本。"""
+    r1 = import_single_scene(
+        _scene("1", [("夏雨", "你来了。")]), target="multi_scene", synthetic_code="x", dal=tmp_dal
+    )
+    r2 = import_single_scene(
+        _scene("1", [("夏雨", "你来晚了。")]),
+        target="multi_scene", synthetic_code="x", dal=tmp_dal, on_conflict="version",
+    )
+    assert r2 is not None
+    assert r2["scene_id"] == r1["scene_id"]  # 同场
+    assert tmp_dal.get_latest_script(r1["scene_id"])["version"] == 2  # 追加新版本
+
+
+def test_import_single_scene_version_idempotent_same_content(tmp_dal: DAL) -> None:
+    """on_conflict='version' 但 raw_text 与最新版相同 → 幂等跳过，不刷版本。"""
+    s = _scene("1", [("夏雨", "你来了。")])
+    r1 = import_single_scene(s, target="multi_scene", synthetic_code="x", dal=tmp_dal)
+    r2 = import_single_scene(
+        s, target="multi_scene", synthetic_code="x", dal=tmp_dal, on_conflict="version"
+    )
+    assert r2 is None  # 内容无变化
+    assert tmp_dal.get_latest_script(r1["scene_id"])["version"] == 1

@@ -8,9 +8,11 @@ import type {
   CreateSceneResult,
   NoteCreateResponse,
   NoteListResponse,
+  ParseSingleResult,
   PatchTakeBody,
   QueryResponse,
   SceneDTO,
+  ScriptCommitResult,
   ScriptDTO,
   SpeakerDTO,
   TakeDTO,
@@ -87,6 +89,32 @@ export async function getSceneScript(sceneId: number): Promise<ScriptDTO | null>
     `/api/v1/scenes/${sceneId}/script`,
   )
   return data.script
+}
+
+// 整部戏跨场去重角色清单（GET /scenes/characters）。供声纹注册"选角色"下拉用。
+export async function listCharacters(): Promise<string[]> {
+  const data = await request<{ characters: string[] }>(`/api/v1/scenes/characters`)
+  return data.characters
+}
+
+// 单场解析预览（原生 FC，不入库）：一段剧本文本 → 结构化一场，供"选中场更新"对话框预览。
+export async function parseSingleScene(text: string): Promise<ParseSingleResult> {
+  return request<ParseSingleResult>(`/api/v1/scripts/parse-single`, {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  })
+}
+
+// 把选中场更新成新版本（版本追加；raw_text 与最新版相同 → skipped=true 不刷版本）。
+export async function updateSceneScript(
+  sceneId: number,
+  rawText: string,
+  lines: { character: string | null; text: string }[],
+): Promise<ScriptCommitResult> {
+  return request<ScriptCommitResult>(`/api/v1/scenes/${sceneId}/script`, {
+    method: "POST",
+    body: JSON.stringify({ raw_text: rawText, lines }),
+  })
 }
 
 export async function getTakes(sceneId?: number): Promise<TakeDTO[]> {
@@ -317,12 +345,15 @@ export async function uploadScript(file: File): Promise<UploadSavedResult> {
 
 // 阶段 2：启动后台解析（瞬时切场 → 后台逐场结构化）。立即返回 status=parsing。
 // 进度/结果通过轮询 listScriptUploads 的 status/detail 获取。
+// onConflict=version（multi_scene 更新全本）：命中已有场追加新版本（内容无变化则幂等跳过）。
+// 默认 skip：首次导入语义（命中已有场跳过不替换）。
 export function parseUpload(
   uploadId: number,
   target: "multi_scene" | "current_scene" = "multi_scene",
+  onConflict: "skip" | "version" = "skip",
 ): Promise<ScriptUploadInfo> {
   return request<ScriptUploadInfo>(
-    `/api/v1/scripts/uploads/${uploadId}/parse?target=${target}`,
+    `/api/v1/scripts/uploads/${uploadId}/parse?target=${target}&on_conflict=${onConflict}`,
     { method: "POST" },
   )
 }
@@ -548,6 +579,15 @@ export function useSpeakers() {
   })
 }
 
+export const charactersQueryKey = () => ["characters"] as const
+
+export function useCharacters() {
+  return useQuery({
+    queryKey: charactersQueryKey(),
+    queryFn: listCharacters,
+  })
+}
+
 export function useScenes() {
   return useQuery({
     queryKey: scenesQueryKey(),
@@ -684,10 +724,12 @@ export function useParseUpload() {
     mutationFn: ({
       uploadId,
       target,
+      onConflict,
     }: {
       uploadId: number
       target?: "multi_scene" | "current_scene"
-    }) => parseUpload(uploadId, target),
+      onConflict?: "skip" | "version"
+    }) => parseUpload(uploadId, target, onConflict),
   })
 }
 

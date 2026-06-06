@@ -406,11 +406,12 @@ class Orchestrator:
 
         l2_output = await self._deps.l2_runner(input_data, self._deps.llm_service)
 
-        # 写库：script_diff
+        # 写库：script_diff（juxtaposition = 并置文档，缺口③；前端两列对照直接读它）
         script_diff_dict = {
             "script_diff_summary": l2_output.script_diff_summary,
             "line_matches": [asdict(m) for m in l2_output.line_matches],
             "corrected_segments": [asdict(cs) for cs in l2_output.corrected_segments],
+            "juxtaposition": [asdict(j) for j in l2_output.juxtaposition],
         }
         self.dal.update_take_l2_output(take_id, script_diff_dict)
 

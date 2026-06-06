@@ -67,12 +67,31 @@ export interface ScriptDTO {
   lines: ScriptLineDTO[]
 }
 
+// 单场原生 FC 解析结果（POST /scripts/parse-single，不入库，供预览/确认）
+export interface ParseSingleResult {
+  scene_code: string | null
+  int_ext: string | null
+  time_of_day: string | null
+  location: string | null
+  lines: { character: string | null; text: string }[]
+}
+
+// 选中场更新结果（POST /scenes/{id}/script）。skipped=true → 内容无变化未新建版本
+export interface ScriptCommitResult {
+  scene_id: number
+  script_id: number
+  version: number
+  line_count: number
+  skipped: boolean
+}
+
 // ── L2 输出：takes.script_diff JSON 顶层形状（docs/specs/2026-05-27-l2-pipeline.md §）──
 
 export interface LineMatch {
   line_no: number // insertion 时为 -1
   diff_type: "match" | "missing" | "substitution" | "insertion"
   detail: string | null
+  seg_idx?: number[] // 对齐的转录段下标（juxtaposition 用），可缺省
 }
 
 // L2 修正输出：原始转录 → 对齐剧本后的文本。diff 显示的主内容。
@@ -82,10 +101,22 @@ export interface CorrectedSegment {
   corrected: string
 }
 
+// 并置文档一行（缺口③）：剧本台词 ‖ 实际说的。take 详情两列对照视图直接渲染它。
+// line_no=-1 → insertion（剧本无此行）；spoken_text=null → 漏说该行。
+export interface JuxtaLine {
+  line_no: number
+  character: string | null // 角色（剧本侧）；insertion 为 null
+  script_text: string | null // 剧本台词；insertion 为 null
+  spoken_text: string | null // 实际说的（转录原文）；漏说为 null
+  speaker: string | null // 谁说的（角色名/说话人N）；漏说为 null
+  diff_type: "match" | "missing" | "substitution" | "insertion" | null
+}
+
 export interface ScriptDiff {
   script_diff_summary: string | null // 无剧本场景可为 null
   line_matches: LineMatch[]
   corrected_segments?: CorrectedSegment[]
+  juxtaposition?: JuxtaLine[] // 并置文档；老库/无剧本路径可缺省
 }
 
 // ── Take DTO（dal.Take 投影）──

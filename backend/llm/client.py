@@ -9,6 +9,7 @@ StubClient：确定性 stub（测试用）。
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -17,6 +18,8 @@ from backend.llm.errors import ModelUnavailableError
 
 if TYPE_CHECKING:
     from backend.llm.multimodal import MultimodalGemma4Handler
+
+logger = logging.getLogger(__name__)
 
 # 默认模型路径，由环境变量覆盖
 _DEFAULT_MODEL_PATH = "models/gemma-4-E4B-it-Q4_K_M.gguf"
@@ -92,6 +95,14 @@ class GemmaClient:
             except ValueError:
                 pass
 
+        # GPU 优先、显存占满走 CPU（用户 2026-06-07：占满走 CPU、没占满走 GPU）。
+        # 主动查可用显存决定，不能只靠加载期 OOM 异常——Windows WDDM 显存超额不抛 OOM，
+        # 而是把显存页换到内存：Gemma "在 GPU" 但奇慢、L2 卡死超时（实测 take_id=7）。
+        if "n_gpu_layers" not in llama_kwargs:
+            params["n_gpu_layers"] = self._resolve_gpu_layers(
+                params.get("n_gpu_layers", -1), resolved_path
+            )
+
         # mmproj_path 给定 → 升级为多模态单实例（text/audio/image 三入口共用，方案 A，spec §5.1）。
         # 文本（L2 + 文本 NP）也借道这一份 handler，保证文本输入统一格式化。
         self._handler: MultimodalGemma4Handler | None = None
@@ -109,7 +120,10 @@ class GemmaClient:
 
         # self._llm 标 Any：llama_cpp 是底层封装边界，不让其精确返回类型（CreateChatCompletion
         # Response | Iterator）泄漏到本层（否则 result: dict 赋值处处需 cast/ignore）。
-        self._llm: Any = Llama(model_path=resolved_path, **params)  # type: ignore[arg-type]
+        # GPU 优先、显存装不下自动回落 CPU（用户 2026-06-07：GPU 优先、占满走 CPU 保底、先保证跑通）：
+        # 8GB 卡上 whisper+pyannote 已占满时 Gemma 上 GPU 会 OOM（Failed to load model /
+        # CUBLAS_ALLOC_FAILED）→ 捕获后用 n_gpu_layers=0 重试；大显存设备 GPU 加载成功则不触发。
+        self._llm: Any = self._load_with_cpu_fallback(Llama, resolved_path, params)
 
         # 多模态 handler 的 CHAT_FORMAT（继承 Gemma4ChatHandler）**不渲染工具声明**（无 FunctionGemma
         # <|tool> 宏），带 tools 的请求模型看不到工具 → auto 路径不调工具、forced 路径靠 grammar 兜。
@@ -119,6 +133,57 @@ class GemmaClient:
         self._text_tool_handler: Any = None
         if self._handler is not None:
             self._text_tool_handler = self._build_native_tool_handler()
+
+    @staticmethod
+    def _resolve_gpu_layers(wanted: int, model_path: str) -> int:
+        """想上 GPU（wanted≠0）时按**可用显存**决定：占满（free < 需求）→ 退 0（CPU）。
+
+        为何主动查而非靠加载期 OOM 异常：Windows WDDM 显存超额不抛 OOM，而是把显存页换到
+        系统内存 → Gemma "在 GPU" 但页换抖动、奇慢甚至卡死超时（实测 take_id=7 L2 60s 超时，
+        且无 OOM/回落日志）。故 take 时 whisper+pyannote 已占 GPU，主动判定让 Gemma 走 CPU。
+        需求估计 = gguf 大小 × 1.15 + 1GB（KV/计算缓冲）。无 CUDA/torch/查不到 → 保持 wanted。
+        大显存设备 free 足 → 保持 GPU。
+        """
+        if wanted == 0:
+            return 0
+        try:
+            import torch  # noqa: PLC0415
+
+            if not torch.cuda.is_available():
+                return wanted
+            free, _total = torch.cuda.mem_get_info()
+            need = os.path.getsize(model_path) * 1.15 + (1 << 30)
+            if free < need:
+                logger.warning(
+                    "可用显存 %.1fGB < Gemma 估计需求 %.1fGB → 走 CPU（GPU 已被 whisper/pyannote 占）",
+                    free / 1e9, need / 1e9,
+                )
+                return 0
+            logger.info("可用显存 %.1fGB 足够 → Gemma 上 GPU", free / 1e9)
+            return wanted
+        except Exception:  # noqa: BLE001 查显存失败不阻断，保持原意图
+            return wanted
+
+    @staticmethod
+    def _load_with_cpu_fallback(llama_cls: Any, model_path: str, params: dict) -> Any:
+        """加载 Llama；想上 GPU 但显存装不下 → 自动回落纯 CPU 重试。
+
+        record 模式下 whisper+pyannote 已占满 8GB，Gemma 上 GPU 会 OOM（llama_cpp 抛
+        'Failed to load model from file' / CUBLAS_ALLOC_FAILED）。捕获后用 n_gpu_layers=0
+        重试，保证 L2 跑通（慢点可接受）。已是纯 CPU(0) 还失败 → 真错误（不是显存），照抛。
+        大显存设备上首次 GPU 加载成功则不触发回落。用户 2026-06-07 定调：GPU 优先、CPU 保底。
+        """
+        wanted = params.get("n_gpu_layers", -1)
+        try:
+            return llama_cls(model_path=model_path, **params)
+        except Exception as exc:  # noqa: BLE001 — llama_cpp 加载失败抛裸 Exception/ValueError
+            if wanted == 0:
+                raise  # 本就纯 CPU 还失败 → 非显存问题，照抛
+            logger.warning(
+                "Gemma 上 GPU 加载失败（n_gpu_layers=%s，可能显存不足），回落 CPU 重试：%s",
+                wanted, exc,
+            )
+            return llama_cls(model_path=model_path, **{**params, "n_gpu_layers": 0})
 
     def _build_native_tool_handler(self) -> Any:
         """从 GGUF 内嵌 chat_template 建原生 FunctionGemma Jinja formatter（渲染 tools 声明）。
