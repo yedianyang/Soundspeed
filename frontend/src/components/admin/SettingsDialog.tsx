@@ -260,6 +260,18 @@ function FileNameFormatSettings() {
   const updateSeg = (key: "scene" | "shot" | "take", patch: Partial<SegFormat>) =>
     setFormat({ ...format, [key]: { ...format[key], ...patch } })
 
+  // 三段前缀下拉同构（只差 label/options/段键），抽成本地渲染函数避免三份拷贝。
+  const prefixField = (key: "scene" | "shot" | "take", label: string, options: readonly string[]) => (
+    <div className="grid gap-1 w-[4.5rem]">
+      <span className="text-[11px] text-muted-foreground">{label}</span>
+      <PrefixSelect
+        value={format[key].prefix}
+        options={options}
+        onChange={(v) => updateSeg(key, { prefix: v })}
+      />
+    </div>
+  )
+
   return (
     <div className="grid gap-2.5">
       <div className="flex items-center justify-between gap-2">
@@ -293,30 +305,9 @@ function FileNameFormatSettings() {
       {/* 前缀成一组、Take 补零+分隔符成一组；两组紧凑横排始终一行（不换行），窄屏横向滚动兜底。 */}
       <div className="flex items-end gap-x-5 overflow-x-auto pb-0.5">
         <div className="flex items-end gap-2 flex-shrink-0">
-          <div className="grid gap-1 w-[4.5rem]">
-            <span className="text-[11px] text-muted-foreground">Scene 前缀</span>
-            <PrefixSelect
-              value={format.scene.prefix}
-              options={SCENE_PREFIXES}
-              onChange={(v) => updateSeg("scene", { prefix: v })}
-            />
-          </div>
-          <div className="grid gap-1 w-[4.5rem]">
-            <span className="text-[11px] text-muted-foreground">Shot 前缀</span>
-            <PrefixSelect
-              value={format.shot.prefix}
-              options={SHOT_PREFIXES}
-              onChange={(v) => updateSeg("shot", { prefix: v })}
-            />
-          </div>
-          <div className="grid gap-1 w-[4.5rem]">
-            <span className="text-[11px] text-muted-foreground">Take 前缀</span>
-            <PrefixSelect
-              value={format.take.prefix}
-              options={TAKE_PREFIXES}
-              onChange={(v) => updateSeg("take", { prefix: v })}
-            />
-          </div>
+          {prefixField("scene", "Scene 前缀", SCENE_PREFIXES)}
+          {prefixField("shot", "Shot 前缀", SHOT_PREFIXES)}
+          {prefixField("take", "Take 前缀", TAKE_PREFIXES)}
         </div>
         <div className="flex items-end gap-2 flex-shrink-0">
           <div className="grid gap-1 w-28">
