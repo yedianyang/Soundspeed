@@ -93,7 +93,10 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
     })
     onNoteAdded?.()
     try {
-      await postVoiceNote(wav, clientId, ts)
+      // 带 CONN_ID（对齐文本 postNote）：后端 voice dispatch 判这条是 note 还是 query。
+      // query 分支的答案不在 202 里返回，靠 qp.answer.{CONN_ID} 气泡回灌（块③已建，
+      // useLiveConnection 收到该 topic 时同时清掉本 tab 悬挂的语音 pending，避免永久卡处理中）。
+      await postVoiceNote(wav, clientId, ts, CONN_ID)
     } catch {
       // 网络层失败 → 标失败态（用 client_id 精确定位），不卡处理中。upload_failed 区别于后端 NP timeout。
       useSessionStore.getState().noteFailed({ reason: "upload_failed", ts, client_id: clientId })

@@ -56,8 +56,9 @@ logger = logging.getLogger(__name__)
 #   note 分支落库副作用。接线时注意：orchestrator._finalize_np 收 awaitable，
 #   调用方需包 adapter 使契约对齐（Part C 负责）。
 #
-# _schedule_qp_broadcast: async (answer_text: str, conn_id: str, *, dal, service, cm) -> None
-#   query 分支广播已算好的答案（不是重新跑 run_qp_query）。
+# _schedule_qp_broadcast: async (answer_text: str, conn_id: str, *, client_id, dal, service, cm) -> None
+#   query 分支广播已算好的答案（不是重新跑 run_qp_query）。client_id 透传进 qp.answer
+#   payload，前端据此精确撤掉那条语音 pending（不盲清所有语音 pending）。
 #   注意与 run_qp_and_broadcast 区别：后者把 answer_text 当新 query 重跑一遍。
 #
 _persist_np_output_callable = None
@@ -170,6 +171,7 @@ async def run_voice_dispatch(
         hop_a_text=hop_a_text,
         tool_name=forced_name,
         conn_id=conn_id,
+        client_id=client_id,
         scene_context=scene_context,
         dal=dal,
         service=service,
@@ -237,6 +239,7 @@ async def _handle_query_branch(
     hop_a_text: str,
     tool_name: str,
     conn_id: str,
+    client_id: str | None = None,
     scene_context: str,
     dal: "DAL",
     service: "LLMService",
@@ -289,7 +292,9 @@ async def _handle_query_branch(
         logger.error("query 分支失败 tool_name=%s: %r", tool_name, exc)
 
     if _schedule_qp_broadcast is not None:
-        await _schedule_qp_broadcast(answer, conn_id, dal=dal, service=service, cm=cm)
+        await _schedule_qp_broadcast(
+            answer, conn_id, client_id=client_id, dal=dal, service=service, cm=cm
+        )
     return {"kind": "query"}
 
 

@@ -130,8 +130,8 @@ def test_query_branch_broadcasts(monkeypatch):
     )
     broadcast_calls = []
 
-    async def _fake_broadcast(answer_text, conn_id, *, dal, service, cm):
-        broadcast_calls.append(conn_id)
+    async def _fake_broadcast(answer_text, conn_id, *, client_id=None, dal, service, cm):
+        broadcast_calls.append((conn_id, client_id))
 
     monkeypatch.setattr(
         "backend.pipelines.voice_dispatch._schedule_qp_broadcast",
@@ -150,7 +150,8 @@ def test_query_branch_broadcasts(monkeypatch):
         cm=cm,
         scene_context="Scene 1: 大堂",
     ))
-    assert broadcast_calls == ["c2"]
+    # conn_id 用于广播 topic，client_id 透传进 payload 供前端精确撤语音 pending。
+    assert broadcast_calls == [("c2", "cid2")]
     # 验证工具返回 JSON 正确注入 messages 最后一帧
     expected_tool_return = json.dumps({"count": 7}, ensure_ascii=False)
     assert captured_tool_messages, "run_tool_loop 未被调用"
@@ -335,7 +336,7 @@ def test_query_branch_broadcast_payload_is_dataclass(monkeypatch):
             dataclasses.asdict(payload)  # plain dict 会 TypeError
 
     # 先用「修复前」的裸 dict 版本验证它确实报错（红阶段）
-    async def _wrong_wrapper(answer: str, conn_id: str, *, dal, service, cm) -> None:
+    async def _wrong_wrapper(answer: str, conn_id: str, *, client_id=None, dal, service, cm) -> None:
         cm.broadcast(f"qp.answer.{conn_id}", {"connection_id": conn_id, "answer_text": answer})
 
     monkeypatch.setattr(
@@ -386,9 +387,12 @@ def test_query_branch_broadcast_payload_is_dataclass_after_fix(monkeypatch):
             self.calls.append((topic, payload))
             dataclasses.asdict(payload)  # 断言不崩
 
-    # 修复后的正确 wrapper：传 QpAnswerPayload 和 QP_ANSWER 常量
-    async def _correct_wrapper(answer: str, conn_id: str, *, dal, service, cm) -> None:
-        cm.broadcast(f"{QP_ANSWER}.{conn_id}", QpAnswerPayload(connection_id=conn_id, answer_text=answer))
+    # 修复后的正确 wrapper：传 QpAnswerPayload 和 QP_ANSWER 常量，client_id 透传进 payload。
+    async def _correct_wrapper(answer: str, conn_id: str, *, client_id=None, dal, service, cm) -> None:
+        cm.broadcast(
+            f"{QP_ANSWER}.{conn_id}",
+            QpAnswerPayload(connection_id=conn_id, answer_text=answer, client_id=client_id),
+        )
 
     from backend.pipelines.voice_dispatch import run_voice_dispatch
 
@@ -424,3 +428,4 @@ def test_query_branch_broadcast_payload_is_dataclass_after_fix(monkeypatch):
     assert isinstance(payload, QpAnswerPayload), f"payload 类型不对: {type(payload)}"
     assert payload.connection_id == "c-payload2"
     assert payload.answer_text == "第一场拍了 3 条。"
+    assert payload.client_id == "cid-payload2"  # client_id 透传进 payload（前端据此精确撤语音 pending）

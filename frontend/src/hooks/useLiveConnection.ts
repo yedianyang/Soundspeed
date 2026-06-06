@@ -121,7 +121,13 @@ export function useLiveConnection(): void {
         }
         if (topic === `qp.answer.${CONN_ID}`) {
           // 入口调度器查询答案：广播是 send-to-all，按 CONN_ID 后缀认领本 tab 的答案，其余 tab 过滤掉。
-          s.setQpAnswer((payload as QpAnswerMsg).answer_text)
+          const m = payload as QpAnswerMsg
+          s.setQpAnswer(m.answer_text)
+          // 语音 query 复用同一气泡：语音提交 202 时不知 note/query，乐观插了语音 pending；
+          // 这条是 query → 不走 NP、无 note.processed，按 client_id 精确撤掉那条语音 pending
+          // （后端在 payload 带回 client_id），不盲清所有语音 pending——避免误清并发在飞的语音 note。
+          // 文本 query 不带 client_id（其 pending 已在 postNote.then(kind==="query") 按 client_id 撤）。
+          if (m.client_id) s.removePending(m.client_id)
           return
         }
         if (topic === "device.warning") {

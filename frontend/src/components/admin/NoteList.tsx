@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { Card } from "@/components/ui/card"
 import { getTakeNotes, postNote, postVoiceNote } from "@/lib/api"
+import { CONN_ID } from "@/lib/connId"
 import { useSessionStore } from "@/store/session"
 import type { NoteDTO, PendingNote } from "@/types/api"
 
@@ -44,9 +45,12 @@ export default function NoteList({ takeId, refreshKey }: NoteListProps) {
   // 语音条目（有 voiceBlob）重传录音 WAV，文本条目重投原文。
   const handleRetry = (pn: PendingNote) => {
     retryPending(pn.client_id)
+    // 带 CONN_ID（对齐初次提交 MemoInput）：后端据此走 voice/text dispatch 判 note/query，
+    // query 答案靠 qp.answer.{CONN_ID} 气泡回灌。漏带则 conn_id=None → 直落 NP-only 分支，
+    // 被判 query 的条目重试后永远等不到答案、卡「处理中」。
     const resubmit = pn.voiceBlob
-      ? postVoiceNote(pn.voiceBlob, pn.client_id, pn.ts)
-      : postNote(pn.rawText, undefined, pn.client_id)
+      ? postVoiceNote(pn.voiceBlob, pn.client_id, pn.ts, CONN_ID)
+      : postNote(pn.rawText, undefined, pn.client_id, CONN_ID)
     resubmit.catch(() => {
       noteFailed({ reason: "upload_failed", ts: pn.ts, client_id: pn.client_id })
     })

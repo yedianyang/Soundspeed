@@ -287,7 +287,13 @@ class ViewerCountPayload:
 
 @dataclass(frozen=True)
 class QpAnswerPayload:
-    """qp.answer.{conn_id} 的 payload（QP 完成后广播，客户端按 conn_id 认领）。"""
+    """qp.answer.{conn_id} 的 payload（QP 完成后广播，客户端按 conn_id 认领）。
+
+    client_id：仅语音 query 分支带上（前端乐观插的语音 pending 去重键）。前端据此精确
+    removePending 那一条，不再盲清所有语音 pending（避免误清并发在飞的语音 note）。文本 query
+    路径不带（其 pending 已在 postNote.then(kind==="query") 按 client_id 撤），默认 None。
+    """
 
     connection_id: str
     answer_text: str
+    client_id: str | None = None

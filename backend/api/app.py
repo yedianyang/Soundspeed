@@ -115,11 +115,20 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
                 )
 
             async def _broadcast_wrapper(
-                answer: str, conn_id: str, *, dal: Any, service: Any, cm: Any
+                answer: str,
+                conn_id: str,
+                *,
+                client_id: str | None = None,
+                dal: Any,
+                service: Any,
+                cm: Any,
             ) -> None:
+                # client_id 进 payload：前端据此精确撤那条语音 pending（不盲清所有语音 pending）。
                 cm.broadcast(
                     f"{QP_ANSWER}.{conn_id}",
-                    QpAnswerPayload(connection_id=conn_id, answer_text=answer),
+                    QpAnswerPayload(
+                        connection_id=conn_id, answer_text=answer, client_id=client_id
+                    ),
                 )
 
             _vd._persist_np_output_callable = _persist_np_wrapper  # type: ignore[assignment]

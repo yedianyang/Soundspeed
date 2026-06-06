@@ -244,9 +244,12 @@ export interface NoteCreateResponse {
 }
 
 // WS qp.answer.{conn_id} payload（入口调度器 query 分支：QP 跑完把答案广播回发起 tab）。
+// client_id：仅语音 query 带（前端乐观插的语音 pending 去重键）。据此精确 removePending 那一条，
+// 不再盲清所有语音 pending。文本 query 不带（其 pending 已在 postNote.then 按 client_id 撤）。
 export interface QpAnswerMsg {
   connection_id: string
   answer_text: string
+  client_id?: string
 }
 
 // 前端 pending note（已提交、等待 LLM 归置）
