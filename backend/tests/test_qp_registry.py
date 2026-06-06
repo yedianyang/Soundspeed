@@ -35,12 +35,13 @@ def test_note_tool_still_registered() -> None:
     assert schema2["function"]["name"] == "report_script_analysis"
 
 
-def test_list_tools_exact_seven() -> None:
-    """注册表恰好 7 个工具，不多不少（防意外重复注册或丢失）。"""
+def test_list_tools_exact_eight() -> None:
+    """注册表恰好 8 个工具，不多不少（防意外重复注册或丢失）。"""
     all_tools = registry.list_tools()
     expected = [
         "report_script_analysis",
         "structure_note",
+        "route_memo",
         "count_takes",
         "get_scene_info",
         "list_characters",
