@@ -80,7 +80,7 @@ async def run_tool_loop(
       模型下一跳自纠；不抛穿，循环继续。
     - step C executor 错误（_run_executor 内已包）→ 同样回喂，不抛穿。
     """
-    for hop in range(max_hops):
+    for _ in range(max_hops):
         # step A — auto 跳：抠工具名。
         # ✅ Task 7.5 probe 已实证「假设 7」成立：service.infer 在 auto 跳返回 FunctionGemma
         #   content 串（finish_reason=stop，不撞 service 护栏），happy path 即此分支。
@@ -147,8 +147,10 @@ async def run_qp_query(
     timeout: float = 30.0,
 ) -> str:
     """QP 入口：拼场次目录 + 极简 system → 跑两步走循环 → 返回自然语言答案。"""
+    # 场次目录是同步 SQLite I/O，包 to_thread 不阻塞事件循环（与 step C executor 的 to_thread 一致）。
+    catalog = await asyncio.to_thread(_build_scene_catalog, dal)
     messages = [
         {"role": "system", "content": _QP_SYSTEM},
-        {"role": "user", "content": f"{_build_scene_catalog(dal)}\n\n用户提问：{text}"},
+        {"role": "user", "content": f"{catalog}\n\n用户提问：{text}"},
     ]
     return await run_tool_loop(messages, service=service, dal=dal, timeout=timeout)

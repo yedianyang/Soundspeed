@@ -12,6 +12,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from backend.db.dal import DAL
 
+# count_takes / get_scene_info / list_characters 的 scene_ref 参数说明同源（改文案只改一处）。
+_SCENE_REF_DESC = "场次引用，如 '第3场' / '3' / 'Scene_3'"
+
 
 def build_count_takes_tool() -> dict:
     """构造 count_takes OpenAI 风格 tool dict。
@@ -29,7 +32,7 @@ def build_count_takes_tool() -> dict:
                 "properties": {
                     "scene_ref": {
                         "type": "string",
-                        "description": "场次引用，如 '第3场' / '3' / 'Scene_3'",
+                        "description": _SCENE_REF_DESC,
                     },
                     "status": {
                         "type": "string",
@@ -59,7 +62,7 @@ def build_get_scene_info_tool() -> dict:
                 "properties": {
                     "scene_ref": {
                         "type": "string",
-                        "description": "场次引用，如 '第3场' / '3' / 'Scene_3'",
+                        "description": _SCENE_REF_DESC,
                     },
                 },
                 "required": ["scene_ref"],
@@ -84,7 +87,7 @@ def build_list_characters_tool() -> dict:
                 "properties": {
                     "scene_ref": {
                         "type": "string",
-                        "description": "场次引用，如 '第3场' / '3' / 'Scene_3'",
+                        "description": _SCENE_REF_DESC,
                     },
                 },
                 "required": ["scene_ref"],
