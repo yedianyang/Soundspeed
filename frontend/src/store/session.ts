@@ -110,6 +110,7 @@ interface SessionState {
   noteProcessed: (m: NoteProcessedMsg) => void
   noteFailed: (m: NoteFailedMsg) => void
   retryPending: (clientId: string) => void
+  dismissPending: (clientId: string) => void
   dismissReceipt: (clientId: string) => void
   addQa: (q: QaItem) => void
   resolveQa: (clientId: string, answer: string) => void
@@ -344,6 +345,10 @@ export const useSessionStore = create<SessionState>((set) => ({
         p.client_id === clientId ? { ...p, failedReason: undefined } : p,
       ),
     })),
+
+  // 放弃失败 pending：用户主动关掉这条失败行，不再重试，直接移除。
+  dismissPending: (clientId) =>
+    set((s) => ({ pendingNotes: s.pendingNotes.filter((p) => p.client_id !== clientId) })),
 
   // 就地回执 3s 后由组件调用，按 client_id 移除（让回执飘走，不长期占席）。
   dismissReceipt: (clientId) =>

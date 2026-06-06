@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Loader2, ChevronDown } from "lucide-react"
+import { Loader2, ChevronDown, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { feedBlock } from "@/lib/styles"
 import { useSessionStore } from "@/store/session"
@@ -47,9 +47,17 @@ function ReceiptRow({
   )
 }
 
-// pending note：处理中（转圈 + 当条内容）/ 失败（alert 块 + 当条内容 + 原因 + 重试）。
+// pending note：处理中（转圈 + 当条内容）/ 失败（alert 块 + 当条内容 + 原因 + 重试 + 放弃）。
 // 始终显示当条内容（原文优先，语音无原文则占位 content），让多条并存时能区分是哪条。
-function PendingRow({ pn, onRetry }: { pn: PendingNote; onRetry: (pn: PendingNote) => void }) {
+function PendingRow({
+  pn,
+  onRetry,
+  onDismiss,
+}: {
+  pn: PendingNote
+  onRetry: (pn: PendingNote) => void
+  onDismiss: (clientId: string) => void
+}) {
   const failed = pn.failedReason != null
   const label = pn.rawText || pn.content
   if (!failed) {
@@ -62,6 +70,7 @@ function PendingRow({ pn, onRetry }: { pn: PendingNote; onRetry: (pn: PendingNot
     )
   }
   // 失败 = alert 块（更重主题色底 + ring），与处理中轻行、答案淡主题色块拉开档差。
+  // 重试（同 client_id 重投）+ 放弃（× 移除这条，不再处理）。
   return (
     <div className={cn(feedBlock.alert, "flex items-center gap-2 px-2.5 py-1.5 text-sm")}>
       <span className="flex-1 min-w-0 truncate text-foreground">{label}</span>
@@ -71,6 +80,13 @@ function PendingRow({ pn, onRetry }: { pn: PendingNote; onRetry: (pn: PendingNot
       <button onClick={() => onRetry(pn)} className="text-primary font-medium hover:underline flex-shrink-0">
         重试
       </button>
+      <button
+        onClick={() => onDismiss(pn.client_id)}
+        className="flex-shrink-0 text-muted-foreground/70 hover:text-foreground"
+        title="放弃这条"
+      >
+        <X className="size-3.5" />
+      </button>
     </div>
   )
 }
@@ -78,7 +94,15 @@ function PendingRow({ pn, onRetry }: { pn: PendingNote; onRetry: (pn: PendingNot
 // QP 问答行（B2 单行）：查询中转圈 / 失败琥珀实心块 / 完成单行；长答案截断点开就地展开。
 // query 项不像 note 回执 3s 自走——lingers 供场记看完，由档案/收起手动清。
 // 「✎ 记为备注」= note→query 误判兜底（较轻），淡链接，把这条问题改当 note 记。
-function QaRow({ q, onAsNote }: { q: QaItem; onAsNote: (question: string) => void }) {
+function QaRow({
+  q,
+  onAsNote,
+  onDismiss,
+}: {
+  q: QaItem
+  onAsNote: (question: string) => void
+  onDismiss: (clientId: string) => void
+}) {
   const [expanded, setExpanded] = useState(false)
   if (q.status === "processing") {
     return (
@@ -89,12 +113,19 @@ function QaRow({ q, onAsNote }: { q: QaItem; onAsNote: (question: string) => voi
       </div>
     )
   }
-  // 警告/失败 = alert 块（更重主题色底 + ring）。显示当条问题 + 失败原因以区分。
+  // 警告/失败 = alert 块（更重主题色底 + ring）。显示当条问题 + 失败原因以区分 + 放弃。
   if (q.status === "failed") {
     return (
       <div className={cn(feedBlock.alert, "flex items-center gap-2 px-2.5 py-1.5 text-sm")}>
         <span className="flex-1 min-w-0 truncate text-foreground">{q.question}</span>
         <span className="text-xs text-muted-foreground flex-shrink-0">{q.failedReason ?? "查询失败"}</span>
+        <button
+          onClick={() => onDismiss(q.client_id)}
+          className="flex-shrink-0 text-muted-foreground/70 hover:text-foreground"
+          title="放弃这条"
+        >
+          <X className="size-3.5" />
+        </button>
       </div>
     )
   }
@@ -144,6 +175,7 @@ export default function InlineFeedbackQueue() {
   const qaItems = useSessionStore((s) => s.qaItems)
   const dismissReceipt = useSessionStore((s) => s.dismissReceipt)
   const dismissQaInline = useSessionStore((s) => s.dismissQaInline)
+  const dismissPending = useSessionStore((s) => s.dismissPending)
   const retryPending = useSessionStore((s) => s.retryPending)
   const noteFailed = useSessionStore((s) => s.noteFailed)
 
@@ -172,7 +204,14 @@ export default function InlineFeedbackQueue() {
   const rows = [
     ...pendingNotes.map((pn) => ({
       ts: pn.ts,
-      node: <PendingRow key={`p-${pn.client_id}`} pn={pn} onRetry={handleRetry} />,
+      node: (
+        <PendingRow
+          key={`p-${pn.client_id}`}
+          pn={pn}
+          onRetry={handleRetry}
+          onDismiss={dismissPending}
+        />
+      ),
     })),
     ...feedReceipts.map((r) => ({
       ts: r.ts,
@@ -194,6 +233,7 @@ export default function InlineFeedbackQueue() {
             key={`q-${q.client_id}`}
             q={q}
             onAsNote={(question) => handleAsNote(question, q.client_id)}
+            onDismiss={dismissQaInline}
           />
         ),
       })),
