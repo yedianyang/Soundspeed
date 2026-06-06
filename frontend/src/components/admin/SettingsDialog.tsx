@@ -290,38 +290,40 @@ function FileNameFormatSettings() {
         </SelectContent>
       </Select>
 
-      {/* 全部压一行：Scene/Shot/Take 前缀紧凑靠左，Take 补零 + 分隔符靠右（中间留空隙）。 */}
-      <div className="flex items-end gap-2 flex-wrap">
-        <div className="grid gap-1 w-[4.75rem]">
-          <span className="text-[11px] text-muted-foreground">Scene 前缀</span>
-          <PrefixSelect
-            value={format.scene.prefix}
-            options={SCENE_PREFIXES}
-            onChange={(v) => updateSeg("scene", { prefix: v })}
-          />
+      {/* 前缀成一组、Take 补零+分隔符成一组；两组紧凑横排始终一行（不换行），窄屏横向滚动兜底。 */}
+      <div className="flex items-end gap-x-5 overflow-x-auto pb-0.5">
+        <div className="flex items-end gap-2 flex-shrink-0">
+          <div className="grid gap-1 w-[4.5rem]">
+            <span className="text-[11px] text-muted-foreground">Scene 前缀</span>
+            <PrefixSelect
+              value={format.scene.prefix}
+              options={SCENE_PREFIXES}
+              onChange={(v) => updateSeg("scene", { prefix: v })}
+            />
+          </div>
+          <div className="grid gap-1 w-[4.5rem]">
+            <span className="text-[11px] text-muted-foreground">Shot 前缀</span>
+            <PrefixSelect
+              value={format.shot.prefix}
+              options={SHOT_PREFIXES}
+              onChange={(v) => updateSeg("shot", { prefix: v })}
+            />
+          </div>
+          <div className="grid gap-1 w-[4.5rem]">
+            <span className="text-[11px] text-muted-foreground">Take 前缀</span>
+            <PrefixSelect
+              value={format.take.prefix}
+              options={TAKE_PREFIXES}
+              onChange={(v) => updateSeg("take", { prefix: v })}
+            />
+          </div>
         </div>
-        <div className="grid gap-1 w-[4.75rem]">
-          <span className="text-[11px] text-muted-foreground">Shot 前缀</span>
-          <PrefixSelect
-            value={format.shot.prefix}
-            options={SHOT_PREFIXES}
-            onChange={(v) => updateSeg("shot", { prefix: v })}
-          />
-        </div>
-        <div className="grid gap-1 w-[4.75rem]">
-          <span className="text-[11px] text-muted-foreground">Take 前缀</span>
-          <PrefixSelect
-            value={format.take.prefix}
-            options={TAKE_PREFIXES}
-            onChange={(v) => updateSeg("take", { prefix: v })}
-          />
-        </div>
-        <div className="ml-auto flex items-end gap-2">
-          <div className="grid gap-1 w-[5.5rem]">
+        <div className="flex items-end gap-2 flex-shrink-0">
+          <div className="grid gap-1 w-28">
             <span className="text-[11px] text-muted-foreground">Take 补零</span>
             <PadSelect value={format.take.pad} onChange={(v) => updateSeg("take", { pad: v })} />
           </div>
-          <div className="grid gap-1 w-[5.5rem]">
+          <div className="grid gap-1 w-28">
             <span className="text-[11px] text-muted-foreground">分隔符</span>
             <Select value={format.sep} onValueChange={(v) => setFormat({ ...format, sep: v })}>
               <SelectTrigger className="h-9 w-full">

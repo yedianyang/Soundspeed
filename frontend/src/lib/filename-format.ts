@@ -88,10 +88,11 @@ export function loadFileNameFormat(): FileNameFormat {
     const raw = localStorage.getItem(LS_KEY)
     if (!raw) return DEFAULT_FILENAME_FORMAT
     const parsed = JSON.parse(raw) as Partial<FileNameFormat>
-    // 浅合并默认，容旧/缺字段。
+    // 浅合并默认，容旧/缺字段。补零只用在 Take —— scene/shot.pad 强制归一为 0
+    //（UI 不再暴露 Scene/Shot 补零，归一掉 localStorage 里的旧补零值）。
     return {
-      scene: { ...DEFAULT_FILENAME_FORMAT.scene, ...parsed.scene },
-      shot: { ...DEFAULT_FILENAME_FORMAT.shot, ...parsed.shot },
+      scene: { prefix: parsed.scene?.prefix ?? DEFAULT_FILENAME_FORMAT.scene.prefix, pad: 0 },
+      shot: { prefix: parsed.shot?.prefix ?? DEFAULT_FILENAME_FORMAT.shot.prefix, pad: 0 },
       take: { ...DEFAULT_FILENAME_FORMAT.take, ...parsed.take },
       sep: parsed.sep ?? DEFAULT_FILENAME_FORMAT.sep,
     }
