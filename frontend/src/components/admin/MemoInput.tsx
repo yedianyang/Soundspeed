@@ -8,14 +8,10 @@ import { useVoiceRecorder } from "@/hooks/useVoiceRecorder"
 import { useSessionStore } from "@/store/session"
 import type { NoteCreateResponse } from "@/types/api"
 
-interface MemoInputProps {
-  onNoteAdded?: () => void
-}
-
 // 底部栏的打字 memo 输入（场记真实输入口）。接 POST /notes；类别走 @语法（如「@keep 第三条好」），
-// 不打前缀默认 note。提交后乐观插入 pending note（队列由上方 NoteList 显示「处理中」），
+// 不打前缀默认 note。提交后乐观插入 pending note（队列由就地反馈区显示「处理中」），
 // WS note.processed 落定后转实。麦克风按钮按住录音（4.L）→ 16k WAV → POST /notes/voice → Gemma 原生音频归置。
-export default function MemoInput({ onNoteAdded }: MemoInputProps) {
+export default function MemoInput() {
   const [text, setText] = useState("")
   const [sending, setSending] = useState(false)
   const addPendingNote = useSessionStore((s) => s.addPendingNote)
@@ -33,7 +29,6 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
     if (/^[?？]/.test(trimmed)) {
       const question = trimmed.replace(/^[?？]\s*/, "")
       setText("")
-      onNoteAdded?.()
       await runQuery(question) // 乐观 pending + done/failed 自管，异常已内吞
       setSending(false)
       return
@@ -51,7 +46,6 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
         rawText: trimmed, // 失败重试据此重投同文本
       })
       setText("")
-      onNoteAdded?.()
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "提交失败"
       alert(msg)
@@ -83,7 +77,6 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
       rawText: "",
       voiceBlob: wav,
     })
-    onNoteAdded?.()
     try {
       await postVoiceNote(wav, clientId, ts)
     } catch {

@@ -397,8 +397,3 @@ export const useSessionStore = create<SessionState>((set) => ({
   // 清实时转录（REC 开始 / dev 注入开始时调，避免上一条 take 的转录残留）。
   resetSegments: () => set(() => ({ segments: { ch1: [], ch2: [] } })),
 }))
-
-// ⚠ 仅 dev：暴露 store 句柄供无后端时 Playwright 注入状态做视觉验证（P2–P5）。P6 删。
-if (import.meta.env.DEV) {
-  ;(window as unknown as { __session?: typeof useSessionStore }).__session = useSessionStore
-}

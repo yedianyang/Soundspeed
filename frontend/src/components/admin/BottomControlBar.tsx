@@ -72,9 +72,6 @@ interface BottomControlBarProps {
   sceneBusy?: boolean
   takeBusy?: boolean
 
-  // 打字 memo 提交后回调（触发 NoteList 刷新已落库 notes）。
-  onNoteAdded?: () => void
-
   // ── P5：LLM 反馈档案一级入口（QP 问答 + L2 推送全历史）。未读点驱动来自 store.archiveUnread。──
   onOpenArchive: () => void
   archiveUnread: number
@@ -111,7 +108,6 @@ export default function BottomControlBar({
   undoBusy = false,
   sceneBusy = false,
   takeBusy = false,
-  onNoteAdded,
   onOpenArchive,
   archiveUnread,
   llmState,
@@ -160,7 +156,7 @@ export default function BottomControlBar({
     <div className="flex-shrink-0 border-t bg-background">
       {/* Memo input（真实打字 memo 输入口；类别走 @语法，Mic 预留语音入口）*/}
       <div className="relative z-30 mx-auto w-full max-w-screen-2xl px-4 pt-2 pb-1.5">
-        <MemoInput onNoteAdded={onNoteAdded} />
+        <MemoInput />
       </div>
 
       {/* Controls: left stack + right REC (absolute)。max-w 容器让超宽屏 REC 不贴 viewport 右、跟控制区一组。 */}

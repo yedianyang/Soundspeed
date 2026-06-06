@@ -118,7 +118,6 @@ export default function AdminHome() {
   const [sideTab, setSideTab] = useState("script")
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [archiveOpen, setArchiveOpen] = useState(false)
-  const [noteRefresh, setNoteRefresh] = useState(0)
   // 本 take 在场演员（按 Rec 时传 startTake；录制中锁定不可改）
   const [takeSpeakerIds, setTakeSpeakerIds] = useState<number[]>([])
 
@@ -719,8 +718,8 @@ export default function AdminHome() {
       <div className="relative flex-shrink-0">
         {/* Note 队列浮层：从底栏 MemoInput 顶部向上延伸，半透明盖在 main 上，上圆角下直角。
             bottom-[calc(100%-26px)]：浮层底边藏进 pill 顶下 17px（26 = 9 缝隙 + 17 藏量），由 pill(z-30)
-            盖住，形成从输入框背后弹出。该距离恒定，不随控制行/REC 高度变。无 note 时 NoteList 返回 null。
-            pointer-events-none 让浮层 padding 区穿透到 main；NoteList 的 Card 自带 pointer-events-auto 可滚。 */}
+            盖住，形成从输入框背后弹出。该距离恒定，不随控制行/REC 高度变。队列为空时 InlineFeedbackQueue 返回 null。
+            pointer-events-none 让浮层 padding 区穿透到 main；InlineFeedbackQueue 的 Card 自带 pointer-events-auto 可滚。 */}
         <div className="pointer-events-none absolute inset-x-0 bottom-[calc(100%-26px)] z-20 px-4">
           <InlineFeedbackQueue />
         </div>
@@ -777,8 +776,6 @@ export default function AdminHome() {
         // ── 1.x：本 take 在场演员选择（diarization 回填匹配范围）──
         speakerIds={takeSpeakerIds}
         onSpeakerIdsChange={setTakeSpeakerIds}
-        // 打字 memo（已下沉到底栏 MemoInput）提交后刷新 NoteList
-        onNoteAdded={() => setNoteRefresh((k) => k + 1)}
         // P5：LLM 反馈一级入口 —— 打开档案 Sheet 并清未读。
         onOpenArchive={() => {
           setArchiveOpen(true)
