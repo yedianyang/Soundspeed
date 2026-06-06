@@ -287,7 +287,13 @@ class ViewerCountPayload:
 
 @dataclass(frozen=True)
 class QpAnswerPayload:
-    """qp.answer.{conn_id} 的 payload（QP 完成后广播，客户端按 conn_id 认领）。"""
+    """qp.answer.{conn_id} 的 payload（QP 完成后广播，客户端按 conn_id 认领）。
+
+    client_id：发起这条 query 的前端乐观去重键。文本 query 由 /notes 调度分支透传（队列模型
+    据此把答案落到对应那条 qaItem）；语音 query 由 voice dispatch 透传（精确撤掉对应语音 pending）。
+    直连 /api/v1/query demo 不带，默认 None。与 voice-qp 共享同一字段契约。
+    """
 
     connection_id: str
     answer_text: str
+    client_id: str | None = None
