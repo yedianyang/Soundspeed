@@ -77,9 +77,10 @@ export function LLMArchiveSheet({
         className="absolute inset-x-0 bottom-full h-screen z-30 bg-foreground/10"
         onClick={() => onOpenChange(false)}
       />
-      {/* 浮层面板：底边贴 dock 顶（输入框上沿），向上展开。 */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-full z-40 px-2 pb-1">
-        <div className="pointer-events-auto flex max-h-[70vh] flex-col overflow-hidden rounded-t-2xl border bg-background shadow-2xl">
+      {/* 浮层面板：左右铺满 viewport，底边贴 dock 顶（输入框上沿）无缝相连，向上展开。
+          只上圆角 + 顶/左右边框（无底边框），向上阴影——底边与底栏直接相接、不浮起。 */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-full z-40">
+        <div className="pointer-events-auto flex max-h-[70vh] flex-col overflow-hidden rounded-t-2xl border-t border-x bg-background shadow-[0_-12px_28px_-20px_rgba(0,0,0,0.25)]">
           <header className="flex flex-shrink-0 items-center justify-between border-b px-4 py-3">
             <div className="flex items-center gap-2">
               <span className="text-base font-semibold text-primary">LLM 反馈</span>

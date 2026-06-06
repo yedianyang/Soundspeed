@@ -400,7 +400,7 @@ export default function BottomControlBar({
               variant="ghost"
               size="default"
               onClick={onOpenArchive}
-              className="flex-none gap-1.5 h-10 px-4 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform"
+              className="flex-none gap-1.5 h-9 px-3 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform"
               title="LLM 反馈历史：QP 问答 + L2 推送全历史"
             >
               <span
