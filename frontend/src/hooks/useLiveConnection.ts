@@ -121,10 +121,12 @@ export function useLiveConnection(): void {
         }
         if (topic === `qp.answer.${CONN_ID}`) {
           // 入口调度器查询答案：广播 send-to-all，按 CONN_ID 后缀认领本 tab，其余 tab 过滤掉。
-          // 队列模型：按 client_id resolveQa 到对应那条 qaItem（文本 query 由 /notes 分支透传 client_id；
-          // 缺 client_id 的旧广播无对应 qaItem，忽略）。「其实是提问」强制查询走同步 postQuery 不经此路。
+          // 队列模型 promote：按 client_id 调 qpAnswerArrived。文本 query 命中预建的 processing
+          // qaItem（/notes 分支已 addQa）→ 置 done + answer；语音 query 此刻才知是 query，命中
+          // 那条语音 pending → 撤 pending 并新建一条 done qaItem 进队列/档案。缺 client_id 的旧广播
+          // 无对应项 → no-op。「其实是提问」强制查询走同步 postQuery 不经此路。
           const m = payload as QpAnswerMsg
-          if (m.client_id) s.resolveQa(m.client_id, m.answer_text)
+          if (m.client_id) s.qpAnswerArrived(m.client_id, m.answer_text)
           return
         }
         if (topic === "device.warning") {

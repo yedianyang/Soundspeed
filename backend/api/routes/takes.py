@@ -23,6 +23,7 @@ TakeDTO 有意省略 performer_issues / audio_quality（codex P2）：
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Literal
@@ -46,8 +47,13 @@ from backend.core.events import (
 )
 from backend.pipelines.memo_route import classify_memo
 from backend.pipelines.note_parse import NoteParseError, parse_note
+from backend.pipelines.voice_dispatch import run_voice_dispatch
 
 logger = logging.getLogger(__name__)
+
+# voice dispatch fire-and-forget task 持有集：防 asyncio.create_task 结果被 GC（Python 文档建议）。
+# 对齐 query.py 的 _qp_tasks 模式。
+_voice_dispatch_tasks: set[asyncio.Task] = set()
 
 router = APIRouter(prefix="/api/v1", tags=["takes"])
 
@@ -416,12 +422,15 @@ async def create_voice_note(
     file: UploadFile = File(...),
     client_id: str = Form(...),
     ts: float | None = Form(None),
+    conn_id: str | None = Form(None),
     _: None = Depends(require_admin),
 ) -> dict:
-    """提交语音 note（4.K）：浏览器麦 WAV 直传 → fire-and-forget 语音 NP → 返回 202。
+    """提交语音 note（4.K / C1）：浏览器麦 WAV 直传 → fire-and-forget → 返回 202。
 
-    与 POST /notes（文本）对称：均 202，归置走后台异步 NP，结果经 WS（note.processed /
-    note.failed）回灌。差异：multipart + 音频字节；类别/编号由 Gemma 从语音里听+判（无 parse_note）。
+    有 conn_id → 走 voice dispatch（hop A/B 两步走判 note/query，query 广播 qp.answer.{conn_id}）。
+    无 conn_id → 原有 run_np_voice_async 路径（只归置 NP，不判 query）。
+
+    与 POST /notes（文本）对称：均 202，结果经 WS（note.processed / note.failed）回灌。
     音频来源是前端浏览器麦（getUserMedia，#19），非后端现场录音。
     """
     audio = await file.read()
@@ -432,6 +441,47 @@ async def create_voice_note(
 
     orchestrator = request.app.state.orchestrator
     resolved_ts = ts if ts is not None else time.time()
+    service = getattr(request.app.state, "llm_service", None)
+
+    # 有 conn_id → 走 voice dispatch（判 note/query）
+    if conn_id is not None and service is not None:
+        # 构建 NPInput（含 current_take_id/take_context）供 note 分支委托 run_np_voice
+        np_input = orchestrator._build_np_input("", "note", resolved_ts)
+        # voice_runner 来自 orchestrator._deps（须有 llm_service 才绑定）
+        voice_runner = getattr(orchestrator._deps, "voice_runner", None)
+        cm = request.app.state.connection_manager
+
+        # 问题 1：wrapper 协程先发 LLM_STATUS busy，再跑 dispatch
+        # preamble 在协程内部执行（可能 await ensure_model_ready），不阻塞 202
+        # done callback 统一发 idle（成功/失败/取消三条路径）
+        async def _dispatch_with_status() -> dict:
+            await orchestrator._emit_np_status_preamble(service)
+            return await run_voice_dispatch(
+                audio,
+                conn_id=conn_id,
+                ts=resolved_ts,
+                client_id=client_id,
+                dal=orchestrator.dal,
+                service=service,
+                cm=cm,
+                scene_context="",  # 简化：不预取场次文本，hop A 系统内联说明已足
+                np_input=np_input,
+                voice_runner=voice_runner,
+            )
+
+        # fire-and-forget：不 await，不阻塞 202，对齐块③ schedule_qp_broadcast 模式。
+        task = asyncio.create_task(_dispatch_with_status())
+        _voice_dispatch_tasks.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            _voice_dispatch_tasks.discard(t)
+            # 问题 1：无论成功/失败/取消，发 idle（对齐 _np_done_callback 形态）
+            orchestrator._np_done_callback(t, label="voice_dispatch")
+
+        task.add_done_callback(_done)
+        return {"status": "processing", "client_id": client_id, "kind": "dispatching"}
+
+    # 无 conn_id → 原有 run_np_voice_async 路径
     try:
         orchestrator.run_np_voice_async(
             audio=audio,
