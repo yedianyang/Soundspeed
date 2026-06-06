@@ -128,6 +128,44 @@ def test_dispatch_query_branch_schedules_qp_not_np(dal: DAL, monkeypatch) -> Non
     assert np_calls == [], f"run_np_async 不应被调，实际 {np_calls}"
 
 
+def test_dispatch_query_branch_passes_client_id_to_qp(dal: DAL, monkeypatch) -> None:
+    """conn_id + client_id + classify=query → schedule_qp_broadcast 收到 client_id。
+
+    队列模型据此把 qp.answer 落到对应那条 qaItem（client_id 是前端乐观去重键）。
+    """
+    _setup_scene_and_take(dal)
+    client = _make_dispatch_client(dal, monkeypatch)
+
+    async def _fake_classify(text, service, **kw):
+        return "query"
+
+    monkeypatch.setattr("backend.api.routes.takes.classify_memo", _fake_classify)
+
+    schedule_kwargs: list[dict] = []
+
+    def _fake_schedule(text, conn_id, **kwargs):
+        schedule_kwargs.append(kwargs)
+
+    monkeypatch.setattr("backend.api.routes.takes.schedule_qp_broadcast", _fake_schedule)
+
+    with client as c:
+        resp = c.post(
+            "/api/v1/notes",
+            json={
+                "text": "第一场拍了多少条",
+                "conn_id": "conn-abc",
+                "client_id": "cid-xyz",
+            },
+            headers=AUTH,
+        )
+
+    assert resp.status_code == 202, resp.text
+    assert len(schedule_kwargs) == 1, f"schedule_qp_broadcast 应被调一次，实际 {schedule_kwargs}"
+    assert schedule_kwargs[0].get("client_id") == "cid-xyz", (
+        f"client_id 应透传进 schedule_qp_broadcast，实际 {schedule_kwargs[0]}"
+    )
+
+
 # ── 测试：分支 2 —— conn_id + classify=note ──────────────────────────────────
 
 
