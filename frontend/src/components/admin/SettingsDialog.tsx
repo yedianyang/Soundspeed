@@ -31,6 +31,7 @@ import {
   injectDebugAsr,
   injectDebugScript,
   pickActiveScene,
+  refreshDevices,
   resetDb,
   selectDevice,
   setAsrLanguage,
@@ -41,7 +42,7 @@ import {
   type DebugAsrSeg,
   type DebugScriptLine,
 } from "@/lib/api"
-import { FlaskConical, Server, Trash2 } from "lucide-react"
+import { FlaskConical, RefreshCw, Server, Trash2 } from "lucide-react"
 import ActorManagementPanel from "@/components/admin/ActorManagementPanel"
 
 const DEV = import.meta.env.DEV
@@ -52,6 +53,8 @@ const DEV = import.meta.env.DEV
 function AudioInputSelect() {
   const { data, isLoading, error } = useDevices()
   const qc = useQueryClient()
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshErr, setRefreshErr] = useState<string | null>(null)
   const devices = data?.devices ?? []
   const value = data?.selected != null ? String(data.selected) : undefined
   // 保存的设备当前不在场：提示当前实际使用的设备（selected 是后端权威 fallback index）。
@@ -68,27 +71,57 @@ function AudioInputSelect() {
     }
   }
 
+  // 热插刷新：后端 reinit PortAudio 重扫，再 invalidate 让列表重拉。正在录制时后端 409。
+  const onRefresh = async () => {
+    setRefreshing(true)
+    setRefreshErr(null)
+    try {
+      await refreshDevices()
+      await qc.invalidateQueries({ queryKey: devicesQueryKey() })
+    } catch (err) {
+      setRefreshErr(err instanceof Error ? err.message : "刷新设备失败")
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   if (isLoading) {
     return <div className="text-xs text-muted-foreground">检测设备中…</div>
   }
-  if (error || devices.length === 0) {
-    return <div className="text-xs text-destructive">未检测到输入设备</div>
-  }
+  // 注意：刷新按钮在「未检测到设备」时也要在 —— 启动前没插声卡的场景，正靠它热插刷出来。
+  const noDevices = !!error || devices.length === 0
   return (
     <div className="grid gap-1.5">
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger className="w-full">
-          <SelectValue placeholder="选择输入设备" />
-        </SelectTrigger>
-        <SelectContent>
-          {devices.map((d) => (
-            <SelectItem key={d.index} value={String(d.index)}>
-              {d.name}
-              {d.is_default ? "（默认）" : ""} · {d.max_input_channels}ch
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <div className="flex items-center gap-2">
+        {noDevices ? (
+          <div className="flex-1 text-xs text-destructive">未检测到输入设备</div>
+        ) : (
+          <Select value={value} onValueChange={onChange}>
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="选择输入设备" />
+            </SelectTrigger>
+            <SelectContent>
+              {devices.map((d) => (
+                <SelectItem key={d.index} value={String(d.index)}>
+                  {d.name}
+                  {d.is_default ? "（默认）" : ""} · {d.max_input_channels}ch
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+        <Button
+          variant="outline"
+          size="icon"
+          className="shrink-0"
+          onClick={() => void onRefresh()}
+          disabled={refreshing}
+          title="重扫设备（启动后插的声卡用这个刷出来，免重启后端）"
+        >
+          <RefreshCw className={"size-4" + (refreshing ? " animate-spin" : "")} />
+        </Button>
+      </div>
+      {refreshErr && <span className="text-xs text-destructive">{refreshErr}</span>}
       {fellBack && (
         <span className="text-xs text-amber-600">
           保存的设备「{data?.selected_name}」未连接，当前使用「{fallbackName}」

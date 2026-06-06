@@ -48,6 +48,24 @@ def get_default_input_index() -> int | None:
     return parse_default_input_index(sd.default.device)
 
 
+def reinitialize_portaudio(reinit: Callable[[], None] | None = None) -> None:
+    """重新初始化 PortAudio，让服务启动后热插的设备被重新枚举。
+
+    PortAudio 在初始化（import sounddevice）时缓存设备列表、不做热插重扫；只有
+    terminate + initialize 才能刷新这份缓存。⚠️ terminate 会废掉所有已打开的流，
+    故调用方必须先确保当前无采集流（无 take 录制 / 无声纹录音），否则会打断录制。
+    reinit 可注入以便测试（默认走 sounddevice 的 _terminate/_initialize）。
+    """
+    if reinit is None:
+        import sounddevice as sd
+
+        def reinit() -> None:
+            sd._terminate()
+            sd._initialize()
+
+    reinit()
+
+
 def list_input_devices(
     query: Callable[[], object] | None = None,
     default_device: object = None,

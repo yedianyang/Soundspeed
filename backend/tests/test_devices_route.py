@@ -22,12 +22,17 @@ _DEFAULT_INDEX = 0
 
 
 class _FakeSession:
-    def __init__(self, device=None):
+    def __init__(self, device=None, running=False):
         self._device = device
+        self._running = running
 
     @property
     def device(self):
         return self._device
+
+    @property
+    def running(self):
+        return self._running
 
     def set_device(self, d):
         self._device = d
@@ -149,6 +154,53 @@ def test_select_device_roundtrip(tmp_path: Path):
     r = client.get("/api/v1/devices", headers=_HDR)
     assert r.json()["selected"] == 2
     dal.close()
+
+
+# ── 热插刷新设备（POST /devices/refresh）─────────────────────────────────────
+
+
+def test_refresh_devices_reinits_and_returns_list(monkeypatch):
+    """无录制时刷新：重初始化 PortAudio（重扫热插设备）+ 返回最新列表（同 GET 形状）。"""
+    calls: list[str] = []
+    monkeypatch.setattr(devices_mod, "reinitialize_portaudio", lambda: calls.append("reinit"))
+    r = _client(_FakeSession(device=None)).post("/api/v1/devices/refresh", headers=_HDR)
+    assert r.status_code == 200
+    assert calls == ["reinit"]
+    body = r.json()
+    assert [d["name"] for d in body["devices"]] == ["麦克风 A", "USB 接口"]
+    assert "selected" in body and "selected_name" in body
+
+
+def test_refresh_devices_409_while_recording(monkeypatch):
+    """take 录制中：terminate PortAudio 会废掉采集流 → 拒绝（409），且绝不 reinit。"""
+    calls: list[str] = []
+    monkeypatch.setattr(devices_mod, "reinitialize_portaudio", lambda: calls.append("reinit"))
+    r = _client(_FakeSession(running=True)).post("/api/v1/devices/refresh", headers=_HDR)
+    assert r.status_code == 409
+    assert calls == []
+
+
+def test_refresh_devices_without_live_asr_ok(monkeypatch):
+    """live_asr=None（实时 ASR 未启用）：无采集流，允许刷新。"""
+    calls: list[str] = []
+    monkeypatch.setattr(devices_mod, "reinitialize_portaudio", lambda: calls.append("reinit"))
+    r = _client(None).post("/api/v1/devices/refresh", headers=_HDR)
+    assert r.status_code == 200
+    assert calls == ["reinit"]
+
+
+def test_refresh_devices_requires_auth():
+    assert _client(_FakeSession()).post("/api/v1/devices/refresh").status_code == 401
+
+
+def test_reinitialize_portaudio_calls_injected_reinit():
+    """reinitialize_portaudio 默认走 sounddevice，但 reinit 可注入 —— 覆盖那条注入路径
+    （真实 PortAudio terminate/initialize 的热插重扫只能真机验证）。"""
+    from backend.audio.devices import reinitialize_portaudio
+
+    calls: list[str] = []
+    reinitialize_portaudio(reinit=lambda: calls.append("reinit"))
+    assert calls == ["reinit"]
 
 
 def test_new_session_restores_persisted_device(tmp_path: Path):

@@ -235,6 +235,12 @@ export function selectDevice(index: number): Promise<void> {
   })
 }
 
+// 热插刷新：后端 reinit PortAudio 重扫设备（启动后插的声卡用这个刷出来，免重启后端）。
+// 正在录制（take）时后端返回 409（调用方 catch 显示提示）。返回最新设备列表。
+export function refreshDevices(): Promise<DevicesResponse> {
+  return request<DevicesResponse>(`/api/v1/devices/refresh`, { method: "POST" })
+}
+
 // ── ASR 运行配置（转录语言 + 当前模型）──
 export interface AsrConfigResponse {
   enabled: boolean
