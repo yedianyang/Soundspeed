@@ -23,6 +23,7 @@ from backend.pipelines.sp_script import (
     Slugline,
     _fallback_lines,
     _is_scene_header,
+    _merge_parentheticals,
     _parse_fc_lines,
     _parse_lines_output,
     _parse_slugline,
@@ -163,6 +164,73 @@ def test_is_scene_header():
     assert not _is_scene_header("罗湘：我们到屋内坐坐吧")  # 台词
     assert not _is_scene_header("他慢慢走出了门外")  # 普通叙述
     assert not _is_scene_header("")
+    # 收紧：含句读的叙述不再误判（真实剧本 33→27 误切的根源）
+    assert not _is_scene_header("外婆推回给她。")  # "外"开头但是叙述（含句号）
+    assert not _is_scene_header("窗外，一辆夜间无人机嗡嗡飞过。")  # 含内外+时间但含句读
+    assert not _is_scene_header("内心深处的不安")  # "内"非独立 token（后接非空白）
+
+
+def test_split_numbered_only_splits_on_labels_and_drops_frontmatter():
+    raw = (
+        "记忆的温度\n电影剧本\n全 2 场\n\n"  # 首页信息：应丢弃，不成场
+        "第1场 内景 咖啡馆 日\n罗湘：你好。\n"
+        "外景 门口 夜\n"  # 无号「连续」slugline：应并入第1场，不单切
+        "罗湘走出门外，天色已暗。\n"  # 含「外」的叙述：应并入，不单切
+        "第2场 外景 广场 夜\n阿明：再见。\n"
+    )
+    blocks = split_scenes_by_slugline(raw)
+    assert len(blocks) == 2  # 只在 第N场 处切
+    assert blocks[0].startswith("第1场") and blocks[1].startswith("第2场")
+    assert "外景 门口 夜" in blocks[0]  # 连续 slugline 并入第1场
+    assert "记忆的温度" not in "".join(blocks)  # 首页信息丢弃
+
+
+def test_split_no_number_falls_back_to_slugline():
+    raw = "内 咖啡馆 日\n罗湘：你好。\n\n外 广场 夜\n阿明：再见。"
+    blocks = split_scenes_by_slugline(raw)
+    assert len(blocks) == 2  # 无场号 → 回退 slugline 启发式
+
+
+# ── 括号语气合并（_merge_parentheticals）──────────────────────────────────────
+
+
+def test_merge_parentheticals_into_next_dialogue():
+    out = _merge_parentheticals([ParsedLine("夏雨", "（笑）"), ParsedLine("夏雨", "你说得对。")])
+    assert len(out) == 1
+    assert (out[0].character, out[0].text) == ("夏雨", "（笑）你说得对。")
+
+
+def test_merge_parentheticals_speaker_from_next_line():
+    out = _merge_parentheticals([ParsedLine(None, "（停顿）"), ParsedLine("沈默", "我们走。")])
+    assert (out[0].character, out[0].text) == ("沈默", "（停顿）我们走。")
+
+
+def test_merge_parentheticals_inline_untouched():
+    out = _merge_parentheticals([ParsedLine("夏雨", "（笑）你说得对。")])
+    assert len(out) == 1 and out[0].text == "（笑）你说得对。"  # 非纯括号行 → 不动
+
+
+def test_merge_parentheticals_consecutive_and_halfwidth():
+    out = _merge_parentheticals(
+        [ParsedLine(None, "（笑）"), ParsedLine(None, "(停顿)"), ParsedLine("夏雨", "走吧")]
+    )
+    assert len(out) == 1
+    assert (out[0].character, out[0].text) == ("夏雨", "（笑）(停顿)走吧")
+
+
+def test_merge_parentheticals_trailing_kept_as_description():
+    out = _merge_parentheticals([ParsedLine("夏雨", "你好"), ParsedLine(None, "（完）")])
+    assert len(out) == 2
+    assert out[1].character is None and out[1].text == "（完）"
+
+
+@pytest.mark.asyncio
+async def test_parse_scene_block_merges_standalone_parenthetical():
+    svc = _mock_llm('[["夏雨","（笑）"],["夏雨","你说得对。"]]')
+    scenes = await parse_scene_block("夏雨：（笑）\n你说得对。", svc)
+    lines = scenes[0].lines
+    assert len(lines) == 1
+    assert (lines[0].character, lines[0].text) == ("夏雨", "（笑）你说得对。")
 
 
 def test_parse_slugline():

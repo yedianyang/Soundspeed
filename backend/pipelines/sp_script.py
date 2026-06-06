@@ -239,21 +239,30 @@ _SCENE_NUM_RE = re.compile(
 )
 # 内外景标记（slugline 必含其一）
 _INT_EXT_RE = re.compile(r"(内景|外景|内|外|INT|EXT)", re.IGNORECASE)
-# 以内外景开头（内 咖啡馆 日）
-_STARTS_INT_EXT_RE = re.compile(r"^\s*(内景|外景|内|外|INT|EXT)", re.IGNORECASE)
+# 以内外景「场头 token」开头（内 咖啡馆 日）：内景/外景/INT/EXT，或 内/外 后紧跟空白（含全角空格）。
+# 收紧——不再裸匹配「内/外」，以免把「外婆…」「内心…」等叙述误判成场头。
+_STARTS_INT_EXT_RE = re.compile(r"^\s*(?:内景|外景|INT|EXT|[内外][\s　])", re.IGNORECASE)
 # 时间标记（用于「反序 slugline」判定：大漠 日 外）
 _TIME_RE = re.compile(r"(日|夜|晨|昏|黎明|清晨|傍晚|凌晨|白天|晚上|早晨|午后|黄昏)")
+# 显式场次「标号」（高精度，不含易撞列表的 "N."）：第N场 / 场N / 场景N / SCENE N / SN
+_SCENE_LABEL_RE = re.compile(
+    r"^\s*(?:第?\s*\d+\s*场|场\s*\d+|场景\s*\d+|S(?:CENE)?\s*\.?\s*\d+)",
+    re.IGNORECASE,
+)
+# 句读：含则多半是叙述/台词（注意不含 ·／-／空格 等 slugline 分隔符）
+_PROSE_PUNCT_RE = re.compile(r"[，。！？；,!?;]")
 
 
 def _is_scene_header(line: str) -> bool:
     """判断一行是否为场头（slugline / 场次号）。
 
-    判定（高精度优先，避免把含「内/外」的台词误判成场头）：
+    判定（高精度优先，避免把含「内/外」的叙述/台词误判成场头）：
       1. 显式场次号开头（场3 / SCENE 3 / 3.）→ 是。
       2. 含台词冒号（：/:）→ 不是（那是对白行）。
       3. 过长（>30 字）→ 不是。
-      4. 以内/外/INT/EXT 开头 → 是（内 咖啡馆 日）。
-      5. 含内外景标记 且 含时间标记 → 是（反序 slugline：大漠 日 外）。
+      4. 含句读（，。！？；）→ 不是（叙述/台词，杀「窗外，…夜。」「外婆…。」类误判）。
+      5. 以内外景 token 开头（内景/外景/INT/EXT/内|外+空白）→ 是（内 咖啡馆 日）。
+      6. 含内外景标记 且 含时间标记 → 是（反序 slugline：大漠 日 外）。
     """
     s = line.strip()
     if not s:
@@ -264,6 +273,8 @@ def _is_scene_header(line: str) -> bool:
         return False
     if len(s) > _MAX_HEADER_LEN:
         return False
+    if _PROSE_PUNCT_RE.search(s):
+        return False
     if _STARTS_INT_EXT_RE.match(s):
         return True
     return bool(_INT_EXT_RE.search(s) and _TIME_RE.search(s))
@@ -272,19 +283,38 @@ def _is_scene_header(line: str) -> bool:
 def split_scenes_by_slugline(raw_text: str) -> list[str]:
     """按场头把整本剧本切成「每段一场」的文本块（不调 LLM）。
 
-    每遇到一个场头且当前已积累内容 → 收束成一块、场头另起新块。
-    首个场头前的「前言」（若有）自成一块（后续 LLM 会判成无号场或丢弃）。
+    分两种剧本：
+      - 有显式场号（第1场 / 场1 / SCENE 1）→ **只在场号处切**：连续场、无号 slugline、
+        含「内/外/日/夜」的叙述都自动并入当前编号场；首个场号前的前言（人物表/标题）丢弃。
+        （避免把叙述、子场误切成独立场——用户 2026-06-06 反馈的 27→33 误切。）
+      - 无场号 → 回退 slugline 启发式（_is_scene_header，已收紧排除句读散文）。
     返回非空块列表；空输入返回 []。
+    """
+    lines = raw_text.splitlines()
+    if any(_SCENE_LABEL_RE.match(ln.strip()) for ln in lines):
+        return _split_at(lines, lambda ln: bool(_SCENE_LABEL_RE.match(ln.strip())), drop_preamble=True)
+    return _split_at(lines, _is_scene_header, drop_preamble=False)
+
+
+def _split_at(lines: list[str], is_header, *, drop_preamble: bool) -> list[str]:
+    """在 is_header 命中处切块。
+
+    drop_preamble=True：首个场头之前的内容（前言）丢弃，不成块；只有见到首个场头后才开始积累。
+    drop_preamble=False：保留首个场头前的前言为一块（无场号剧本的旧行为）。
     """
     blocks: list[str] = []
     current: list[str] = []
-    for line in raw_text.splitlines():
-        if _is_scene_header(line) and any(x.strip() for x in current):
-            blocks.append("\n".join(current))
+    started = False
+    for line in lines:
+        if is_header(line):
+            if started or any(x.strip() for x in current):
+                blocks.append("\n".join(current))
             current = [line]
-        else:
+            started = True
+        elif started or not drop_preamble:
             current.append(line)
-    if current:
+        # drop_preamble 且未见场头：前言行直接丢弃
+    if started or not drop_preamble:
         blocks.append("\n".join(current))
     return [b for b in blocks if b.strip()]
 
@@ -324,6 +354,33 @@ def _fallback_lines(body_lines: list[str]) -> list[ParsedLine]:
             out.append(ParsedLine(character=m.group(1).strip(), text=m.group(2).strip()))
         else:
             out.append(ParsedLine(character=None, text=ln))
+    return out
+
+
+# 整行只是一个括号语气（全/半角），如 （笑）/（停顿两秒）/（对沈默）
+_PAREN_ONLY_RE = re.compile(r"^[（(][^）)]*[）)]$")
+
+
+def _merge_parentheticals(lines: list[ParsedLine]) -> list[ParsedLine]:
+    """把「整行只是括号语气」的行并入下一行台词前缀，避免它单独占一行。
+
+    剧本里独占一行的括号（语气/动作提示）是给下一句台词的，应贴在台词前（用户 2026-06-06 反馈）。
+    合并后说话人沿用下一行（台词的说话人）；连续多个括号累积；末尾孤立括号无下一行 → 保留为描述行。
+    模型已内联（如「（笑）你好」）的不受影响——非纯括号行，正则不匹配。
+    """
+    out: list[ParsedLine] = []
+    pending = ""
+    for ln in lines:
+        if _PAREN_ONLY_RE.match(ln.text.strip()):
+            pending += ln.text.strip()
+            continue
+        if pending:
+            out.append(ParsedLine(character=ln.character, text=pending + ln.text))
+            pending = ""
+        else:
+            out.append(ln)
+    if pending:  # 末尾孤立括号：保留为描述行，不丢
+        out.append(ParsedLine(character=None, text=pending))
     return out
 
 
@@ -489,7 +546,7 @@ async def parse_scene_block(
         priority=3,
         timeout=timeout,
     )
-    parsed_lines = _parse_lines_output(raw_output, body)  # 永不抛
+    parsed_lines = _merge_parentheticals(_parse_lines_output(raw_output, body))  # 永不抛
     return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=parsed_lines)]
 
 
@@ -525,9 +582,10 @@ async def parse_scene_block_fc(
             timeout=timeout,
         )
     except LookupError:  # 模型没走 FC（tool_calls 缺失）→ 兜底，不崩
-        return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=_fallback_lines(body))]
+        fallback = _merge_parentheticals(_fallback_lines(body))
+        return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=fallback)]
 
-    parsed_lines = _parse_fc_lines(tool_call, body)  # 永不抛
+    parsed_lines = _merge_parentheticals(_parse_fc_lines(tool_call, body))  # 永不抛
     return [ParsedScene(scene_code=scene_code, slugline=slugline, lines=parsed_lines)]
 
 
