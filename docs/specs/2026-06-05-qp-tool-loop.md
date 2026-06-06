@@ -156,6 +156,13 @@ run_tool_loop(messages, toolset, max_hops=5):
 
 ✅实测可行性：auto 路径（`infer` 返回 content）与 forced 路径（`infer_tool` 返回 `tool_calls[0]`）都在；forced 时 llama.cpp 自动建 JSON grammar，参数干净。这正是 FC spec §4.2 候选 2「两步走：auto 选名、forced 取参」，本设计**统一用到每一跳**，连策展工具的字符串参数（搜索词带 `}`、中文逗号）也不会破解析。
 
+✅**真模型 probe 实测回填**（2026-06-06，gemma-4-E4B Q4_K_M，实现计划 Task 7.5，commit `84428fa`）：
+- **auto 跳确返 content 串**：`finish_reason=stop` + content=`<|tool_call>call:NAME{...}`（`tool_calls=None`），`service.infer` 正常返回、不撞「content=None+finish_reason=tool_calls」护栏，正则抠名成功。两步走 step A 成立。
+- **多跳回喂格式（关键修正）**：OpenAI 风格 `assistant{content:None,tool_calls}` + `role=tool` 回喂会撞这个 GGUF 的 Jinja `UndefinedError: 'raise_exception' is undefined`（状态相关、不稳）。**改用纯文本回喂**：`assistant`=auto 步原始 content（模型自吐 `<|tool_call>`）+ `user`=`f"工具 {name} 返回：{json}"`，实测 3 次确定性稳定渲染 + 自然语言收尾。`<|tool_response>` 标记格式亦可但不如纯文本稳。
+- 副发现：llama.cpp 0.3.25 Metal 退出期 `GGML_ASSERT` teardown 崩溃（已知上游 bug，结果在崩溃前产出，不影响断言）。
+
+🔴**根因级共享层 bug（Task 11 e2e 挖出，commit `44c5da2`）**：QP auto 经 service 不调工具。根因——4.x 多模态单实例（方案 A）给 Llama 装 `MultimodalGemma4Handler`（继承 llama_cpp `Gemma4ChatHandler`），其 `CHAT_FORMAT` **替换了 GGUF 内嵌 FunctionGemma Jinja 模板、不渲染工具声明** → 带 tools 的文本请求模型看不到工具。L2/NP 用 forced tool_choice 靠 grammar 兜没暴露，QP **auto** 暴露。**任何 post-4.x 经 service 走 FunctionGemma auto 工具调用都会撞**。修复：`GemmaClient` 构造时从 GGUF `tokenizer.chat_template` 另建原生 FunctionGemma `Jinja2ChatFormatter`（bos/eos 必须 `detokenize(special=True)`），text+tools 请求临时换上（`_lock` 串行无竞态），音频/图像仍走多模态 handler。✅ QP e2e + L2/NP forced FC smoke 全绿零回归。
+
 ### 5.2 终止与跳数
 
 - 终止：某跳模型不再吐 tool_call、直接给自然语言 → 返回该文本。
@@ -197,7 +204,8 @@ run_tool_loop(messages, toolset, max_hops=5):
 新增 `DAL.query_readonly(sql, params=(), *, max_rows=300, timeout_s=3.0)`，**每查询开临时只读连接**，不在共享连接上 toggle（共享连接跨线程、异常会泄漏只读态）：
 
 1. **只读连接**：`sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)`，`row_factory=Row`，只设 `busy_timeout`。用完 `finally` close（照 `migrations/runner.py` / `lifecycle.py` 的临时连接模式）。✅实测 `mode=ro` 拦死 CREATE/INSERT/DELETE/DROP。
-2. **authorizer 只放行 SELECT**：✅实测 `mode=ro` **拦不住 ATTACH**（query_only 也不行）。必须 `conn.set_authorizer()`，只允许 `SQLITE_SELECT/READ/FUNCTION/RECURSIVE`，其余 `SQLITE_DENY`——挡掉 ATTACH/PRAGMA/临时表，仍放行 SELECT 和 WITH/CTE。这是真正的安全边界。**FTS 表收口**（D-QP 开放问题 4）：放行基表 + 有用的虚拟表 `script_lines_fts`（让万能笔也能 MATCH 全文搜索），但**挡掉影子表** `script_lines_fts_data/_idx/_docsize/_config`（内部二进制，无用，模型碰它即跑偏）。authorizer 按表名区分。
+2. **authorizer 只放行 SELECT 系 action + scoped PRAGMA**：✅实测 `mode=ro` **拦不住 ATTACH**（query_only 也不行）。必须 `conn.set_authorizer()`，只允许 `SQLITE_SELECT/READ/FUNCTION/RECURSIVE`，其余 `SQLITE_DENY`——挡掉 ATTACH/写/临时表，仍放行 SELECT 和 WITH/CTE。这是真正的安全边界。另：**FUNCTION 独立堵 `load_extension`**（纵深防御，防连接配置变动打开 RCE）；**PRAGMA scoped 只放行 `data_version`**（MATCH 内部需要），其余 PRAGMA（table_info/writable_schema…）DENY。
+   - ✅**实现期实证修正（Task 3，commit `7801a1e`，SQLite 3.53.1）**：原计划「authorizer 按表名挡 FTS 影子表、放行 `script_lines_fts` 让 MATCH 工作」**不成立**——FTS5 MATCH **内部**读 `_config`/`_idx` 影子表（`SQLITE_READ`）+ 触发 `PRAGMA data_version`，与「直接读影子表」无法按 action/参数区分，按表名挡会挡死 MATCH。**定案：放行所有表 READ（含影子表）**，靠 action 级（只 SELECT 系）+ mode=ro + 单句 + 封顶 + 超时守边界。影子表是 `script_lines` 派生的索引 blob、漏不出额外信息，挡它原只是「防模型查到 garbage」的可用性护栏，安全无价值且 env-fragile，去除。
 3. **单句守卫**：用 `conn.execute()`（单游标）。✅实测多句会 raise `Warning: You can only execute one statement at a time`，免费。绝不用 `executescript`。
 4. **行数封顶**：不改写 SQL。`cur.fetchmany(max_rows+1)`，`len>max_rows` 即截断，回 `rows[:max_rows]` + `truncated` 标志塞进结果让模型知道被截。
 5. **计算超时**：`conn.set_progress_handler(cb, 1000)`，`cb` 捕获 `deadline=monotonic()+timeout_s` 超时返回非 0 → ✅实测 abort 为 `OperationalError: interrupted`。`finally` 清除。与 `busy_timeout`（锁等待）互补。
@@ -293,7 +301,7 @@ run_tool_loop(messages, toolset, max_hops=5):
 1. ✅ 万能笔默认 `max_rows=300` / `timeout_s=3.0`。
 2. ✅ v1 回包走 WS `qp.answer.{conn_id}`。
 3. ✅ `normalize_scene_code` 本设计内顺带落地（同时修去重 bug）；归属 2.x/3.x 待 Lead 定。
-4. ✅ 万能笔放行基表 + FTS 虚拟表 `script_lines_fts`（可 MATCH），挡掉 FTS 影子表 `script_lines_fts_data/_idx/_docsize/_config`。
+4. ✅ 万能笔放行基表 + FTS 虚拟表 `script_lines_fts`（可 MATCH）。~~挡掉 FTS 影子表~~——**实现期修正（Task 3，SQLite 3.53.1）**：MATCH 内部读影子表与直接读无法按表名区分，挡影子表会挡死 MATCH；改为放行所有表 READ（含影子表，漏不出额外信息），靠 action 级 authorizer + scoped `PRAGMA data_version` + `load_extension` 独立 DENY 守边界（见 §6.2）。
 5. ✅ config.py 照 main 现有 eager 写法加；合并 4.x 时把 QP 配置重贴到 4.x 的 lazy 结构（已记入 memory `project_qp_tool_loop`，防合并时遗忘）。
 
 ---
