@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import {
   Eye,
-  Folder,
   Settings,
   Upload,
   X,
@@ -573,9 +572,6 @@ export default function AdminHome() {
       <header className="flex-shrink-0 bg-background">
         <div className="px-4 h-11 flex items-center justify-between gap-2 border-b">
           <div className="flex items-center gap-2 min-w-0">
-            <Button variant="ghost" size="icon-sm" className="rounded-full text-muted-foreground flex-shrink-0" title="导入已录制文件">
-              <Folder className="size-4" />
-            </Button>
             <StatusChip label="Input" tone="ok" detail={deviceName} className="min-w-0">
               {/* ch1 实时电平：录制时用后端真实采集 RMS，平时用浏览器常驻电平（见 displayLevel） */}
               <LiveLevelMeter level={displayLevel} count={7} color="bg-green-500" className="ml-0.5" />
