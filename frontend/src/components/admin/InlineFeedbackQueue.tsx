@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react"
-import { Loader2, Clock, CornerUpLeft, ChevronDown, Sparkles, Pencil } from "lucide-react"
+import { Loader2, ChevronDown } from "lucide-react"
+import { cn } from "@/lib/utils"
+import { feedBlock } from "@/lib/styles"
 import { useSessionStore } from "@/store/session"
 import { postNote, postVoiceNote } from "@/lib/api"
 import { runQuery, runNote } from "@/lib/feed-actions"
@@ -31,16 +33,15 @@ function ReceiptRow({
     return () => clearTimeout(t)
   }, [r.client_id, onDismiss])
   return (
-    <div className="flex items-center gap-2 text-xs px-1 py-1">
-      <Clock className="size-3 text-muted-foreground/60" />
+    <div className={cn(feedBlock.note, "flex items-center gap-2 px-2.5 py-1.5 text-xs")}>
       <span className="text-muted-foreground">已记录</span>
-      <span className="font-medium text-green-600/90">{r.category}</span>
+      <span className="font-medium text-foreground">{r.category}</span>
       <span className="flex-1 min-w-0 truncate text-foreground/70">{r.content}</span>
       <button
         onClick={() => onReclassify(r.rawText)}
-        className="flex items-center gap-1 text-amber-700 hover:underline flex-shrink-0"
+        className="text-primary font-medium hover:underline flex-shrink-0"
       >
-        <CornerUpLeft className="size-3" /> 其实是提问
+        其实是提问
       </button>
     </div>
   )
@@ -57,12 +58,12 @@ function PendingRow({ pn, onRetry }: { pn: PendingNote; onRetry: (pn: PendingNot
       </div>
     )
   }
-  // 失败 = 琥珀实心块（重），与「正在记录…」的中性轻行、答案的琥珀左条区分开。
+  // 失败 = alert 块（更重主题色底 + ring），与「正在记录…」中性轻行、答案淡主题色块拉开档差。
   return (
-    <div className="flex items-center gap-2 text-sm px-2.5 py-1.5 rounded-lg bg-amber-100 text-amber-900 border border-amber-300/60">
-      <span>{FAIL_REASON_TEXT[pn.failedReason!] ?? "处理失败"}</span>
-      <button onClick={() => onRetry(pn)} className="flex items-center gap-1 text-xs text-amber-700 hover:underline">
-        <CornerUpLeft className="size-3" /> 重试
+    <div className={cn(feedBlock.alert, "flex items-center gap-2 px-2.5 py-1.5 text-sm")}>
+      <span className="flex-1 min-w-0 text-foreground">{FAIL_REASON_TEXT[pn.failedReason!] ?? "处理失败"}</span>
+      <button onClick={() => onRetry(pn)} className="text-primary font-medium hover:underline flex-shrink-0">
+        重试
       </button>
     </div>
   )
@@ -81,10 +82,10 @@ function QaRow({ q, onAsNote }: { q: QaItem; onAsNote: (question: string) => voi
       </div>
     )
   }
-  // 警告/失败 = 琥珀实心块（重），与正常答案的「琥珀左条」靠轻重区分，不靠色相撞。
+  // 警告/失败 = alert 块（更重主题色底 + ring）。
   if (q.status === "failed") {
     return (
-      <div className="flex items-center gap-2 text-sm px-2.5 py-1.5 rounded-lg bg-amber-100 text-amber-900 border border-amber-300/60">
+      <div className={cn(feedBlock.alert, "px-2.5 py-1.5 text-sm text-foreground")}>
         查询失败：{q.failedReason ?? "未知"}
       </div>
     )
@@ -92,14 +93,13 @@ function QaRow({ q, onAsNote }: { q: QaItem; onAsNote: (question: string) => voi
   const text = q.answer ?? ""
   const isLong = text.includes("\n") || text.length > 36
   const head = isLong ? text.split("\n")[0].slice(0, 36) + "…" : text
-  // 正常答案 = 琥珀左条 + ✦（轻，常态暖色，LLM 反馈基调）；note 回执维持中性灰以作区分。
+  // 正常答案 = answer 块（淡主题色底，标识 LLM 反馈）；note 回执用中性灰底以色相区分。
   // 外层 div 容纳两个平级按钮（展开 / 记为备注）——button 不能嵌 button。
   return (
-    <div className="w-full flex items-start gap-2.5 text-sm pl-2.5 pr-1 py-1 border-l-2 border-amber-400/50 hover:border-amber-400/80">
-      <Sparkles className="size-3.5 flex-shrink-0 mt-0.5 text-amber-500/80" />
+    <div className={cn(feedBlock.answer, "flex items-start gap-2 px-2.5 py-1.5 text-sm")}>
       <button
         onClick={() => isLong && setExpanded((e) => !e)}
-        className="flex-1 min-w-0 flex items-start gap-2.5 text-left text-foreground/90"
+        className="flex-1 min-w-0 flex items-start gap-2 text-left text-foreground"
       >
         <span className="flex-1 min-w-0">
           {expanded ? (
@@ -111,7 +111,7 @@ function QaRow({ q, onAsNote }: { q: QaItem; onAsNote: (question: string) => voi
         {isLong && (
           <ChevronDown
             className={
-              "size-4 flex-shrink-0 mt-0.5 text-muted-foreground/50 transition-transform " +
+              "size-4 flex-shrink-0 mt-0.5 text-muted-foreground/60 transition-transform " +
               (expanded ? "rotate-180" : "")
             }
           />
@@ -119,10 +119,10 @@ function QaRow({ q, onAsNote }: { q: QaItem; onAsNote: (question: string) => voi
       </button>
       <button
         onClick={() => onAsNote(q.question)}
-        className="flex items-center gap-1 text-xs text-muted-foreground/70 hover:text-foreground flex-shrink-0 mt-0.5"
+        className="text-xs text-muted-foreground hover:text-foreground flex-shrink-0 mt-0.5"
         title="把这条改当备注记"
       >
-        <Pencil className="size-3" /> 记为备注
+        记为备注
       </button>
     </div>
   )
@@ -195,7 +195,7 @@ export default function InlineFeedbackQueue() {
   return (
     // pb-[32px]：浮层底边下沉 26px 藏进输入框 pill（AdminHome bottom-[calc(100%-26px)]），
     // 留足底距让最后一行浮在 pill 之上不被挡（沿用旧 NoteList 的补偿思路）。
-    <div className="pb-[32px] space-y-0.5 max-h-[40vh] overflow-y-auto pointer-events-auto rounded-t-2xl bg-background/95 backdrop-blur-sm px-3 pt-2 shadow-[0_-12px_28px_-20px_rgba(0,0,0,0.18)]">
+    <div className="pb-[32px] space-y-1 max-h-[40vh] overflow-y-auto pointer-events-auto rounded-t-2xl bg-background/95 backdrop-blur-sm px-3 pt-2 shadow-[0_-12px_28px_-20px_rgba(0,0,0,0.18)]">
       {rows.length > 1 && (
         <div className="px-1 pb-0.5 text-[10px] text-muted-foreground/50">{rows.length} 条</div>
       )}

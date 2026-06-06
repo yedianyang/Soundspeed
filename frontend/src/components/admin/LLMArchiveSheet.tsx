@@ -1,5 +1,7 @@
 import type { ReactNode } from "react"
-import { Sparkles, X } from "lucide-react"
+import { X } from "lucide-react"
+import { cn } from "@/lib/utils"
+import { feedBlock } from "@/lib/styles"
 import {
   Sheet,
   SheetContent,
@@ -11,8 +13,8 @@ import { Button } from "@/components/ui/button"
 import { useSessionStore } from "@/store/session"
 import { ScriptDiffView } from "@/routes/admin/components/ScriptDiffView"
 
-// 时间线一项：QP 问答 = 琥珀 ✦ 左条；L2 推送 = 中性左条。
-// 沿用就地层配色语言（QP 暖色作 LLM 反馈基调、L2/note 中性），档案层与就地层一致。
+// 时间线一项：QP 问答 = answer 块（淡主题色底）；L2 推送 = note 块（中性灰底）。
+// 与就地层同一套 feedBlock 语言，靠背景色相区分 LLM 答案 / L2 记录，无装饰图标。
 function FeedItem({
   source,
   time,
@@ -24,11 +26,12 @@ function FeedItem({
 }) {
   const isQP = source === "QP"
   return (
-    <div className={"pl-3 border-l-2 " + (isQP ? "border-amber-400/40" : "border-muted-foreground/20")}>
+    <div className={cn(isQP ? feedBlock.answer : feedBlock.note, "px-3 py-2.5")}>
       <div className="flex items-center gap-2 mb-1.5">
-        {isQP && <Sparkles className="size-3 text-amber-500/80" />}
-        <span className="text-xs font-medium text-muted-foreground">{isQP ? "问答" : "L2 推送"}</span>
-        <span className="text-[10px] font-mono text-muted-foreground/50">{time}</span>
+        <span className={cn("text-xs font-medium", isQP ? "text-primary" : "text-muted-foreground")}>
+          {isQP ? "问答" : "L2 推送"}
+        </span>
+        <span className="text-[10px] font-mono text-muted-foreground/60">{time}</span>
       </div>
       {children}
     </div>
@@ -67,8 +70,7 @@ export function LLMArchiveSheet({
         <SheetHeader className="flex-shrink-0 px-4 pt-4 pb-3 border-b">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Sparkles className="size-4 text-amber-500" />
-              <SheetTitle className="text-base">LLM 反馈</SheetTitle>
+              <SheetTitle className="text-base text-primary">LLM 反馈</SheetTitle>
               <span className="text-xs text-muted-foreground">QP 问答 · L2 推送 · 全历史</span>
             </div>
             <Button
@@ -82,7 +84,7 @@ export function LLMArchiveSheet({
           </div>
           <SheetDescription className="sr-only">LLM 问答与 L2 推送的全历史时间线</SheetDescription>
         </SheetHeader>
-        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-6">
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3">
           {items.length === 0 && (
             <p className="text-xs text-muted-foreground text-center pt-4">还没有问答或 L2 推送</p>
           )}

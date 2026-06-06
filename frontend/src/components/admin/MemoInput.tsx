@@ -72,14 +72,14 @@ export default function MemoInput({ onNoteAdded }: MemoInputProps) {
   const uploadVoice = async (wav: Blob) => {
     const clientId = newClientId()
     const ts = Date.now() / 1000
-    // 乐观 pending：语音的类别/正文 202 时未知（由模型从音频判）。kind=voice → 渲染只显 🎤 不显
-    // @category（避免伪造类别）；voiceBlob 供失败重试重传。
+    // 乐观 pending：语音的类别/正文 202 时未知（由模型从音频判）。kind=voice → 渲染只显「语音备注」
+    // 不显 @category（避免伪造类别）；voiceBlob 供失败重试重传。
     addPendingNote({
       client_id: clientId,
       kind: "voice",
       ts,
       category: "note",
-      content: "🎤 语音备注",
+      content: "语音备注",
       rawText: "",
       voiceBlob: wav,
     })
