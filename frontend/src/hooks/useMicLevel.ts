@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react"
+import { levelBucket } from "@/lib/level"
 
 // 实时麦克风电平 [0,1]。浏览器 getUserMedia + AnalyserNode 取时域 RMS，rAF 刷新。
 // 与后端采集是各自独立的流（Windows 共享模式可同时打开同一麦克风），仅用于 header 监看
@@ -13,6 +14,9 @@ export function useMicLevel(enabled = true, deviceName?: string): number {
   const rafRef = useRef<number | null>(null)
   const ctxRef = useRef<AudioContext | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  // 上一次 setState 的电平档位。rAF 每帧都跑（读 analyser 很便宜），但只有跨档才 setState，
+  // 避免 60fps 无脑重渲。-1 = 还没出过值，首帧必出。
+  const lastBucketRef = useRef(-1)
 
   useEffect(() => {
     if (!enabled) return
@@ -38,6 +42,7 @@ export function useMicLevel(enabled = true, deviceName?: string): number {
 
     const start = async () => {
       try {
+        lastBucketRef.current = -1 // (重)建流：首帧必出一次值
         // 先用默认约束拿权限：首次 enumerateDevices 的 label 在授权前可能为空。
         let stream = await navigator.mediaDevices.getUserMedia({ audio: true })
         if (cancelled) {
@@ -86,7 +91,14 @@ export function useMicLevel(enabled = true, deviceName?: string): number {
             sum += v * v
           }
           const rms = Math.sqrt(sum / buf.length)
-          setLevel(Math.min(1, rms * 3)) // 放大便于观察
+          const next = Math.min(1, rms * 3) // 放大便于观察
+          // 去抖：只有跨过量化档位才 setState 触发重渲。静音时 rms 近恒定 → 档位不变 → 不重渲，
+          // 待机不再 60fps 拖整棵树（dev 下也不再灌 PerformanceMeasure）。
+          const b = levelBucket(next)
+          if (b !== lastBucketRef.current) {
+            lastBucketRef.current = b
+            setLevel(next)
+          }
           rafRef.current = requestAnimationFrame(tick)
         }
         rafRef.current = requestAnimationFrame(tick)

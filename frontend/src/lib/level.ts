@@ -3,7 +3,7 @@
 // 静音时 rms 近恒定 → 档位不变 → 不 setState，掐掉待机 60fps 全树重渲。
 // steps 默认 100：远多于电平条最终 7 格，量化不引入可见跳变，但足以把每帧 setState 收敛掉。
 
-// TDD 桩：故意返回错误值，先让测试跑红。
-export function levelBucket(_level: number, _steps = 100): number {
-  return -1
+export function levelBucket(level: number, steps = 100): number {
+  const safe = Math.min(1, Math.max(0, level))
+  return Math.round(safe * steps)
 }
