@@ -234,6 +234,42 @@ class NoteFailedPayload:
     client_id: str | None = None
 
 
+# NP 重设计回灌契约（替代 note.processed）。topic 扁平（非 conn-scoped）：复用 client_id 去重，
+# 与 note.processed 一致；conn-scoped 需 conn_id 穿到 _finalize_np 的语音-调度器路径（设计 §9 禁碰），
+# 见 plan DEVIATION 1。
+NOTE_APPLIED = "note.applied"
+
+
+@dataclass(frozen=True)
+class NoteAppliedPayload:
+    """note.applied 的 payload：NP 多目标 apply 完成后发布。
+
+    changes: 本次改动的列表（每条 mark / note）；纯 mark 也走这里（否则前端 pending 挂死）。
+    client_id: 前端乐观 pending 去重键，原样回传供精确移除并落一条带 changes 的 receipt。
+    """
+
+    client_id: str | None
+    changes: list[dict]
+    ts: float
+
+
+NOTE_CLARIFY = "note.clarify"
+
+
+@dataclass(frozen=True)
+class NoteClarifyPayload:
+    """note.clarify 的 payload：确定性解析失败（解不出 / 不唯一 / 不存在），广播候选不写库。
+
+    clarify 不是失败（不经 note.failed except 分支）；前端移除 pending + 推一条 clarify item，
+    用户经输入框重发一句更清楚的当新输入重跑（新 client_id）。
+    """
+
+    client_id: str | None
+    message: str
+    candidates: list[dict]
+    ts: float
+
+
 @dataclass(frozen=True)
 class TakeDeletedPayload:
     """take.deleted 的 payload（2.C）。"""
