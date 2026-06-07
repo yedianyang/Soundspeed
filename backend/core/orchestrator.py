@@ -376,6 +376,7 @@ class Orchestrator:
         segments = self.dal.list_segments(take_id, ch=1)
         transcript_segments = [
             {
+                "segment_id": s.segment_id,
                 "speaker": s.speaker,
                 "text": s.text,
                 "start_frame": s.start_frame,

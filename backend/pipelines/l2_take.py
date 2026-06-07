@@ -80,6 +80,10 @@ class JuxtaLine:
     spoken_text: str | None     # 实际说的（转录原文，逐字）；漏说为 None
     speaker: str | None         # 谁说的（转录 speaker=角色名/说话人N）；漏说为 None
     diff_type: str | None       # 副产物，前端可忽略；无对应 line_match 为 None
+    # 本行对齐到的真实转录段 segment_id（稳定 DB 主键，非位置下标）。前端据此把"实录侧"
+    # 重接到最新可编辑的转录段——说话人纠正后即时同步，绕开 seg_idx 的截断/排序不稳定问题。
+    # 漏说行为空 tuple；老库/无 segment_id 的输入也为空（前端按行回退到 spoken_text/speaker）。
+    segment_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -204,13 +208,17 @@ def _truncate_segments(segments: list[dict]) -> tuple[list[dict], bool]:
     return result, True
 
 
-def _build_user_message(input_data: L2Input) -> str:
+def _build_user_message(
+    input_data: L2Input, truncated_segments: list[dict], was_truncated: bool
+) -> str:
     """组装 user message（§5 模板）。
 
     script_lines 为空时走无剧本路径：不含剧本块、不含 insertion/比对任务，
     只含转录记录和纯纠错任务。
+
+    truncated_segments / was_truncated 由 caller（run_l2_take）截断一次后传入，
+    与并置文档复用同一份截断结果——避免重复截断，且保证 seg_idx 下标基准一致。
     """
-    truncated_segments, was_truncated = _truncate_segments(input_data.transcript_segments)
     transcript_block = _build_transcript_block(truncated_segments, was_truncated)
 
     if not input_data.script_lines:
@@ -414,23 +422,29 @@ def _parse_llm_output(raw_text: str) -> L2Output:
 
 def _resolve_spoken(
     segments: list[dict], seg_idx: tuple[int, ...]
-) -> tuple[str | None, str | None]:
-    """按 seg_idx 从（截断后）转录段取真实原文 + speaker。
+) -> tuple[str | None, str | None, tuple[int, ...]]:
+    """按 seg_idx 从（截断后）转录段取真实原文 + speaker + 真实 segment_id 列表。
 
-    多段按下标顺序拼接（中文无空格，直接相连）；speaker 取首个非空段的 speaker。
-    无有效下标 → (None, None)，对应"漏说该行"。越界下标静默跳过（LLM best-effort）。
+    多段按下标顺序拼接（中文无空格，直接相连）；speaker 取首个非空段的 speaker；
+    segment_ids 收集所有命中段的真实 segment_id（供前端把"实录侧"重接到可编辑的最新段）。
+    无有效下标 → (None, None, ())，对应"漏说该行"。越界下标静默跳过（LLM best-effort）。
+    输入段缺 segment_id（老库/直接构造的测试输入）时该段不计入 segment_ids。
     """
     parts: list[str] = []
     speaker: str | None = None
+    seg_ids: list[int] = []
     for i in seg_idx:
         if 0 <= i < len(segments):
             seg = segments[i]
             parts.append(seg.get("text", ""))
             if speaker is None:
                 speaker = seg.get("speaker")
+            sid = seg.get("segment_id")
+            if isinstance(sid, int) and not isinstance(sid, bool):
+                seg_ids.append(sid)
     if not parts:
-        return None, None
-    return "".join(parts), speaker
+        return None, None, ()
+    return "".join(parts), speaker, tuple(seg_ids)
 
 
 def _build_juxtaposition(
@@ -457,7 +471,7 @@ def _build_juxtaposition(
     for line in script_lines:
         line_no = line["line_no"]
         m = match_by_no.get(line_no)
-        spoken_text, speaker = _resolve_spoken(segments, m.seg_idx if m else ())
+        spoken_text, speaker, seg_ids = _resolve_spoken(segments, m.seg_idx if m else ())
         rows.append(
             JuxtaLine(
                 line_no=line_no,
@@ -466,11 +480,12 @@ def _build_juxtaposition(
                 spoken_text=spoken_text,
                 speaker=speaker,
                 diff_type=m.diff_type if m else None,
+                segment_ids=seg_ids,
             )
         )
 
     for m in insertions:
-        spoken_text, speaker = _resolve_spoken(segments, m.seg_idx)
+        spoken_text, speaker, seg_ids = _resolve_spoken(segments, m.seg_idx)
         if spoken_text is None and m.detail:  # seg_idx 缺失 → detail 兜底
             spoken_text = m.detail
         rows.append(
@@ -481,6 +496,7 @@ def _build_juxtaposition(
                 spoken_text=spoken_text,
                 speaker=speaker,
                 diff_type="insertion",
+                segment_ids=seg_ids,
             )
         )
 
@@ -519,8 +535,11 @@ async def run_l2_take(
     no_script = not input_data.script_lines
     task_type = "l2_take_no_script" if no_script else "l2_take"
 
+    # 截断一次：user message 渲染与并置文档组装复用同一份（seg_idx 下标基准必须一致）。
+    truncated_segments, was_truncated = _truncate_segments(input_data.transcript_segments)
+
     system_prompt = TASK_CONFIG[task_type]["system"]
-    user_message = _build_user_message(input_data)
+    user_message = _build_user_message(input_data, truncated_segments, was_truncated)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -548,11 +567,10 @@ async def run_l2_take(
     # 有剧本路径用 strict=True（原有严格校验），无剧本路径用 strict=False（宽松）
     output = _validate_data_dict(data, strict=not no_script)
 
-    # 并置文档（缺口③）：仅有剧本路径组装。seg_idx 引用截断后转录段，故此处用同一
-    # _truncate_segments（纯函数、确定性，与 _build_user_message 的截断一致）取原文。
+    # 并置文档（缺口③）：仅有剧本路径组装。复用上方截断好的 truncated_segments
+    # （seg_idx 引用的就是这份截断后转录段），不再二次截断。
     if no_script:
         return output
-    truncated_segments, _ = _truncate_segments(input_data.transcript_segments)
     juxtaposition = _build_juxtaposition(
         input_data.script_lines, truncated_segments, output.line_matches
     )
