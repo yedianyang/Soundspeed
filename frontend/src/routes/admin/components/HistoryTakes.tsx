@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import { Check, ChevronRight, ChevronUp } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Input } from "@/components/ui/input"
+import StepperField from "@/components/admin/StepperField"
 import { Card, CardContent } from "@/components/ui/card"
 import {
   DropdownMenu,
@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { STATUS_DOT, STATUS_LABEL, MARK_ORDER } from "@/lib/constants"
 import { cn, formatTakeLabel } from "@/lib/utils"
-import { mutedCard } from "@/lib/styles"
+import { mutedCard, STAGE_POP_STYLE } from "@/lib/styles"
 import type {
   PatchTakeBody,
   SceneDTO,
@@ -82,7 +82,7 @@ function SceneBadge({
             Scene {label}
           </Badge>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-56">
+        <DropdownMenuContent align="start" className="w-56" style={STAGE_POP_STYLE}>
           <DropdownMenuLabel>移动到场次</DropdownMenuLabel>
           {scenes.length === 0 && (
             <DropdownMenuItem disabled>
@@ -151,26 +151,15 @@ function TakeNumberBadge({
             Take {formatTakeLabel(take)}
           </Badge>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-48 p-2">
+        <DropdownMenuContent align="start" className="w-56 p-2" style={STAGE_POP_STYLE}>
           <DropdownMenuLabel className="px-1">Take 编号</DropdownMenuLabel>
           <form
             onSubmit={(e) => {
               e.preventDefault()
               commit()
             }}
-            className="flex items-center gap-1.5 px-1"
           >
-            <Input
-              autoFocus
-              type="number"
-              min={1}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              className="h-8 text-sm"
-            />
-            <Button type="submit" size="icon-sm" className="rounded-full">
-              <Check className="size-3.5" />
-            </Button>
+            <StepperField value={draft} onValueChange={setDraft} placeholder="例：5" />
           </form>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -220,25 +209,15 @@ function ShotBadge({
             {take.shot ? `Shot ${take.shot}` : "+ Shot"}
           </Badge>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-48 p-2">
+        <DropdownMenuContent align="start" className="w-56 p-2" style={STAGE_POP_STYLE}>
           <DropdownMenuLabel className="px-1">Shot</DropdownMenuLabel>
           <form
             onSubmit={(e) => {
               e.preventDefault()
               commit()
             }}
-            className="flex items-center gap-1.5 px-1"
           >
-            <Input
-              autoFocus
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder="例：2A（留空清除）"
-              className="h-8 text-sm"
-            />
-            <Button type="submit" size="icon-sm" className="rounded-full">
-              <Check className="size-3.5" />
-            </Button>
+            <StepperField value={draft} onValueChange={setDraft} placeholder="例：2A（留空清除）" />
           </form>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -269,7 +248,7 @@ function StatusBadge({
           {STATUS_LABEL[status]}
         </Badge>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start">
+      <DropdownMenuContent align="start" style={STAGE_POP_STYLE}>
         <DropdownMenuLabel>修改状态</DropdownMenuLabel>
         {(MARK_ORDER as TakeStatus[]).map((s) => (
           <DropdownMenuItem

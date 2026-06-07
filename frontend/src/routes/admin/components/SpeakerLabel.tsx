@@ -6,6 +6,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { speakerColor, speakerDot } from "@/lib/constants"
+import { STAGE_POP_STYLE } from "@/lib/styles"
 import { cn } from "@/lib/utils"
 
 const UNKNOWN_LABEL = "未知"
@@ -49,7 +50,7 @@ export function SpeakerLabel({
           {label}：
         </span>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start">
+      <DropdownMenuContent align="start" style={STAGE_POP_STYLE}>
         <DropdownMenuLabel>切换说话人</DropdownMenuLabel>
         {options.map((opt) => (
           <DropdownMenuItem

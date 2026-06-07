@@ -8,6 +8,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useSpeakers } from "@/lib/api"
+import { STAGE_POP_STYLE } from "@/lib/styles"
 import { ChevronDown, Users } from "lucide-react"
 
 interface Props {
@@ -44,7 +45,7 @@ export default function TakeSpeakerSelect({ value, onChange, disabled }: Props) 
           <ChevronDown className="size-3 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
+      <DropdownMenuContent align="end" className="w-56" style={STAGE_POP_STYLE}>
         <DropdownMenuLabel>在场演员</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {list.length === 0 && (
