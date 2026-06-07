@@ -1329,7 +1329,7 @@ def test_dev_seed_creates_active_scene(tmp_path, monkeypatch) -> None:
     app = build_app()
     scenes = app.state.orchestrator.dal.list_scenes()
     assert len(scenes) == 1, f"播种后应有 1 个 scene，实际 {len(scenes)} 个"
-    assert scenes[0]["scene_code"] == "Scene_1"
+    assert scenes[0]["scene_code"] == "1"
     assert scenes[0]["is_active"] == 1
 
 
