@@ -24,6 +24,12 @@ reasonix.toml
 .env.*
 !.env.example
 
+# 本机 HTTPS 证书 + 渲染出的 Caddyfile（每台机不同，由 scripts/setup-https.sh 生成，不入库）
+# 模板 Caddyfile.template 是源码，正常进 git
+certs/
+*.pem
+/Caddyfile
+
 # Python (backend)
 __pycache__/
 *.py[cod]
