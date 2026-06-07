@@ -110,6 +110,7 @@ def test_ambiguous_suffix_clarifies() -> None:
     ]
     r = resolve_targets(_ext(deictic="none", take_ordinals=[1]), _ctx(), _FakeDAL(takes))
     assert r.clarify and {c.take_id for c in r.candidates} == {1, 2}
+    assert {c.take_suffix for c in r.candidates} == {"", "+"}
 
 
 def test_current_but_no_active_take_clarifies() -> None:
@@ -138,3 +139,20 @@ def test_unknown_scene_clarifies() -> None:
         _FakeDAL(SCENE_TAKES),
     )
     assert r.clarify and r.take_ids == []
+
+
+def test_explicit_shot_without_take_clarifies() -> None:
+    # 第四进过了：shot_ordinal=4、无 take 号、deictic=none → 不能硬标当前条，必须 clarify
+    r = resolve_targets(_ext(deictic="none", shot_ordinal=4), _ctx(), _FakeDAL(SCENE_TAKES))
+    assert r.clarify and r.take_ids == []
+
+
+def test_explicit_scene_without_take_clarifies() -> None:
+    r = resolve_targets(_ext(deictic="none", scene_ordinal=1), _ctx(), _FakeDAL(SCENE_TAKES))
+    assert r.clarify and r.take_ids == []
+
+
+def test_no_explicit_none_deictic_falls_back_to_current() -> None:
+    # 没点场/镜、deictic=none、无 ordinals（如「收音有点小」模型给 none）→ 兜底当前活跃条
+    r = resolve_targets(_ext(deictic="none"), _ctx(), _FakeDAL(SCENE_TAKES))
+    assert r.take_ids == [3] and not r.clarify

@@ -351,6 +351,7 @@ export interface ClarifyCandidate {
   scene_code: string
   shot: string | number
   take_number: number
+  take_suffix: string
   status: string
 }
 

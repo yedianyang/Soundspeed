@@ -33,6 +33,7 @@ class ClarifyCandidate:
     scene_code: str
     shot: str
     take_number: int
+    take_suffix: str
     status: str
 
 
@@ -50,6 +51,7 @@ def _candidate(take: Any, scene_code: str) -> ClarifyCandidate:
         scene_code=scene_code,
         shot=take.shot,
         take_number=take.take_number,
+        take_suffix=take.take_suffix,
         status=take.status,
     )
 
@@ -104,10 +106,14 @@ def resolve_targets(extraction: Any, ctx: NPContext, dal: Any) -> ResolveResult:
             take_ids.append(matches[0].take_id)
         return ResolveResult(take_ids=take_ids, clarify=False, message=None)
 
-    # 5. deictic=none 且无 ordinals → 兜底当前活跃 take（设计 §3.2 / spike Case 6）。
-    if ctx.current_take_id is not None:
-        return ResolveResult(take_ids=[ctx.current_take_id], clarify=False, message=None)
-    return _clarify("没有指明 take，且当前无活跃录制", [])
+    # 5. deictic=none 且无 ordinals：
+    #    未显式点场/镜 → 兜底当前活跃 take（如「收音有点小」，spike Case 6）；
+    #    显式点了场/镜却没说第几条 → clarify（不能硬标当前条，根治「硬标错」，设计 §3.2）。
+    if extraction.scene_ordinal == 0 and extraction.shot_ordinal == 0:
+        if ctx.current_take_id is not None:
+            return ResolveResult(take_ids=[ctx.current_take_id], clarify=False, message=None)
+        return _clarify("没有指明 take，且当前无活跃录制", [])
+    return _clarify("指定了场/镜但没说第几条，请说明是哪一条", [])
 
 
 def _resolve_prev(dal: Any, scene_id: int | None, shot: str, ctx: NPContext) -> Any | None:

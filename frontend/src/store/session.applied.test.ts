@@ -53,7 +53,7 @@ describe("noteClarify", () => {
     const m: NoteClarifyMsg = {
       client_id: "cid",
       message: "第1条有多条",
-      candidates: [{ take_id: 1, scene_code: "1", shot: "", take_number: 1, status: "tbd" }],
+      candidates: [{ take_id: 1, scene_code: "1", shot: "", take_number: 1, take_suffix: "", status: "tbd" }],
       ts: 9,
     }
     useSessionStore.getState().noteClarify(m)

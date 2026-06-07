@@ -72,7 +72,7 @@ function ClarifyRow({
             {c.candidates
               .map(
                 (cand) =>
-                  `${cand.scene_code}/${cand.shot || "无镜"}/第${formatTakeLabel({ take_number: cand.take_number })}条（${cand.status}）`,
+                  `${cand.scene_code}/${cand.shot || "无镜"}/第${formatTakeLabel({ take_number: cand.take_number, take_suffix: cand.take_suffix })}条（${cand.status}）`,
               )
               .join("　")}
           </span>
