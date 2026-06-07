@@ -244,7 +244,7 @@ export default function BottomControlBar({
                   <ChevronDown className="size-3 text-muted-foreground" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-56">
+              <DropdownMenuContent side="top" align="start" className="w-56">
                 <DropdownMenuLabel>切换场次</DropdownMenuLabel>
                 {scenes.length === 0 && (
                   <DropdownMenuItem disabled>
@@ -298,8 +298,8 @@ export default function BottomControlBar({
                   <ChevronDown className="size-3 text-muted-foreground" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-56 p-2">
-                <DropdownMenuLabel className="px-1">Shot</DropdownMenuLabel>
+              <DropdownMenuContent side="top" align="start" className="w-56 p-2">
+                <DropdownMenuLabel className="px-1">切换镜号</DropdownMenuLabel>
                 <form
                   onSubmit={(e) => {
                     e.preventDefault()
@@ -335,8 +335,8 @@ export default function BottomControlBar({
                   <ChevronDown className="size-3 text-muted-foreground" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-56 p-2">
-                <DropdownMenuLabel className="px-1">Take</DropdownMenuLabel>
+              <DropdownMenuContent side="top" align="start" className="w-56 p-2">
+                <DropdownMenuLabel className="px-1">切换次号</DropdownMenuLabel>
                 <form
                   onSubmit={(e) => {
                     e.preventDefault()
