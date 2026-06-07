@@ -6,7 +6,6 @@ import {
   Trash2,
   Undo2,
   ChevronDown,
-  MessageSquareText,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -33,6 +32,10 @@ import type { Status } from "@/types/take"
 import type { SceneDTO, LlmState } from "@/types/api"
 import TakeSpeakerSelect from "@/components/admin/TakeSpeakerSelect"
 import MemoInput from "@/components/admin/MemoInput"
+import GemmaIcon from "@/components/icons/GemmaIcon"
+
+// 关掉 tw-animate-css 的 zoom-in 入场缩放（消除底栏弹窗打开时 1-2px 横向抖动）。
+const STAGE_POP_STYLE = { "--tw-enter-scale": "1" } as React.CSSProperties
 
 interface BottomControlBarProps {
   isRecording: boolean
@@ -136,6 +139,63 @@ function StepperField({
   )
 }
 
+// Shot / Take 共用的「点开→步进器→✓」下拉。受控 open：commit 后自动关闭（修 ✓ 不关弹窗）。
+function StepperDropdown({
+  smallLabel,
+  valueText,
+  popTitle,
+  placeholder,
+  disabled,
+  triggerClassName,
+  triggerTitle,
+  draftInit,
+  onCommit,
+}: {
+  smallLabel: string
+  valueText: string
+  popTitle: string
+  placeholder?: string
+  disabled?: boolean
+  triggerClassName?: string
+  triggerTitle?: string
+  draftInit: () => string
+  onCommit: (value: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState("")
+  return (
+    <DropdownMenu
+      open={open}
+      onOpenChange={(o) => {
+        if (o) setDraft(draftInit())
+        setOpen(o)
+      }}
+    >
+      <DropdownMenuTrigger asChild disabled={disabled}>
+        <Button variant="ghost" size="default" className={triggerClassName} title={triggerTitle}>
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            {smallLabel}
+          </span>
+          <span className="font-semibold text-sm text-foreground truncate">{valueText}</span>
+          <ChevronDown className="size-3 text-muted-foreground" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="top" align="start" className="w-56 p-2" style={STAGE_POP_STYLE}>
+        <DropdownMenuLabel className="px-1">{popTitle}</DropdownMenuLabel>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            onCommit(draft)
+            setOpen(false)
+          }}
+        >
+          <StepperField value={draft} onValueChange={setDraft} placeholder={placeholder} />
+        </form>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 export default function BottomControlBar({
   isRecording,
   onToggleRecording,
@@ -170,23 +230,9 @@ export default function BottomControlBar({
   llmState,
 }: BottomControlBarProps) {
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const [shotDraft, setShotDraft] = useState("")
-  const [takeDraft, setTakeDraft] = useState("")
 
   // currentTakeId 为 null（本会话尚无 take）→ 作用于「当前 take」的控件（Mark / Delete）禁用。
   const noTake = currentTakeId == null
-
-  // 改 Shot（事件 6）：只更新 workSlot，不发 PATCH。空输入归一为 null（→ 空 shot）。
-  const commitShot = () => {
-    const v = shotDraft.trim()
-    onChangeShot(v ? v : null)
-  }
-
-  // 改 Take：解析为正整数才提交（take 号从 1 起，挡掉空/0/负/非数字）。
-  const commitTake = () => {
-    const n = Number.parseInt(takeDraft.trim(), 10)
-    if (Number.isFinite(n) && n >= 1) onChangeTake(n)
-  }
 
   // 录制中（E）：Scene / Shot / Next Take / Delete / 撤销 全禁，只有 Mark 可点。
   // 因录制而禁用的控件加淡红遮罩（recordingDisabled），区别于普通灰色 disabled（opacity-50）。
@@ -244,7 +290,7 @@ export default function BottomControlBar({
                   <ChevronDown className="size-3 text-muted-foreground" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent side="top" align="start" className="w-56" style={{ "--tw-enter-scale": "1" } as React.CSSProperties}>
+              <DropdownMenuContent side="top" align="start" className="w-56" style={STAGE_POP_STYLE}>
                 <DropdownMenuLabel>切换场次</DropdownMenuLabel>
                 {scenes.length === 0 && (
                   <DropdownMenuItem disabled>
@@ -277,76 +323,38 @@ export default function BottomControlBar({
             </DropdownMenu>
 
             {/* Shot（事件 6）：free-text，提交后只改 workSlot，不发 PATCH（改 shot = 换镜，非改历史）。 */}
-            <DropdownMenu
-              onOpenChange={(open) => {
-                if (open) setShotDraft(slotShot ?? "")
+            <StepperDropdown
+              smallLabel="Shot"
+              valueText={slotShot ?? "—"}
+              popTitle="切换镜号"
+              placeholder="例：2A"
+              disabled={shotDisabled}
+              triggerClassName={cn(stageButton, disabledTone(true, shotDisabled))}
+              triggerTitle={isRecording ? "录制中不可换镜" : "换镜（改待录 Shot）"}
+              draftInit={() => slotShot ?? ""}
+              onCommit={(v) => {
+                const t = v.trim()
+                onChangeShot(t ? t : null)
               }}
-            >
-              <DropdownMenuTrigger asChild disabled={shotDisabled}>
-                <Button
-                  variant="ghost"
-                  size="default"
-                  className={cn(stageButton, disabledTone(true, shotDisabled))}
-                  title={isRecording ? "录制中不可换镜" : "换镜（改待录 Shot）"}
-                >
-                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                    Shot
-                  </span>
-                  <span className="font-semibold text-sm text-foreground truncate">
-                    {slotShot ?? "—"}
-                  </span>
-                  <ChevronDown className="size-3 text-muted-foreground" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent side="top" align="start" className="w-56 p-2" style={{ "--tw-enter-scale": "1" } as React.CSSProperties}>
-                <DropdownMenuLabel className="px-1">切换镜号</DropdownMenuLabel>
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault()
-                    commitShot()
-                  }}
-                >
-                  <StepperField value={shotDraft} onValueChange={setShotDraft} placeholder="例：2A" />
-                </form>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            />
 
             {/* Take（与 Shot 同构的下拉数字弹窗）：读 workSlot.take_number 显示已录最新（空组为 1）。
                 平时 REC 由后端按 Shot 自动计次；用户可手动改待录号，下一次 REC 作为显式号传后端
                 （撞 live 号后端落后缀）。 */}
-            <DropdownMenu
-              onOpenChange={(open) => {
-                if (open) setTakeDraft(slotTakeNumber != null ? String(slotTakeNumber) : "")
+            <StepperDropdown
+              smallLabel="Take"
+              valueText={slotTakeLabel}
+              popTitle="切换次号"
+              placeholder="例：5"
+              disabled={takeDisabled}
+              triggerClassName={cn(stageButton, disabledTone(true, takeDisabled))}
+              triggerTitle={isRecording ? "录制中不可改号" : "改待录 Take 号"}
+              draftInit={() => (slotTakeNumber != null ? String(slotTakeNumber) : "")}
+              onCommit={(v) => {
+                const n = Number.parseInt(v.trim(), 10)
+                if (Number.isFinite(n) && n >= 1) onChangeTake(n)
               }}
-            >
-              <DropdownMenuTrigger asChild disabled={takeDisabled}>
-                <Button
-                  variant="ghost"
-                  size="default"
-                  className={cn(stageButton, disabledTone(true, takeDisabled))}
-                  title={isRecording ? "录制中不可改号" : "改待录 Take 号"}
-                >
-                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                    Take
-                  </span>
-                  <span className="font-semibold text-sm text-foreground">
-                    {slotTakeLabel}
-                  </span>
-                  <ChevronDown className="size-3 text-muted-foreground" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent side="top" align="start" className="w-56 p-2" style={{ "--tw-enter-scale": "1" } as React.CSSProperties}>
-                <DropdownMenuLabel className="px-1">切换次号</DropdownMenuLabel>
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault()
-                    commitTake()
-                  }}
-                >
-                  <StepperField value={takeDraft} onValueChange={setTakeDraft} placeholder="例：5" />
-                </form>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            />
 
             {/* Mark：改当前 take 的 status（循环 MARK_ORDER）。无 take → 禁用。 */}
             <Button
@@ -448,7 +456,7 @@ export default function BottomControlBar({
                 )}
               />
               {/* 窄屏只留状态点 + 图标省宽；宽屏（横屏 lg）恢复「LLM 历史」全文。 */}
-              <MessageSquareText className="size-4 text-foreground lg:hidden" />
+              <GemmaIcon className="size-6 text-[#4285F4] lg:hidden" />
               <span className="hidden lg:inline text-sm font-medium text-foreground">LLM 历史</span>
             </Button>
           </div>

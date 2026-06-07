@@ -12,6 +12,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import BottomControlBar from "@/components/admin/BottomControlBar"
 import InlineFeedbackQueue from "@/components/admin/InlineFeedbackQueue"
 import { LLMArchiveSheet } from "@/components/admin/LLMArchiveSheet"
+import GemmaIcon from "@/components/icons/GemmaIcon"
 import { MARK_ORDER } from "@/lib/constants"
 import { cn, formatTakeLabel } from "@/lib/utils"
 import { formatFileName } from "@/lib/filename-format"
@@ -468,29 +469,12 @@ export default function AdminHome() {
     setWorkSlot({ ...workSlot, take_number: n })
   }
 
-  // ---- Next take（事件 4）：在同 (scene, shot) 建一个新的空 take 块，不自动开录。----
-  // shot 取自 workSlot（换镜后是新 shot，不是 currentTakeRecord 的旧 shot）。若有未结束的当前 take
-  //（Next-Take-after-Next-Take）先 endTake 再 startTake。录制中本按钮已禁用。新块经 refetch 回来后
-  // workSlot 更新到该组最新 live take。
-  const handleNextTake = async () => {
-    if (!activeScene || !workSlot) {
-      setRecError("无活跃场次")
-      return
-    }
-    setRecError(null)
-    setManualTakeNumber(null) // Next Take 走后端自动取号，手动号失效
-    const sceneId = activeScene.scene_id
-    const shot = workSlot.shot
-    try {
-      if (currentTakeRecord != null && !currentTakeEnded) {
-        await endTakeMut.mutateAsync()
-      }
-      await startTakeMut.mutateAsync({ sceneId, shot: shot === "" ? null : shot })
-      syncWorkSlotFromCacheToGroup(sceneId, shot)
-    } catch (err) {
-      console.error("nextTake failed", err)
-      setRecError("起下一条 take 失败")
-    }
+  // ---- Next take：只把待录 take 号 +1（场记过空条/跳号用），不建实际 take 块、----
+  // 不调 start/end take API。下一次 REC 会用这个号（经 handleChangeTake 写入 manualTakeNumber）。
+  // 录制中禁用。
+  const handleNextTake = () => {
+    if (!workSlot || isRecording) return
+    handleChangeTake((workSlot.take_number ?? 0) + 1)
   }
 
   // ---- Delete（事件 7）：删 workSlot 组最新一条 take（软删，二次确认在 BottomControlBar 内）。----
@@ -573,7 +557,8 @@ export default function AdminHome() {
               <LiveLevelMeter level={displayLevel} count={7} color="bg-green-500" className="ml-0.5" />
             </StatusChip>
             <StatusChip
-              label="LLM"
+              label="Gemma 4"
+              icon={<GemmaIcon className="size-5 text-[#4285F4]" />}
               tone={LLM_CHIP[llmState].tone}
               detail={llmDetail}
               className="flex-shrink-0"
@@ -760,7 +745,7 @@ export default function AdminHome() {
         onChangeShot={handleChangeShot}
         onChangeTake={handleChangeTake}
         onNextTake={handleNextTake}
-        nextTakeBusy={takeBlockBusy}
+        nextTakeBusy={false}
         onDeleteTake={handleDeleteTake}
         canUndo={undoStack.length > 0}
         onUndoDelete={handleUndoDelete}
