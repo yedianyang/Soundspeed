@@ -8,6 +8,7 @@ export function StatusChip({
   detail,
   className,
   onClick,
+  icon,
   children,
 }: {
   label: string
@@ -15,6 +16,7 @@ export function StatusChip({
   detail?: string
   className?: string
   onClick?: () => void
+  icon?: ReactNode
   children?: ReactNode
 }) {
   const dotColor =
@@ -34,6 +36,7 @@ export function StatusChip({
           tone === "warn" && "animate-pulse",
         )}
       />
+      {icon && <span className="flex items-center flex-shrink-0">{icon}</span>}
       <span className="hidden sm:inline text-xs font-medium text-foreground flex-shrink-0">{label}</span>
       {detail && (
         <span className="text-[10px] font-mono text-muted-foreground truncate min-w-0">{detail}</span>
