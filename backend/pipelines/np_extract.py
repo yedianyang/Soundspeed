@@ -97,3 +97,83 @@ def parse_extract_tool_call(tool_call: dict) -> NPExtraction:
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
         raise NPParseError("extract_np tool_call arguments 解析失败", cause=exc)
     return _validate_extraction(data)
+
+
+def _build_extract_system_prompt() -> str:
+    """提取 system prompt（spike 21/24 复跑版 + note_category 句）。上下文行由 orchestrator 拼接追加。"""
+    return (
+        "你是场记助手。把录音师这句话提取成固定结构，每个字段都要填（用哨兵值表示'没有'）。"
+        "映射：第N进/第N镜=shot_ordinal，第N条/第N次=take_ordinal，第N场=scene_ordinal；"
+        "当前场/镜填0；这条=deictic current，上一条/刚才那条=deictic prev，用了编号=deictic none；"
+        "过/通过=mark pass，保/留=keep，废/NG/不行=ng，没打标意图=mark none；"
+        "描述性内容放 note_text，没有填空串；"
+        "技术问题(收音小/灯光暗/穿帮/对焦虚)note_category=issue，否则 note。"
+    )
+
+
+def build_extract_messages(raw_text: str, context_line: str) -> list[dict]:
+    """文本提取 messages：system（语义 + 上下文行）+ user（原话）。"""
+    system = _build_extract_system_prompt()
+    if context_line:
+        system = system + "\n" + context_line
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": raw_text},
+    ]
+
+
+async def run_extract_np(
+    raw_text: str,
+    llm_service: "LLMService",
+    timeout: float = 30.0,
+    context_line: str = "",
+) -> NPExtraction:
+    """文本 NP 提取：forced extract_np → NPExtraction。解析失败 → NPParseError。"""
+    messages = build_extract_messages(raw_text, context_line)
+    try:
+        tool_call = await llm_service.infer_tool(
+            messages, task_type="note_extract", priority=2, timeout=timeout
+        )
+    except LookupError as exc:
+        raise NPParseError("extract_np tool_calls 缺失，模型未走 FC", cause=exc)
+    return parse_extract_tool_call(tool_call)
+
+
+def _build_voice_asr_messages(context_line: str) -> list[dict]:
+    """ASR messages：text 提示 + 音频哨兵（多模态通道）。无强制工具（content 路径）。"""
+    from backend.llm.multimodal import AUDIO_SENTINEL  # noqa: PLC0415
+
+    prompt = "把这段中文语音逐字转写成文本，只输出转写内容，不要解释。"
+    if context_line:
+        prompt = context_line + "\n" + prompt
+    return [
+        {"role": "system", "content": "你是中文语音转写助手。"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": AUDIO_SENTINEL}},
+            ],
+        },
+    ]
+
+
+async def run_extract_np_voice(
+    audio: bytes,
+    llm_service: "LLMService",
+    timeout: float = 60.0,
+    context_line: str = "",
+) -> NPExtraction:
+    """语音 NP（设计 §3.3 两步）：① 多模态 ASR 转写 ② 转写当 raw_text 走同一 extract_np。
+
+    ASR 用无强制工具 task（voice_dispatch_free），避免 forced tool 撞 content-path guardrail。
+    """
+    asr_messages = _build_voice_asr_messages(context_line)
+    transcript = await llm_service.infer_voice(
+        asr_messages, audio, task_type="voice_dispatch_free", priority=1, timeout=timeout
+    )
+    if not transcript or not transcript.strip():
+        raise NPParseError("语音转写为空")
+    return await run_extract_np(
+        transcript.strip(), llm_service, timeout=timeout, context_line=context_line
+    )
