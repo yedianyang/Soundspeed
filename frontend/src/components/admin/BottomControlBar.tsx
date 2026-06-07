@@ -244,7 +244,7 @@ export default function BottomControlBar({
                   <ChevronDown className="size-3 text-muted-foreground" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent side="top" align="start" className="w-56">
+              <DropdownMenuContent side="top" align="start" className="w-56" style={{ "--tw-enter-scale": "1" } as React.CSSProperties}>
                 <DropdownMenuLabel>切换场次</DropdownMenuLabel>
                 {scenes.length === 0 && (
                   <DropdownMenuItem disabled>
@@ -298,7 +298,7 @@ export default function BottomControlBar({
                   <ChevronDown className="size-3 text-muted-foreground" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent side="top" align="start" className="w-56 p-2">
+              <DropdownMenuContent side="top" align="start" className="w-56 p-2" style={{ "--tw-enter-scale": "1" } as React.CSSProperties}>
                 <DropdownMenuLabel className="px-1">切换镜号</DropdownMenuLabel>
                 <form
                   onSubmit={(e) => {
@@ -335,7 +335,7 @@ export default function BottomControlBar({
                   <ChevronDown className="size-3 text-muted-foreground" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent side="top" align="start" className="w-56 p-2">
+              <DropdownMenuContent side="top" align="start" className="w-56 p-2" style={{ "--tw-enter-scale": "1" } as React.CSSProperties}>
                 <DropdownMenuLabel className="px-1">切换次号</DropdownMenuLabel>
                 <form
                   onSubmit={(e) => {
