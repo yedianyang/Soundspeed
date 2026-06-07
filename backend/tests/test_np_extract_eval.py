@@ -36,8 +36,9 @@ SYSTEM_PROMPT = (
     "映射：第N进/第N镜=shot_ordinal，第N条/第N次=take_ordinal，第N场=scene_ordinal；"
     "当前场/镜填0；这条=deictic current，上一条/刚才那条=deictic prev，用了编号=deictic none；"
     "过/通过=mark pass，保/留=keep，废/NG/不行=ng，没打标意图=mark none；"
-    "描述性内容放 note_text，没有填空串；"
-    "技术问题(收音小/灯光暗/穿帮/对焦虚)note_category=issue，否则 note。"
+    "note_text 永远填这句话里要记下来的实际描述（包括技术问题本身那句，如'收音有点小'），"
+    "只有完全没有可记内容时才填空串；note_category 只是给这段 note 贴标签，不替代 note_text："
+    "技术问题(收音小/灯光暗/穿帮/对焦虚/杂音)=issue，否则=note。"
     "当前：第1场 / 第1进 / 当前活跃第3条；上一条=第2条。"
 )
 
