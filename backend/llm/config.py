@@ -25,6 +25,7 @@ tools / tool_choice 字段（Tier 1 function calling）：
   tool-calling/grammar 留给只调一两次的路由 / 场记分析，不进逐场热循环。
 """
 
+from backend.llm.tools.note_extract import EXTRACT_NP_TOOL_NAME, build_extract_np_tool
 from backend.llm.tools.route import ROUTE_TOOL_NAME, build_route_memo_tool
 from backend.llm.tools.script import (
     build_l2_no_script_tool,
@@ -212,6 +213,20 @@ TASK_CONFIG: dict[str, dict] = {
     # note_struct：带 tools + 强制 tool_choice，文本（run_np_note/infer_tool）与语音
     # （run_np_voice/infer_voice_tool）NP 共用——两者都走 forced tool-call，无 content-mode 调用。
     "note_struct": _build_note_task_config(),
+    # NP 一步式提取：forced extract_np（扁平 7 字段，文本/语音 NP 共用，对标 memo_route）。
+    # note_extract.py import-neutral，eager 挂 build_extract_np_tool() 安全（无 np_* 依赖）。
+    # max_tokens=256 对齐 spike（提取输出 50-150 token）；temperature=0.2 对齐 spike 21/24。
+    "note_extract": {
+        "max_tokens": 256,
+        "temperature": 0.2,
+        "priority": 2,
+        "system": "把录音师话语一次性提取成固定结构（扁平全 required 哨兵）。真 system prompt 由 pipeline 组装。",
+        "tools": [build_extract_np_tool()],
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": EXTRACT_NP_TOOL_NAME},
+        },
+    },
     # 入口调度器：forced 二分类 route_memo(kind: note|query)。route.py import-neutral，
     # eager 挂 build_route_memo_tool() 安全（无 np_note 依赖，无须 lazy）。
     "memo_route": {
