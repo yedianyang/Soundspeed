@@ -24,6 +24,7 @@ TakeDTO 有意省略 performer_issues / audio_quality（codex P2）：
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import time
 from datetime import datetime
@@ -369,6 +370,39 @@ class ScriptCommitOut(BaseModel):
     skipped: bool
 
 
+class ScriptDiffBody(BaseModel):
+    """POST /scenes/{scene_id}/script/diff 请求体：新解析的逐行（照片 OCR / 文本），与该场最新版做增量对照。"""
+
+    lines: list[ScriptLineIn]
+
+
+class ScriptDiffRow(BaseModel):
+    """一行增量对照。
+
+    status：equal=未变（留旧）/ changed=改动（取新）/ added=新增（取新）/
+    kept=旧有新无（保留旧，防 OCR 漏字漏行）。old/new 视状态可空。
+    """
+
+    status: Literal["equal", "changed", "added", "kept"]
+    old: ScriptLineIn | None = None
+    new: ScriptLineIn | None = None
+
+
+class ScriptDiffOut(BaseModel):
+    """增量对照结果。
+
+    has_old=False → 该场无旧版，rows 全为 added、merged 即新行（前端可直接确认）。
+    merged：落库用合并行（确认时作为 update_scene_script.lines 提交）。
+    merged_raw_text：由 merged 重建的源文本（确认时作为 raw_text 提交），保证落库 raw_text↔lines
+    一致——OCR 漏行触发 kept 时 merged 含旧行，不能再用 OCR 原文当 raw_text（否则幂等指纹/复算失真）。
+    """
+
+    has_old: bool
+    rows: list[ScriptDiffRow]
+    merged: list[ScriptLineIn]
+    merged_raw_text: str
+
+
 @router.get("/scenes/{scene_id}/script")
 async def get_scene_script(
     scene_id: int,
@@ -435,6 +469,99 @@ async def update_scene_script(
         version=new_version,
         line_count=len(body.lines),
         skipped=False,
+    )
+
+
+def _script_line_key(line: ScriptLineIn) -> tuple[str, str]:
+    """对齐用归一键：角色归一 + 台词去首尾空白。仅用于 difflib 匹配，不影响输出文本。"""
+    from backend.pipelines.sp_script import normalize_character
+
+    return (normalize_character(line.character) or "", (line.text or "").strip())
+
+
+def _merge_script_lines(
+    old: list[ScriptLineIn], new: list[ScriptLineIn]
+) -> tuple[list[ScriptDiffRow], list[ScriptLineIn]]:
+    """difflib 对齐旧↔新，产出 (rows 供前端对照, merged 落库行)。
+
+    语义（增量增补，见 soundspeed_script_reupload_design）：
+      equal   → 留旧（旧行原样进 merged）
+      replace → 取新（这段确实改了；展示成 changed，old/new 逐个配对，多余一侧单列）
+      insert  → 加新（新有旧无 → added）
+      delete  → 保留旧（旧有新无 → kept；防 OCR 漏字/漏行/只识别半场把内容删没）
+    """
+    sm = difflib.SequenceMatcher(
+        a=[_script_line_key(l) for l in old],
+        b=[_script_line_key(l) for l in new],
+        autojunk=False,
+    )
+    rows: list[ScriptDiffRow] = []
+    merged: list[ScriptLineIn] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for k in range(i1, i2):
+                rows.append(ScriptDiffRow(status="equal", old=old[k], new=old[k]))
+                merged.append(old[k])
+        elif tag == "replace":
+            ob, nb = old[i1:i2], new[j1:j2]
+            for k in range(max(len(ob), len(nb))):
+                rows.append(
+                    ScriptDiffRow(
+                        status="changed",
+                        old=ob[k] if k < len(ob) else None,
+                        new=nb[k] if k < len(nb) else None,
+                    )
+                )
+            merged.extend(nb)
+        elif tag == "insert":
+            for k in range(j1, j2):
+                rows.append(ScriptDiffRow(status="added", old=None, new=new[k]))
+                merged.append(new[k])
+        elif tag == "delete":
+            for k in range(i1, i2):
+                rows.append(ScriptDiffRow(status="kept", old=old[k], new=None))
+                merged.append(old[k])
+    return rows, merged
+
+
+@router.post("/scenes/{scene_id}/script/diff")
+async def diff_scene_script(
+    scene_id: int,
+    body: ScriptDiffBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> ScriptDiffOut:
+    """把新解析的逐行与该场最新版做增量对照（不落库，仅预览）。
+
+    用途：照片/文本更新前给用户看「哪些改了、哪些新增、哪些旧的会保留」，确认后把 merged
+    提交到 POST /scenes/{scene_id}/script。OCR 可能漏字/漏行/只识别半场，故旧有新无的行
+    默认【保留旧】(status=kept)，避免增补反把内容删没。无旧版 → has_old=False、全 added。
+    scene 不存在 → 404。
+    """
+    from backend.core.script_import import _build_raw_text  # noqa: PLC0415
+
+    dal = request.app.state.orchestrator.dal
+    if dal.get_scene_info(scene_id) is None:
+        raise HTTPException(status_code=404, detail="场次不存在")
+
+    new_lines = list(body.lines)
+    latest = dal.get_latest_script(scene_id)
+    if latest is None:
+        rows = [ScriptDiffRow(status="added", old=None, new=l) for l in new_lines]
+        merged = new_lines
+    else:
+        old_lines = [
+            ScriptLineIn(character=r["character"], text=r["text"])
+            for r in dal.list_script_lines(latest["script_id"])
+        ]
+        rows, merged = _merge_script_lines(old_lines, new_lines)
+
+    merged_raw_text = _build_raw_text([(l.character, l.text) for l in merged])
+    return ScriptDiffOut(
+        has_old=latest is not None,
+        rows=rows,
+        merged=merged,
+        merged_raw_text=merged_raw_text,
     )
 
 

@@ -189,6 +189,104 @@ def test_update_scene_script_422_empty_lines(tmp_dal: DAL, monkeypatch) -> None:
     assert resp.status_code == 422
 
 
+def test_diff_keeps_old_line_missing_from_new(tmp_dal: DAL, monkeypatch) -> None:
+    """旧有新无的行 → status=kept 且仍进 merged（防 OCR 漏行把内容删没）。"""
+    sid = tmp_dal.create_scene("S1")
+    scr = tmp_dal.insert_script(sid, "v1")
+    tmp_dal.insert_script_line(scr, 1, "夏雨", "你来了。")
+    tmp_dal.insert_script_line(scr, 2, "顾朗", "嗯。")
+    tmp_dal.insert_script_line(scr, 3, "夏雨", "走吧。")
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        f"/api/v1/scenes/{sid}/script/diff",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+        json={
+            "lines": [
+                {"character": "夏雨", "text": "你来了。"},
+                {"character": "夏雨", "text": "走吧。"},  # 漏掉了「顾朗 嗯。」
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_old"] is True
+    assert [r["status"] for r in body["rows"]] == ["equal", "kept", "equal"]
+    # merged_raw_text 由 merged 重建（character：text 换行拼），与落库 lines 一致
+    assert body["merged_raw_text"] == "夏雨：你来了。\n顾朗：嗯。\n夏雨：走吧。"
+    assert [(l["character"], l["text"]) for l in body["merged"]] == [
+        ("夏雨", "你来了。"),
+        ("顾朗", "嗯。"),  # 被漏掉的旧行保留
+        ("夏雨", "走吧。"),
+    ]
+
+
+def test_diff_marks_added_and_changed(tmp_dal: DAL, monkeypatch) -> None:
+    """新增行→added、改动行→changed（取新文本）；新增/改动夹在相等锚点间，difflib 不折叠成同一块。"""
+    sid = tmp_dal.create_scene("S1")
+    scr = tmp_dal.insert_script(sid, "v1")
+    tmp_dal.insert_script_line(scr, 1, "夏雨", "你来了。")
+    tmp_dal.insert_script_line(scr, 2, "顾朗", "嗯。")
+    tmp_dal.insert_script_line(scr, 3, "夏雨", "走吧。")
+    tmp_dal.insert_script_line(scr, 4, "顾朗", "好。")
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        f"/api/v1/scenes/{sid}/script/diff",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+        json={
+            "lines": [
+                {"character": "夏雨", "text": "你来了。"},
+                {"character": "林夏", "text": "我也在。"},  # added
+                {"character": "顾朗", "text": "嗯。"},
+                {"character": "夏雨", "text": "快走。"},  # changed vs 走吧。
+                {"character": "顾朗", "text": "好。"},
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [r["status"] for r in body["rows"]] == ["equal", "added", "equal", "changed", "equal"]
+    assert [(l["character"], l["text"]) for l in body["merged"]] == [
+        ("夏雨", "你来了。"),
+        ("林夏", "我也在。"),
+        ("顾朗", "嗯。"),
+        ("夏雨", "快走。"),  # 取新文本，旧「走吧。」被替换
+        ("顾朗", "好。"),
+    ]
+
+
+def test_diff_no_old_all_added(tmp_dal: DAL, monkeypatch) -> None:
+    """该场无旧版 → has_old=False，全部 added，merged 即新行。"""
+    sid = tmp_dal.create_scene("S1")
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+
+    resp = client.post(
+        f"/api/v1/scenes/{sid}/script/diff",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+        json={"lines": [{"character": "夏雨", "text": "你来了。"}]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_old"] is False
+    assert [r["status"] for r in body["rows"]] == ["added"]
+    assert body["merged"] == [{"character": "夏雨", "text": "你来了。"}]
+
+
+def test_diff_404_missing_scene(tmp_dal: DAL, monkeypatch) -> None:
+    orch = create_orchestrator(tmp_dal)
+    client = _make_client(orch, monkeypatch)
+    resp = client.post(
+        "/api/v1/scenes/99999/script/diff",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+        json={"lines": [{"character": "A", "text": "t"}]},
+    )
+    assert resp.status_code == 404
+
+
 def test_take_start_without_token_returns_401(tmp_dal: DAL, monkeypatch) -> None:
     """POST /api/v1/take/start 无 Authorization 头 → 401。"""
     orch = create_orchestrator(tmp_dal)
