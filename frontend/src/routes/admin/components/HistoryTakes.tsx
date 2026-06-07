@@ -33,7 +33,7 @@ import {
 } from "@/lib/api"
 import { useSessionStore } from "@/store/session"
 import { ScriptDiffView } from "./ScriptDiffView"
-import { SpeakerLabel } from "./SpeakerLabel"
+import { SpokenSegment } from "./SpokenSegment"
 import { MergedTranscriptView } from "./MergedTranscriptView"
 
 type PatchTakeMutation = UseMutationResult<
@@ -395,25 +395,17 @@ function TakeDetail({
       ) : (
         <>
           {/* 无 juxtaposition（无剧本 / 老库 / L2 未完成）：保留独立实录块 + 完整 ScriptDiffView。
-              ch1 主对话转录 speaker 可点纠正；key 绑 speaker 强制 SpeakerLabel 重挂载，绕过 Radix
-              asChild trigger 复用 DOM、重渲染却不重绘文本的问题（数据/重渲染本身正常，见排查记录）。 */}
+              ch1 主对话转录 speaker 可点纠正（复用 SpokenSegment，与合并视图同一组件）。 */}
           {ch1Segs.length > 0 ? (
             <div className="space-y-1.5">
               {ch1Segs.map((seg) => (
-                <div key={seg.segment_id}>
-                  <p className="text-sm">
-                    <SpeakerLabel
-                      key={String(seg.speaker)}
-                      speaker={seg.speaker}
-                      options={candidates}
-                      onChange={(next) => handleCorrect(seg, next)}
-                    />{" "}
-                    {seg.text}
-                  </p>
-                  {failedSegId === seg.segment_id && (
-                    <p className="text-xs text-destructive">说话人纠正失败，请重试</p>
-                  )}
-                </div>
+                <SpokenSegment
+                  key={seg.segment_id}
+                  seg={seg}
+                  candidates={candidates}
+                  onCorrect={handleCorrect}
+                  failedSegId={failedSegId}
+                />
               ))}
             </div>
           ) : (

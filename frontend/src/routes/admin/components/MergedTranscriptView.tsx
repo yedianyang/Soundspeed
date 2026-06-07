@@ -1,5 +1,5 @@
 import type { JuxtaLine, TranscriptSegmentDTO } from "@/types/api"
-import { SpeakerLabel } from "./SpeakerLabel"
+import { SpokenSegment } from "./SpokenSegment"
 
 interface Props {
   rows: JuxtaLine[]
@@ -9,38 +9,7 @@ interface Props {
   failedSegId: number | null
 }
 
-// 一条实录段（左列）：说话人可点纠正 + 文本。纠正即时落库+刷新，说话人天然同步到本视图。
-function SpokenSeg({
-  seg,
-  candidates,
-  onCorrect,
-  failedSegId,
-}: {
-  seg: TranscriptSegmentDTO
-  candidates: (string | null)[]
-  onCorrect: (seg: TranscriptSegmentDTO, next: string | null) => void
-  failedSegId: number | null
-}) {
-  return (
-    <div>
-      <p className="text-sm">
-        {/* key 绑 speaker：强制 SpeakerLabel 重挂载，绕过 Radix asChild trigger 复用 DOM 不重绘文本 */}
-        <SpeakerLabel
-          key={String(seg.speaker)}
-          speaker={seg.speaker}
-          options={candidates}
-          onChange={(next) => onCorrect(seg, next)}
-        />{" "}
-        {seg.text}
-      </p>
-      {failedSegId === seg.segment_id && (
-        <p className="text-xs text-destructive">说话人纠正失败，请重试</p>
-      )}
-    </div>
-  )
-}
-
-// 剧本侧（右列）：行号 + 角色 + 台词。insertion / 实录独有时显示「（剧本无）」。
+// 剧本侧（右列）：行号 + 角色 + 台词。无剧本行（实录独有 / insertion）显示「（剧本无）」。
 function ScriptCell({ line }: { line: JuxtaLine | null }) {
   return (
     <div className="flex gap-1.5 min-w-0">
@@ -62,9 +31,10 @@ function ScriptCell({ line }: { line: JuxtaLine | null }) {
 }
 
 // 合并后的一行：matched=实录段↔剧本行对上；spoken=实录独有（剧本无）；missing=漏说（剧本有、没说）。
+// matched/spoken 都用 segs 数组，左列渲染统一；missing 无实录段。
 type MergedRow =
   | { kind: "matched"; line: JuxtaLine; segs: TranscriptSegmentDTO[] }
-  | { kind: "spoken"; seg: TranscriptSegmentDTO }
+  | { kind: "spoken"; segs: TranscriptSegmentDTO[] }
   | { kind: "missing"; line: JuxtaLine }
 
 // 序列对齐（merge-diff）：以实录时间顺序为主线，剧本去匹配；两边对不上的就地穿插。
@@ -81,15 +51,10 @@ function buildMergedRows(rows: JuxtaLine[], ch1Segs: TranscriptSegmentDTO[]): Me
     }
   }
 
-  // 漏说的对白行（剧本有、没人说），按 line_no 升序，供穿插。
+  // 漏说的对白行（剧本有、没人说：对白行 + 无对齐段），按 line_no 升序供穿插。
+  // 无 segment_ids ⟺ 未说（skeleton 行 spoken_text 也必为 None），故无需再判 spoken_text。
   const missing = rows
-    .filter(
-      (r) =>
-        r.line_no >= 0 &&
-        r.character != null &&
-        (r.segment_ids?.length ?? 0) === 0 &&
-        r.spoken_text == null,
-    )
+    .filter((r) => r.line_no >= 0 && r.character != null && (r.segment_ids?.length ?? 0) === 0)
     .sort((a, b) => a.line_no - b.line_no)
 
   const out: MergedRow[] = []
@@ -113,7 +78,7 @@ function buildMergedRows(rows: JuxtaLine[], ch1Segs: TranscriptSegmentDTO[]): Me
       out.push({ kind: "matched", line: row, segs })
     } else {
       // 实录独有（insertion / 孤儿 / 对到非对白行）：右侧「剧本无」，落在时间线本位。
-      out.push({ kind: "spoken", seg })
+      out.push({ kind: "spoken", segs: [seg] })
     }
   }
   // 剩下的漏说行（在最后一个匹配点之后才出现的）补在末尾。
@@ -184,13 +149,13 @@ export function MergedTranscriptView({
           key={i}
           className="grid grid-cols-2 gap-3 text-sm border-t border-border/30 pt-1.5"
         >
-          {/* 左：实录 */}
+          {/* 左：实录（matched/spoken 渲染各自的段；missing 标「未说」） */}
           <div className="min-w-0 space-y-0.5">
             {row.kind === "missing" ? (
               <span className="text-muted-foreground/40 italic">（未说）</span>
-            ) : row.kind === "matched" ? (
+            ) : (
               row.segs.map((seg) => (
-                <SpokenSeg
+                <SpokenSegment
                   key={seg.segment_id}
                   seg={seg}
                   candidates={candidates}
@@ -198,13 +163,6 @@ export function MergedTranscriptView({
                   failedSegId={failedSegId}
                 />
               ))
-            ) : (
-              <SpokenSeg
-                seg={row.seg}
-                candidates={candidates}
-                onCorrect={onCorrect}
-                failedSegId={failedSegId}
-              />
             )}
           </div>
           {/* 右：台词（剧本）—— matched/missing 显示剧本行；spoken（实录独有）显示「剧本无」 */}

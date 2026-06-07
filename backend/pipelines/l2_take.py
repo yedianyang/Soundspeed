@@ -208,13 +208,17 @@ def _truncate_segments(segments: list[dict]) -> tuple[list[dict], bool]:
     return result, True
 
 
-def _build_user_message(input_data: L2Input) -> str:
+def _build_user_message(
+    input_data: L2Input, truncated_segments: list[dict], was_truncated: bool
+) -> str:
     """组装 user message（§5 模板）。
 
     script_lines 为空时走无剧本路径：不含剧本块、不含 insertion/比对任务，
     只含转录记录和纯纠错任务。
+
+    truncated_segments / was_truncated 由 caller（run_l2_take）截断一次后传入，
+    与并置文档复用同一份截断结果——避免重复截断，且保证 seg_idx 下标基准一致。
     """
-    truncated_segments, was_truncated = _truncate_segments(input_data.transcript_segments)
     transcript_block = _build_transcript_block(truncated_segments, was_truncated)
 
     if not input_data.script_lines:
@@ -531,8 +535,11 @@ async def run_l2_take(
     no_script = not input_data.script_lines
     task_type = "l2_take_no_script" if no_script else "l2_take"
 
+    # 截断一次：user message 渲染与并置文档组装复用同一份（seg_idx 下标基准必须一致）。
+    truncated_segments, was_truncated = _truncate_segments(input_data.transcript_segments)
+
     system_prompt = TASK_CONFIG[task_type]["system"]
-    user_message = _build_user_message(input_data)
+    user_message = _build_user_message(input_data, truncated_segments, was_truncated)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -560,11 +567,10 @@ async def run_l2_take(
     # 有剧本路径用 strict=True（原有严格校验），无剧本路径用 strict=False（宽松）
     output = _validate_data_dict(data, strict=not no_script)
 
-    # 并置文档（缺口③）：仅有剧本路径组装。seg_idx 引用截断后转录段，故此处用同一
-    # _truncate_segments（纯函数、确定性，与 _build_user_message 的截断一致）取原文。
+    # 并置文档（缺口③）：仅有剧本路径组装。复用上方截断好的 truncated_segments
+    # （seg_idx 引用的就是这份截断后转录段），不再二次截断。
     if no_script:
         return output
-    truncated_segments, _ = _truncate_segments(input_data.transcript_segments)
     juxtaposition = _build_juxtaposition(
         input_data.script_lines, truncated_segments, output.line_matches
     )
