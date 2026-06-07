@@ -67,13 +67,17 @@ export interface ScriptDTO {
   lines: ScriptLineDTO[]
 }
 
-// 单场原生 FC 解析结果（POST /scripts/parse-single，不入库，供预览/确认）
+// 无 line_no 的剧本行（解析预览 / 增量对照 / 提交入参共用形状；ScriptLineDTO 是带 line_no 的读侧形状）
+export type ScriptLineInput = { character: string | null; text: string }
+
+// 单场解析结果（POST /scripts/parse-single 文本入口 / /scripts/parse-images 照片入口，不入库，供预览/确认）
 export interface ParseSingleResult {
   scene_code: string | null
   int_ext: string | null
   time_of_day: string | null
   location: string | null
-  lines: { character: string | null; text: string }[]
+  lines: ScriptLineInput[]
+  raw_text: string // 解析依据的源文本（文本=粘贴原文；照片=视觉 OCR 转写）；提交时作为该版本 raw_text
 }
 
 // 选中场更新结果（POST /scenes/{id}/script）。skipped=true → 内容无变化未新建版本
@@ -83,6 +87,21 @@ export interface ScriptCommitResult {
   version: number
   line_count: number
   skipped: boolean
+}
+
+// 增量对照（POST /scenes/{id}/script/diff）：新解析行与该场最新版逐行对齐。
+// status：equal=未变 / changed=改动（取新） / added=新增 / kept=旧有新无（保留旧，防 OCR 漏）。
+export interface ScriptDiffRow {
+  status: "equal" | "changed" | "added" | "kept"
+  old: ScriptLineInput | null
+  new: ScriptLineInput | null
+}
+
+export interface ScriptDiffResult {
+  has_old: boolean // false → 该场无旧版，rows 全 added、merged 即新行
+  rows: ScriptDiffRow[]
+  merged: ScriptLineInput[] // 确认时提交给 updateSceneScript 的合并行
+  merged_raw_text: string // 由 merged 重建的源文本，确认时作为 raw_text 提交（与 merged 行一致）
 }
 
 // ── L2 输出：takes.script_diff JSON 顶层形状（docs/specs/2026-05-27-l2-pipeline.md §）──

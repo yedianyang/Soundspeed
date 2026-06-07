@@ -25,13 +25,14 @@ target 取值（spec §6）：
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import logging
 import time
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from backend.api.auth import require_admin
@@ -142,13 +143,18 @@ class ParsedLineOut(BaseModel):
 
 
 class ParseSingleResult(BaseModel):
-    """单场原生 FC 解析结果（不入库，仅返回结构化内容供预览/确认）。"""
+    """单场原生 FC 解析结果（不入库，仅返回结构化内容供预览/确认）。
+
+    raw_text：解析所依据的源文本（文本入口=用户粘贴原文；照片入口=视觉 OCR 转写文本）。
+    提交（update_scene_script）以它作为该版本的 raw_text，统一两种入口的落库与幂等比对。
+    """
 
     scene_code: str | None
     int_ext: str | None
     time_of_day: str | None
     location: str | None
     lines: list[ParsedLineOut]
+    raw_text: str
 
 
 # ── 内部辅助 ─────────────────────────────────────────────────────────────────
@@ -448,11 +454,211 @@ async def parse_single(
         raise HTTPException(422, "文本为空")
 
     scenes = await parse_scene_block_fc(text, llm_service, timeout=180.0)
-    scene = scenes[0]  # 单场：parse_scene_block_fc 恒返回一个 ParsedScene
+    return _scene_to_parse_result(scenes[0], raw_text=text)
+
+
+# ── 照片 → 剧本（3.x 多模态）──────────────────────────────────────────────────
+
+# 单次最多张数：一场剧本通常几页、每页文本不多；上限挡住误传整本相册（每张还各受 _MAX_UPLOAD_BYTES 限）。
+_MAX_IMAGES = 5
+# 扩展名 → MIME 兜底（浏览器一般给 content_type；缺失时按后缀猜，最后退 jpeg）。
+_IMAGE_MIME = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+    "webp": "image/webp", "gif": "image/gif", "bmp": "image/bmp",
+}
+
+
+def _dedup_parsed_lines(lines: list[ParsedLineOut]) -> list[ParsedLineOut]:
+    """折叠连续完全相同的解析行（character+text 都同）——OCR/解析 loop 的最后一道兜底。"""
+    out: list[ParsedLineOut] = []
+    for ln in lines:
+        if out and out[-1].character == ln.character and out[-1].text.strip() == ln.text.strip():
+            continue
+        out.append(ln)
+    return out
+
+
+def _scene_to_parse_result(scene, raw_text: str, *, dedup: bool = False) -> ParseSingleResult:
+    """ParsedScene → ParseSingleResult（parse_single 与 parse_images 共用投影）。
+
+    dedup=True（仅照片路径）：折叠连续完全相同的解析行，兜底 OCR/解析 loop。文本粘贴路径
+    （parse_single）保持 dedup=False，不吞用户原文里合法的连续重复台词。
+    """
+    lines = [ParsedLineOut(character=ln.character, text=ln.text) for ln in scene.lines]
+    if dedup:
+        lines = _dedup_parsed_lines(lines)
     return ParseSingleResult(
         scene_code=scene.scene_code,
         int_ext=scene.slugline.int_ext,
         time_of_day=scene.slugline.time_of_day,
         location=scene.slugline.location,
-        lines=[ParsedLineOut(character=ln.character, text=ln.text) for ln in scene.lines],
+        lines=lines,
+        raw_text=raw_text,
     )
+
+
+def _img_data_uri(data: bytes, content_type: str | None, filename: str) -> str:
+    """图片字节 → data URI（多模态 messages 的 image_url content 用）。"""
+    mime = content_type
+    if not mime or not mime.startswith("image/"):
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        mime = _IMAGE_MIME.get(ext, "image/jpeg")
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+# 回合/特殊标记：模型越界续写时会吐出这些；遇到即视为正文结束，截断其后所有内容。
+_SPECIAL_MARKERS = ("<|turn", "<end_of_turn>", "<start_of_turn>", "<eos>", "<|im_end|>", "<bos>")
+
+
+def _strip_special_tokens(text: str) -> str:
+    """截掉模型越过回合边界后吐出的特殊标记及其之后的全部内容（<|turn|> / <|turn>model 等）。
+
+    OCR 内容本身通常正确，"重复"多是模型不在回合结束处停、继续吐 <|turn|> 再乱写/重写。
+    与生成期的 stop 双保险：stop 让模型早停，这里清掉万一漏网的残留标记 + 越界续写。
+    """
+    cut = len(text)
+    for m in _SPECIAL_MARKERS:
+        i = text.find(m)
+        if i != -1:
+            cut = min(cut, i)
+    return text[:cut]
+
+
+def _dedup_repeated_lines(text: str) -> str:
+    """折叠 OCR 的循环重复行（小模型通病）。两道：
+
+    1. **连续完全相同行 → 折成一条（不限长度）**：根治「上笑。」这类短词连吐 N 遍的 degenerate
+       loop（连续重复绝不可能是合法内容）。代价：丢掉极罕见的合法连续重复行（可接受）。
+    2. 近窗（前 3 条长行）内重复 → 丢：拦近距块循环 A B A B；长度≥4 才入窗，护非连续的合法短句
+       （「好。」「嗯。」等隔行重复仍保留）。
+    """
+    out: list[str] = []
+    recent: list[str] = []  # 最近 3 条已保留的长行（去空白）
+    for ln in text.splitlines():
+        s = ln.strip()
+        if s:
+            if out and out[-1].strip() == s:  # 连续相同（任意长度）
+                continue
+            if len(s) >= 4 and s in recent:  # 近窗块循环
+                continue
+        out.append(ln)
+        if s and len(s) >= 4:
+            recent.append(s)
+            if len(recent) > 3:
+                recent.pop(0)
+    return "\n".join(out)
+
+
+async def _ocr_images_to_text(llm_service, image_data_uris: list[str]) -> str:
+    """视觉 OCR：逐页（每次单图）转写后拼接（无 tools，走多模态 handler）。
+
+    逐页单图而非一次喂多图：根治小模型一次看多图时整段循环重复（用户实测 3 图大量重复）；
+    每页输出也被 max_tokens 封顶，单页跑飞不拖垮整次。按上传顺序拼接成全文。
+    """
+    from backend.llm.config import TASK_CONFIG  # noqa: PLC0415
+
+    system = TASK_CONFIG["script_vision_ocr"]["system"]
+    pages: list[str] = []
+    for uri in image_data_uris:
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "把这张剧本照片逐字转写成纯文本。"},
+                    {"type": "image_url", "image_url": {"url": uri}},
+                ],
+            },
+        ]
+        # 视觉 OCR：1120 image token + n_batch 大，CPU 上偏慢，单页 timeout 放宽到 180s。
+        page = await llm_service.infer(messages, task_type="script_vision_ocr", timeout=180.0)
+        # 先切掉越界续写的特殊标记及其后内容，再折叠残留重复行。
+        page = _dedup_repeated_lines(_strip_special_tokens(page)).strip()
+        if page:
+            pages.append(page)
+    return "\n".join(pages)
+
+
+def _extract_target_scene_text(ocr_text: str, scene_code: str | None) -> str:
+    """从多页 OCR 全文里只取目标场（scene_code）的内容，丢相邻场（上一场尾 / 下一场头）。
+
+    用 split_scenes_by_slugline 按场头切：有显式场号时它本就丢弃首个场号前的前言（=第一页开头
+    上一场的尾巴），再按 scene_code 选中目标场那块（丢掉末页的下一场）。场号归一复用读侧
+    canonical 的 normalize_scene_code（剥 Scene/场/Sc/S 前缀 + 中文序数），与库内匹配口径一致
+    （比纯 alnum 折叠强：SCENE 3A / 3A 都归一为 3A 而能匹配）。
+    无 scene_code / 切不出多块 / 匹配不到 → 原样返回（宁可多带、不丢内容；OCR 没认出场头时的兜底）。
+    """
+    if not scene_code:
+        return ocr_text
+    from backend.db.dal import normalize_scene_code  # noqa: PLC0415
+    from backend.pipelines.sp_script import (  # noqa: PLC0415
+        _split_scene_header,
+        split_scenes_by_slugline,
+    )
+
+    blocks = split_scenes_by_slugline(ocr_text)
+    if len(blocks) <= 1:
+        return ocr_text
+    want = normalize_scene_code(scene_code)
+    for b in blocks:
+        code, _slug, _body = _split_scene_header(b)
+        if code and normalize_scene_code(code) == want:
+            return b
+    return ocr_text
+
+
+@router.post("/parse-images", response_model=ParseSingleResult)
+async def parse_images(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    scene_code: str | None = Form(None),
+    _: None = Depends(require_admin),
+) -> ParseSingleResult:
+    """照片 → 单场剧本：视觉 OCR 逐字转写 → parse_scene_block 结构化一场，**不入库**。
+
+    与 parse-single 同形状返回（含 raw_text=OCR 文本），前端复用同一预览/提交流（SceneUpdateDialog）。
+    解析用**无 grammar** 的 parse_scene_block（非 parse_scene_block_fc）：照片多页 OCR 文本偏长，
+    grammar 强制 FC 在 Gemma 上慢约 5.6×，长文本会超 180s（实测 3 页超时）；本场只需更新内容、
+    不要求结构严格，故走快路径。需多模态模型：SOUNDSPEED_LLM_TEXT_ONLY=1 / mmproj 未加载 → 503。
+    """
+    llm_service = request.app.state.llm_service
+    if llm_service is None:
+        raise HTTPException(503, "LLM 服务未启用，无法解析剧本")
+
+    # 视觉可用性预检：text_only / mmproj 缺失 → 明确指引（去掉 TEXT_ONLY 重启）。
+    from backend.llm.service import _text_only, resolve_mmproj_path  # noqa: PLC0415
+
+    if _text_only() or resolve_mmproj_path(download=False) is None:
+        raise HTTPException(
+            503, "视觉模型未启用（mmproj 未加载）。请去掉 SOUNDSPEED_LLM_TEXT_ONLY=1 后重启后端。"
+        )
+
+    if not files:
+        raise HTTPException(422, "未上传任何图片")
+    if len(files) > _MAX_IMAGES:
+        raise HTTPException(413, f"图片过多（上限 {_MAX_IMAGES} 张）")
+
+    uris: list[str] = []
+    for f in files:
+        data = await f.read()
+        if not data:
+            continue
+        if len(data) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"图片过大（单张上限 10 MB）：{f.filename or '未命名'}")
+        uris.append(_img_data_uri(data, f.content_type, f.filename or ""))
+    if not uris:
+        raise HTTPException(422, "图片为空")
+
+    ocr_text = await _ocr_images_to_text(llm_service, uris)
+    if not ocr_text.strip():
+        raise HTTPException(422, "未能从照片识别出文本")
+
+    # 只取目标场：丢掉首页开头上一场的尾、末页下一场的头（按场头切 + scene_code 选中那块）。
+    scene_text = _extract_target_scene_text(ocr_text, scene_code)
+    if not scene_text.strip():
+        raise HTTPException(422, "未能从照片识别出本场内容")
+
+    # 无 grammar 快解析（照片 OCR 文本偏长，grammar FC 会超时）；返回 [一个 ParsedScene]。
+    scenes = await parse_scene_block(scene_text, llm_service, timeout=180.0)
+    # dedup=True：照片路径才折叠连续重复行（OCR loop 兜底）；文本路径不折叠。
+    return _scene_to_parse_result(scenes[0], raw_text=scene_text, dedup=True)

@@ -371,3 +371,111 @@ def test_parse_single_422_empty_text(tmp_dal: DAL, monkeypatch):
     with _client(tmp_dal, monkeypatch) as c:  # llm 在，过 503 门控；文本空 → 422
         r = c.post("/api/v1/scripts/parse-single", json={"text": "   "}, headers=_HEADERS)
         assert r.status_code == 422
+
+
+# ── 照片 → 单场：POST /scripts/parse-images（视觉 OCR → 复用 FC 解析，不入库）──────
+
+
+def _patch_vision_available(monkeypatch, ocr_text: str) -> None:
+    """假装多模态可用（_text_only=False + mmproj 命中）并把视觉 OCR 替换成固定文本。"""
+    monkeypatch.setattr("backend.llm.service._text_only", lambda: False)
+    monkeypatch.setattr(
+        "backend.llm.service.resolve_mmproj_path", lambda download=False: "/x/mmproj.gguf"
+    )
+
+    async def _fake_ocr(llm, uris):
+        return ocr_text
+
+    monkeypatch.setattr("backend.api.routes.scripts._ocr_images_to_text", _fake_ocr)
+
+
+def test_parse_images_returns_structured(tmp_dal: DAL, monkeypatch):
+    scene = _scene("3", [("罗湘", "你好。")], int_ext="内", tod="日", loc="咖啡馆")
+
+    # 照片路径走无 grammar 的 parse_scene_block（非 _fc）→ patch 它返回固定 scene。
+    async def _fake_block(block, llm, **k):
+        return [scene]
+
+    monkeypatch.setattr("backend.api.routes.scripts.parse_scene_block", _fake_block)
+    _patch_vision_available(monkeypatch, "场3 内 咖啡馆 日\n罗湘：你好。")
+    with _client(tmp_dal, monkeypatch) as c:
+        r = c.post(
+            "/api/v1/scripts/parse-images",
+            files=[("files", ("a.jpg", b"\xff\xd8\xff", "image/jpeg"))],
+            headers=_HEADERS,
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["scene_code"] == "3"
+        assert body["lines"][0] == {"character": "罗湘", "text": "你好。"}
+        assert body["raw_text"].startswith("场3")  # raw_text = OCR 文本
+
+
+def test_parse_images_503_when_text_only(tmp_dal: DAL, monkeypatch):
+    monkeypatch.setattr("backend.llm.service._text_only", lambda: True)  # 纯文本档无 mmproj
+    with _client(tmp_dal, monkeypatch) as c:
+        r = c.post(
+            "/api/v1/scripts/parse-images",
+            files=[("files", ("a.jpg", b"\xff\xd8\xff", "image/jpeg"))],
+            headers=_HEADERS,
+        )
+        assert r.status_code == 503
+
+
+def test_parse_images_503_when_no_llm(tmp_dal: DAL, monkeypatch):
+    with _client(tmp_dal, monkeypatch, llm=False) as c:
+        r = c.post(
+            "/api/v1/scripts/parse-images",
+            files=[("files", ("a.jpg", b"\xff\xd8\xff", "image/jpeg"))],
+            headers=_HEADERS,
+        )
+        assert r.status_code == 503
+
+
+def test_extract_target_scene_drops_adjacent_scenes():
+    """多页 OCR 全文 → 只取目标场：丢首页上一场尾 + 末页下一场头。"""
+    from backend.api.routes.scripts import _extract_target_scene_text
+
+    text = "上一场的尾巴台词。\n场5 内 咖啡馆 日\n罗湘：你好。\n场6 外 街道 夜\n阿明：走吧。"
+    out = _extract_target_scene_text(text, "5")  # "场5" / "5" 归一相同
+    assert "罗湘：你好。" in out
+    assert "上一场的尾巴" not in out  # 上一场尾（前言）被丢
+    assert "阿明：走吧" not in out  # 下一场（场6）被丢
+
+
+def test_strip_special_tokens_cuts_turn_runaway():
+    """模型越界续写：遇到回合标记即截断其后全部内容（含 <|turn|> / <|turn>model 及续写）。"""
+    from backend.api.routes.scripts import _strip_special_tokens
+
+    text = "罗湘：你好。\n沈默：你来了。<|turn|>\n<|turn>model\n罗湘：你好。沈默：你来了。"
+    out = _strip_special_tokens(text)
+    assert out.rstrip().endswith("你来了。")
+    assert "<|turn" not in out
+    assert "model" not in out  # 越界续写被切掉
+    # 无标记时原样返回
+    assert _strip_special_tokens("罗湘：你好。") == "罗湘：你好。"
+
+
+def test_dedup_repeated_lines_collapses_loops():
+    """OCR 循环重复行被折叠；非连续的合法短句保留。"""
+    from backend.api.routes.scripts import _dedup_repeated_lines
+
+    # 短词连续循环（上笑。×N）→ 折成一条（不限长度，根治这类 degenerate loop）
+    assert _dedup_repeated_lines("上笑。\n" * 30) == "上笑。"
+    # 单行连续循环 → 折成一条
+    assert _dedup_repeated_lines("罗湘：你来了。\n罗湘：你来了。\n罗湘：你来了。") == "罗湘：你来了。"
+    # 近距块循环 A B A B → A B
+    assert _dedup_repeated_lines("阿明：走吧。\n罗湘：等等。\n阿明：走吧。\n罗湘：等等。") == (
+        "阿明：走吧。\n罗湘：等等。"
+    )
+    # 非连续短句（隔行重复）不误删
+    assert _dedup_repeated_lines("好。\n嗯。\n好。") == "好。\n嗯。\n好。"
+
+
+def test_extract_target_scene_fallback_keeps_all():
+    """无 scene_code / 切不出多块 / 匹配不到 → 原样返回（兜底不丢内容）。"""
+    from backend.api.routes.scripts import _extract_target_scene_text
+
+    text = "场5 内 咖啡馆 日\n罗湘：你好。"
+    assert _extract_target_scene_text(text, None) == text  # 没传场号
+    assert _extract_target_scene_text(text, "99") == text  # 单块 / 匹配不到

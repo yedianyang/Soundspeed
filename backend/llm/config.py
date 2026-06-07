@@ -184,6 +184,31 @@ TASK_CONFIG: dict[str, dict] = {
             "function": {"name": "report_parsed_lines"},
         },
     },
+    # 照片 → 剧本 OCR（3.x 多模态）：图片逐字转写成纯文本，**不带 tools**（绕开 client.py
+    # image+tools 缺口：多模态 handler 不渲染工具声明、带 tools 会误切纯文本 formatter 丢图像）。
+    # 转写出的文本随后走 parse_scene_block（无 grammar 快路径；grammar FC 在长 OCR 文本上会超时）
+    # 结构化，故此任务只管 OCR、不管结构。
+    "script_vision_ocr": {
+        # 长页面要给足额度，否则后半页被截断（实测 1536 太狠、漏掉后半场）；越界续写/循环由
+        # stop + 代码去重兜，不靠压 max_tokens 限制。
+        "max_tokens": 3072,
+        "temperature": 0.1,
+        "priority": 2,
+        # 真正的"重复"病根：模型写完正文后没在回合边界停，越界吐出 <|turn|> 等特殊标记 + 续写。
+        # stop 一遇回合标记立刻停（根治越界续写，且更快）；轻 repeat_penalty 兜 token 级小循环。
+        # 不用 frequency_penalty——它会扰乱中文 OCR 的合法重复字，且不是越界续写的药。
+        "repeat_penalty": 1.1,
+        "stop": ["<|turn|>", "<|turn>", "<end_of_turn>", "<start_of_turn>", "<eos>"],
+        "system": (
+            "你是剧本 OCR 转写器。把这张图片里的剧本内容【逐字】转写成纯文本。\n"
+            "- 按从上到下、从左到右顺序，逐行输出角色名、台词、动作/场景描述。\n"
+            "- 对白尽量保留「角色：台词」原始格式；**保留场头行**（如「场5 内 咖啡馆 日」）。\n"
+            "- 只转写图中真实存在的文字：不翻译、不改写、不总结、不加解释、"
+            "**不要重复任何句子、不要编造图中没有的内容**。\n"
+            "- 把图中文字转写完即停止，不要续写。"
+        ),
+        # 无 tools / tool_choice：纯文本输出（OCR 转写），走多模态 handler 处理图像 content。
+    },
     # note_struct：带 tools + 强制 tool_choice，文本（run_np_note/infer_tool）与语音
     # （run_np_voice/infer_voice_tool）NP 共用——两者都走 forced tool-call，无 content-mode 调用。
     "note_struct": _build_note_task_config(),

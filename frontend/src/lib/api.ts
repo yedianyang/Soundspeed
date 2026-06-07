@@ -14,7 +14,9 @@ import type {
   QueryResponse,
   SceneDTO,
   ScriptCommitResult,
+  ScriptDiffResult,
   ScriptDTO,
+  ScriptLineInput,
   SpeakerDTO,
   TakeDTO,
   TakeDetailDTO,
@@ -106,11 +108,35 @@ export async function parseSingleScene(text: string): Promise<ParseSingleResult>
   })
 }
 
+// 照片 → 单场预览：多张图片 multipart 上传，后端视觉 OCR 转写 → 同 parse-single 解析，返回同形状结果。
+// sceneCode：目标场号，后端据此从多页 OCR 里只取该场内容（丢相邻场的尾/头）。
+export async function parseScenesFromImages(
+  files: File[],
+  sceneCode?: string | null,
+): Promise<ParseSingleResult> {
+  const fd = new FormData()
+  for (const f of files) fd.append("files", f)
+  if (sceneCode) fd.append("scene_code", sceneCode)
+  return requestMultipart<ParseSingleResult>(`/api/v1/scripts/parse-images`, fd)
+}
+
+// 新解析行 vs 该场最新版的增量对照（不落库）：给确认弹窗展示「改/增/旧保留」，确认时提交 merged。
+// has_old=false → 该场无旧版，rows 全 added、merged 即新行。
+export async function diffSceneScript(
+  sceneId: number,
+  lines: ScriptLineInput[],
+): Promise<ScriptDiffResult> {
+  return request<ScriptDiffResult>(`/api/v1/scenes/${sceneId}/script/diff`, {
+    method: "POST",
+    body: JSON.stringify({ lines }),
+  })
+}
+
 // 把选中场更新成新版本（版本追加；raw_text 与最新版相同 → skipped=true 不刷版本）。
 export async function updateSceneScript(
   sceneId: number,
   rawText: string,
-  lines: { character: string | null; text: string }[],
+  lines: ScriptLineInput[],
 ): Promise<ScriptCommitResult> {
   return request<ScriptCommitResult>(`/api/v1/scenes/${sceneId}/script`, {
     method: "POST",

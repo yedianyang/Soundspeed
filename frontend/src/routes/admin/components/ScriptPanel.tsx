@@ -275,16 +275,6 @@ export function ScriptPanel() {
           >
             <Camera className="size-4" />
           </Button>
-          {!isOcr && hasScriptScenes && viewScene && (
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              title={`更新本场（SCENE ${viewScene.scene_code ?? "—"}）`}
-              onClick={() => setUpdateOpen(true)}
-            >
-              <Pencil className="size-4" />
-            </Button>
-          )}
         </div>
       </div>
 
@@ -483,6 +473,18 @@ export function ScriptPanel() {
               <span className={miniPill("primary", "text-[10px]")}>
                 当前场
               </span>
+            )}
+            {/* 更新本场：跟场号切换同处一行（场级操作，关联更紧） */}
+            {viewScene && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="size-6 rounded-full"
+                title={`更新本场（SCENE ${viewScene.scene_code ?? "—"}）`}
+                onClick={() => setUpdateOpen(true)}
+              >
+                <Pencil className="size-3.5" />
+              </Button>
             )}
           </div>
           <Button
