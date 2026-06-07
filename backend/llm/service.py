@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING
 from backend.llm.config import TASK_CONFIG
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from backend.llm.client import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -125,6 +127,20 @@ class LLMService:
         self._model_path: str | None = None
         self._mmproj_path: str | None = None
         self._counter = itertools.count()
+        self._tool_call_tap: Callable[[str, dict, dict, dict], None] | None = None
+
+    def set_tool_call_tap(self, callback: Callable[[str, dict, dict, dict], None] | None) -> None:
+        """注册（或清除）tool-call tap 回调。
+
+        callback(task_type, tool_call_dict, gen_kwargs, result_dict) 在每次
+        want_tool_call=True 推理成功 set_result 之后立即调用。
+        - task_type：_InferPayload.task_type
+        - tool_call_dict：tool_calls[0]（完整 dict，含 id/type/function）
+        - gen_kwargs：_InferPayload.gen_kwargs（含 tools/tool_choice 等）
+        - result_dict：llama-cpp 返回的完整 dict（含 choices/usage/model 等）
+        tap 异常不影响推理主流程（被 try/except 保护）。传 None 清除已注册的 tap。
+        """
+        self._tool_call_tap = callback
 
     @property
     def model_loaded(self) -> bool:
@@ -466,6 +482,19 @@ class LLMService:
                         )
                     if not fut.done():
                         fut.set_result(tool_calls[0])
+                        if self._tool_call_tap is not None:
+                            try:
+                                self._tool_call_tap(
+                                    payload.task_type,
+                                    tool_calls[0],
+                                    payload.gen_kwargs,
+                                    result_dict,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "tool_call_tap 异常（不影响推理主流程）",
+                                    exc_info=True,
+                                )
                 else:
                     # content 路径
                     try:

@@ -15,11 +15,13 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
 
 from backend.api.app import create_app
+from backend.core.events import broadcast_tool_call
 from backend.core.orchestrator import Orchestrator, create_orchestrator
 from backend.core.session import SessionState
 from backend.db.dal import DAL
@@ -156,6 +158,66 @@ def build_app() -> FastAPI:
         orchestrator.subscribe(TAKE_END, lambda _p: live_asr.stop())
 
     app = create_app(orchestrator, llm_service=llm_service)
+
+    # tool.call WS 实时推送：把 LLMService 每次 function-calling 成功的结果 tap 给 cm.broadcast。
+    # cm 在 create_app 里初始化，此处安全取用。tap 内解析 tool_calls[0] 拿 name/arguments，
+    # 不修改推理主流程（tap 异常由 service._worker 内的 try/except 保护，不会传播）。
+    _cm = app.state.connection_manager
+
+    def _tool_call_tap(task_type: str, tc: dict, gen_kwargs: dict, result_dict: dict) -> None:
+        try:
+            fn = tc.get("function") or {}
+
+            # finish_reason / model
+            choices = result_dict.get("choices") or []
+            choice0 = choices[0] if choices else {}
+            finish_reason: str | None = choice0.get("finish_reason")
+            model: str | None = result_dict.get("model")
+
+            # usage（llama-cpp 不保证带）
+            usage = result_dict.get("usage") or {}
+            prompt_tokens: int | None = usage.get("prompt_tokens")
+            completion_tokens: int | None = usage.get("completion_tokens")
+            total_tokens: int | None = usage.get("total_tokens")
+
+            # available_tools：从 gen_kwargs["tools"] 抽 function.name
+            raw_tools = gen_kwargs.get("tools") or []
+            available_tools: tuple[str, ...] = tuple(
+                t["function"]["name"]
+                for t in raw_tools
+                if isinstance(t, dict) and isinstance(t.get("function"), dict) and t["function"].get("name")
+            )
+
+            # tool_choice 规整：dict {function:{name}} → name；字符串原样；缺失 None
+            raw_tc = gen_kwargs.get("tool_choice")
+            if isinstance(raw_tc, dict):
+                tool_choice: str | None = (raw_tc.get("function") or {}).get("name")
+            elif isinstance(raw_tc, str):
+                tool_choice = raw_tc
+            else:
+                tool_choice = None
+
+            broadcast_tool_call(
+                _cm,
+                task_type=task_type,
+                tool_name=fn.get("name") or "",
+                arguments=fn.get("arguments") or "",
+                ts=time.time(),
+                tool_id=tc.get("id"),
+                tool_type=tc.get("type"),
+                finish_reason=finish_reason,
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                available_tools=available_tools,
+                tool_choice=tool_choice,
+            )
+        except Exception:
+            pass  # 字段缺失等异常不影响推理；logger 在 service._worker 层已有 warning
+
+    llm_service.set_tool_call_tap(_tool_call_tap)
+
     app.state.live_asr = live_asr  # None 表示未启用实时 ASR（devices 路由据此判断）
     app.state.diarization_engine = diarization_engine  # None 表示未启用（无 HF token）
     app.state.enroll_recorder = enroll_recorder  # None 表示实时采集未启用

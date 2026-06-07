@@ -302,3 +302,81 @@ class QpAnswerPayload:
 def broadcast_qp_answer(cm, conn_id: str, answer_text: str, *, client_id: str | None = None) -> None:
     """广播 qp.answer.{conn_id}（topic + payload 的单一来源）。cm 鸭子类型，避免 events.py 反向依赖连接层。"""
     cm.broadcast(f"{QP_ANSWER}.{conn_id}", QpAnswerPayload(connection_id=conn_id, answer_text=answer_text, client_id=client_id))
+
+
+# Gemma tool-call 轨迹实时推送（#51 tool.call）
+TOOL_CALL = "tool.call"
+
+
+@dataclass(frozen=True)
+class ToolCallPayload:
+    """tool.call 的 payload v2：Gemma agent 每次 function-calling 请求侧事件 + 元数据。
+
+    只含请求侧（工具名+参数）与推理元数据，不含工具执行返回结果，不含 messages/memory。
+
+    tool_id：tool_calls[0]["id"]（llama-cpp 可能缺失，给 None）。
+    tool_type：tool_calls[0]["type"]，通常 "function"（可能缺失，给 None）。
+    tool_name：tool_calls[0]["function"]["name"]。
+    arguments：tool_calls[0]["function"]["arguments"]，原样透传 JSON 字符串，前端负责美化。
+    finish_reason：result_dict["choices"][0].get("finish_reason")（可能缺失，给 None）。
+    model：result_dict.get("model")（llama-cpp 不保证带，给 None）。
+    prompt_tokens：result_dict["usage"]["prompt_tokens"]（usage 整块可能缺失，给 None）。
+    completion_tokens：result_dict["usage"]["completion_tokens"]（同上）。
+    total_tokens：result_dict["usage"]["total_tokens"]（同上）。
+    available_tools：本次推理可调工具名列表，从 gen_kwargs["tools"] 抽 function.name；缺失给 []。
+    tool_choice：gen_kwargs["tool_choice"] 规整后的字符串：dict {function:{name}} → 那个 name；
+                 "auto"/"none"/"required" 原样；缺失给 None。
+    ts：time.time() epoch 秒（float）。
+    """
+
+    task_type: str
+    tool_name: str
+    arguments: str
+    ts: float
+    tool_id: str | None = None
+    tool_type: str | None = None
+    finish_reason: str | None = None
+    model: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    available_tools: tuple[str, ...] = ()
+    tool_choice: str | None = None
+
+
+def broadcast_tool_call(
+    cm,
+    task_type: str,
+    tool_name: str,
+    arguments: str,
+    *,
+    ts: float,
+    tool_id: str | None = None,
+    tool_type: str | None = None,
+    finish_reason: str | None = None,
+    model: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    available_tools: tuple[str, ...] = (),
+    tool_choice: str | None = None,
+) -> None:
+    """广播 tool.call（全局，不带 conn_id）。cm 鸭子类型，避免 events.py 反向依赖连接层。"""
+    cm.broadcast(
+        TOOL_CALL,
+        ToolCallPayload(
+            task_type=task_type,
+            tool_name=tool_name,
+            arguments=arguments,
+            ts=ts,
+            tool_id=tool_id,
+            tool_type=tool_type,
+            finish_reason=finish_reason,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            available_tools=available_tools,
+            tool_choice=tool_choice,
+        ),
+    )

@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import {
   Dialog,
@@ -21,9 +21,10 @@ import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { miniPill } from "@/lib/styles"
-import { API_BASE, LS_TOKEN_KEY } from "@/lib/config"
+import { API_BASE, LS_API_BASE_KEY, LS_TOKEN_KEY } from "@/lib/config"
 import { DEV_ASR_SAMPLE, DEV_SCRIPT_SAMPLE } from "@/data/devFixtures"
 import { useSessionStore } from "@/store/session"
+import type { ToolCallEntry } from "@/store/session"
 import {
   asrConfigQueryKey,
   devicesQueryKey,
@@ -56,8 +57,6 @@ import {
   PAD_OPTIONS,
   type SegFormat,
 } from "@/lib/filename-format"
-
-const DEV = import.meta.env.DEV
 
 // 真实音频输入设备下拉：读 GET /api/v1/devices，下拉值直接用后端权威的 selected（实际会采集的 index，
 // 持久化设备不在场时已是 fallback 设备的 index）。切换时 POST /devices/select（未启用实时 ASR 时后端 409，
@@ -196,6 +195,109 @@ function statusTextClass(kind: "info" | "error" | "done"): string {
     : kind === "done"
       ? "text-xs text-green-600"
       : "text-xs text-muted-foreground"
+}
+
+// API 地址保存时判「等于默认」用：localStorage 缺省时 config.ts 回落到的同一个 base。
+// 与设置页输入框相等即 removeItem（不留冗余 override），不等才写 localStorage。
+const DEFAULT_API_BASE = (
+  (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8000"
+).replace(/\/$/, "")
+
+// epoch 秒 → HH:MM:SS（本地时区）。tool.call 的 ts 是 float 秒。
+function fmtTs(ts: number): string {
+  const d = new Date(ts * 1000)
+  const p = (n: number) => String(n).padStart(2, "0")
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+// arguments 是原样 JSON 字符串：能 parse 就 2 空格缩进美化，失败 fallback 原串。
+function prettyArgs(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
+}
+
+// token 用量摘要：prompt/completion/total 各有才显示（null 跳过）。全 null → 返回 null（不渲染该行）。
+function tokensSummary(t: ToolCallEntry): string | null {
+  const parts: string[] = []
+  if (t.prompt_tokens != null) parts.push(`prompt ${t.prompt_tokens}`)
+  if (t.completion_tokens != null) parts.push(`completion ${t.completion_tokens}`)
+  if (t.total_tokens != null) parts.push(`total ${t.total_tokens}`)
+  return parts.length ? parts.join(" / ") : null
+}
+
+// 单条 tool call 渲染成结构化小块（v2 payload）。框 h-72 够高，多行无妨。
+function ToolCallBlock({ t }: { t: ToolCallEntry }) {
+  const tokens = tokensSummary(t)
+  return (
+    <div className="border-b border-border/40 py-2 last:border-b-0">
+      {/* 第一行：时间 · task_type · tool_name（高亮加粗），右侧 finish_reason */}
+      <div className="flex items-baseline gap-1">
+        <span className="text-muted-foreground/60">[{fmtTs(t.ts)}]</span>
+        <span className="text-muted-foreground">{t.task_type}</span>
+        <span className="text-muted-foreground/40">·</span>
+        <span className="font-bold text-primary">{t.tool_name}</span>
+        {t.finish_reason && (
+          <span className="ml-auto text-[10px] text-muted-foreground/60">
+            {t.finish_reason}
+          </span>
+        )}
+      </div>
+
+      {/* arguments：JSON 美化多行 */}
+      <pre className="mt-1 whitespace-pre-wrap break-all text-foreground/90">
+        {prettyArgs(t.arguments)}
+      </pre>
+
+      {/* 元数据：model · token 用量（有才显示） */}
+      {(t.model || tokens) && (
+        <div className="mt-1 text-[10px] text-muted-foreground/70">
+          {[t.model, tokens].filter(Boolean).join(" · ")}
+        </div>
+      )}
+
+      {/* 可用工具 + tool_choice（available_tools 空就整行不显示） */}
+      {t.available_tools.length > 0 && (
+        <div className="text-[10px] text-muted-foreground/70">
+          tools: {t.available_tools.join(", ")}
+          {t.tool_choice && <span> · choice: {t.tool_choice}</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 开发者 tab：后端 agent tool-call 实时日志框。订阅 store.toolCalls（tool.call WS 有界缓冲），
+// 新条目到达自动滚到底。空态给灰字占位。等宽、固定高、可滚。
+function ToolCallLog() {
+  const toolCalls = useSessionStore((s) => s.toolCalls)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  // 新条目到达自动滚到底（依赖 length，只在条数变化时滚）。
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [toolCalls.length])
+
+  return (
+    <div className="grid gap-1.5">
+      <span className="text-xs font-medium text-foreground">Logs</span>
+      <div
+        ref={scrollRef}
+        className="h-72 overflow-y-auto rounded-md border bg-muted/50 p-2 font-mono text-[11px] leading-relaxed"
+      >
+        {toolCalls.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-center text-muted-foreground/60">
+            暂无 tool call —— 跑一次「一键跑完整 take」后这里实时显示 Gemma 的工具调用
+          </div>
+        ) : (
+          toolCalls.map((t, i) => <ToolCallBlock key={i} t={t} />)
+        )}
+      </div>
+    </div>
+  )
 }
 
 // ── 文件名显示格式设置（常规 tab）：场镜次 → 录音机文件名风格，分项可配 + 实时预览 ──
@@ -494,7 +596,21 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
   const connection = useSessionStore((s) => s.connection)
   const setToken = useSessionStore((s) => s.setToken)
   const [tokenInput, setTokenInput] = useState<string>(storeToken ?? "")
+  // API 地址可编辑：初值=当前生效的 API_BASE（模块期常量，不是空串）。
+  const [apiBaseInput, setApiBaseInput] = useState<string>(API_BASE)
   const queryClient = useQueryClient()
+
+  // 保存 API 地址：trim → 去尾斜杠 → 等于默认/空则 removeItem 否则写 LS_API_BASE_KEY → 整页 reload
+  //（API_BASE 是模块加载期 const，热换不掉，必须 reload 让新 base 在所有 fetch/WS 生效）。
+  const handleSaveApiBase = () => {
+    const v = apiBaseInput.trim().replace(/\/$/, "")
+    if (!v || v === DEFAULT_API_BASE) {
+      localStorage.removeItem(LS_API_BASE_KEY)
+    } else {
+      localStorage.setItem(LS_API_BASE_KEY, v)
+    }
+    location.reload()
+  }
 
   const handleSaveToken = () => {
     const v = tokenInput.trim()
@@ -691,8 +807,25 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                 </span>
               </div>
               <div className="grid gap-1">
-                <span className="text-xs text-muted-foreground">API 地址</span>
-                <span className="font-mono text-xs text-foreground break-all">{API_BASE}</span>
+                <span className="text-xs text-muted-foreground">后端 IP 地址</span>
+                <div className="flex gap-2">
+                  <Input
+                    type="text"
+                    placeholder="http://localhost:8000"
+                    value={apiBaseInput}
+                    onChange={(e) => setApiBaseInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleSaveApiBase()
+                    }}
+                    className="flex-1 font-mono text-xs"
+                  />
+                  <Button variant="secondary" size="sm" onClick={handleSaveApiBase}>
+                    保存
+                  </Button>
+                </div>
+                <span className="text-[11px] text-muted-foreground/70">
+                  改地址后整页刷新生效（影响所有请求与 WebSocket）。
+                </span>
               </div>
               <div className="grid gap-1">
                 <span className="text-xs text-muted-foreground">Admin Token</span>
@@ -720,19 +853,19 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
               </div>
             </div>
 
-            {/* ========== 开发 / 测试（仅 dev 构建） ========== */}
-            {DEV && (
-              <>
-                <Separator />
+            {/* ========== 开发 / 测试 ========== */}
+            <Separator />
 
-                <div className="grid gap-2">
+            <div className="grid gap-2">
                 <div className="flex items-center gap-2">
                   <FlaskConical className="size-4 text-primary" />
                   <span className="text-sm font-medium">开发 / 测试</span>
-                  <span className={`ml-auto ${miniPill("neutral", "text-[10px]")}`}>
-                    {activeScene ? `场次 ${activeScene.scene_code}` : "无活跃场次"}
-                  </span>
                 </div>
+
+                {/* ---- tool-call 实时日志框（Agent 工具调用轨迹） ---- */}
+                <ToolCallLog />
+
+                <Separator className="my-1" />
 
                 {/* ---- 剧本注入（先做，持久化） ---- */}
                 <span className="text-xs font-medium text-foreground">
@@ -841,7 +974,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                     }}
                   >
                     <Trash2 className="size-4" />
-                    {resetting ? "清空中…" : "一键清空数据库内容"}
+                    {resetting ? "清空中…" : "清空数据库"}
                   </Button>
                   {resetStatus && (
                     <span className={statusTextClass(resetStatus.kind)}>
@@ -850,15 +983,12 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                   )}
                 </div>
               </div>
-              </>
-            )}
           </TabsContent>
         </Tabs>
       </DialogContent>
 
       {/* 一键清空数据库 — 二次确认（无 AlertDialog 组件，用 Dialog 搭等效确认） */}
-      {DEV && (
-        <Dialog
+      <Dialog
           open={confirmResetOpen}
           onOpenChange={(o) => {
             // 清空进行中不允许关弹窗（避免误触；成功会 reload，失败由 handler 关闭）。
@@ -892,8 +1022,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
               </Button>
             </DialogFooter>
           </DialogContent>
-        </Dialog>
-      )}
+      </Dialog>
     </Dialog>
   )
 }
