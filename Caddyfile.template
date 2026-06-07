@@ -13,10 +13,16 @@
 {{SITE}} {
 	tls ./certs/soundspeed.pem ./certs/soundspeed-key.pem
 
+	# 用 handle 互斥块隔离反代与静态。否则 try_files（rewrite 类指令，Caddy 默认
+	# 执行顺序早于 reverse_proxy）会先把 /api 改写成 /index.html，matcher 失效，
+	# API 全出 index.html。handle 块按书写顺序取第一个匹配，try_files 只在静态块内。
 	@backend path /api/* /ws /healthz
-	reverse_proxy @backend localhost:8000
-
-	root * ./frontend/dist
-	file_server
-	try_files {path} /index.html
+	handle @backend {
+		reverse_proxy localhost:8000
+	}
+	handle {
+		root * ./frontend/dist
+		file_server
+		try_files {path} /index.html
+	}
 }
