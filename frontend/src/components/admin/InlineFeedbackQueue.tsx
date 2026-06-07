@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react"
 import { Loader2, ChevronDown, X } from "lucide-react"
-import { cn } from "@/lib/utils"
+import { cn, formatTakeLabel } from "@/lib/utils"
 import { feedBlock } from "@/lib/styles"
 import { useSessionStore } from "@/store/session"
 import { postNote, postVoiceNote } from "@/lib/api"
 import { runQuery, runNote } from "@/lib/feed-actions"
-import type { PendingNote, FeedReceipt, QaItem } from "@/types/api"
+import type { ClarifyItem, PendingNote, FeedReceipt, QaItem } from "@/types/api"
 
 // note.failed reason → 场记可读文案（4.I），沿用旧 NoteList 映射。
 const FAIL_REASON_TEXT: Record<string, string> = {
@@ -17,8 +17,8 @@ const FAIL_REASON_TEXT: Record<string, string> = {
   upload_failed: "提交失败",
 }
 
-// note 回执：done 态，挂载即排 3s 自走（query 项 P3 lingers，不在此）。轻视觉，无框纯文字。
-// 「↩ 其实是提问」= query→note 误判兜底（最危险：问题被当日志记了），琥珀暖色动词，点击改走 query。
+// note 回执：done 态，挂载即排 3s 自走。渲染 N 条变更（mark→状态 / note→类别+正文）。
+// 「↩ 其实是提问」= query→note 误判兜底；rawText 为空（语音/缺失）时不渲染该按钮。
 function ReceiptRow({
   r,
   onDismiss,
@@ -32,16 +32,58 @@ function ReceiptRow({
     const t = setTimeout(() => onDismiss(r.client_id), 3000)
     return () => clearTimeout(t)
   }, [r.client_id, onDismiss])
+  const summary = r.changes
+    .map((c) => {
+      const label = formatTakeLabel({ take_number: c.take_number, take_suffix: c.take_suffix })
+      return c.op === "mark" ? `第${label}条→${c.status}` : `第${label}条·${c.category}`
+    })
+    .join("、")
   return (
     <div className={cn(feedBlock.note, "flex items-center gap-2 px-2.5 py-1.5 text-xs")}>
       <span className="text-muted-foreground">已记录</span>
-      <span className="font-medium text-foreground">{r.category}</span>
-      <span className="flex-1 min-w-0 truncate text-foreground/70">{r.content}</span>
+      <span className="flex-1 min-w-0 truncate text-foreground/80">{summary}</span>
+      {r.rawText !== "" && (
+        <button
+          onClick={() => onReclassify(r.rawText)}
+          className="text-primary font-medium hover:underline flex-shrink-0"
+        >
+          其实是提问
+        </button>
+      )}
+    </div>
+  )
+}
+
+// clarify 行：解析失败，展示 message + 候选 take（formatTakeLabel + scene_code/shot + status）。
+// lingers（手动 × dismiss），无重试——用户经输入框重打一句更清楚的（新 client_id）。alert 块拉开档差。
+function ClarifyRow({
+  c,
+  onDismiss,
+}: {
+  c: ClarifyItem
+  onDismiss: (id: string) => void
+}) {
+  return (
+    <div className={cn(feedBlock.alert, "flex items-start gap-2 px-2.5 py-1.5 text-sm")}>
+      <span className="flex-1 min-w-0">
+        <span className="block text-foreground">{c.message}</span>
+        {c.candidates.length > 0 && (
+          <span className="block text-xs text-muted-foreground mt-0.5">
+            {c.candidates
+              .map(
+                (cand) =>
+                  `${cand.scene_code}/${cand.shot || "无镜"}/第${formatTakeLabel({ take_number: cand.take_number })}条（${cand.status}）`,
+              )
+              .join("　")}
+          </span>
+        )}
+      </span>
       <button
-        onClick={() => onReclassify(r.rawText)}
-        className="text-primary font-medium hover:underline flex-shrink-0"
+        onClick={() => onDismiss(c.client_id)}
+        className="flex-shrink-0 text-muted-foreground/70 hover:text-foreground"
+        title="收起"
       >
-        其实是提问
+        <X className="size-3.5" />
       </button>
     </div>
   )
@@ -172,8 +214,10 @@ function QaRow({
 export default function InlineFeedbackQueue() {
   const pendingNotes = useSessionStore((s) => s.pendingNotes)
   const feedReceipts = useSessionStore((s) => s.feedReceipts)
+  const clarifyItems = useSessionStore((s) => s.clarifyItems)
   const qaItems = useSessionStore((s) => s.qaItems)
   const dismissReceipt = useSessionStore((s) => s.dismissReceipt)
+  const dismissClarify = useSessionStore((s) => s.dismissClarify)
   const dismissQaInline = useSessionStore((s) => s.dismissQaInline)
   const dismissPending = useSessionStore((s) => s.dismissPending)
   const retryPending = useSessionStore((s) => s.retryPending)
@@ -237,6 +281,10 @@ export default function InlineFeedbackQueue() {
           />
         ),
       })),
+    ...clarifyItems.map((c) => ({
+      ts: c.ts,
+      node: <ClarifyRow key={`c-${c.client_id}`} c={c} onDismiss={dismissClarify} />,
+    })),
   ].sort((a, b) => a.ts - b.ts)
 
   if (rows.length === 0) return null

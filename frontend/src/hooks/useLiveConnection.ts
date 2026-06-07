@@ -9,8 +9,9 @@ import type {
   AsrMsg,
   DeviceWarningMsg,
   LlmStatusMsg,
+  NoteAppliedMsg,
+  NoteClarifyMsg,
   NoteFailedMsg,
-  NoteProcessedMsg,
   QpAnswerMsg,
   SceneChangedMsg,
   TakeChangedMsg,
@@ -106,12 +107,22 @@ export function useLiveConnection(): void {
           s.setLlm(m.state, m.task_type)
           return
         }
-        if (topic === "note.processed") {
-          const m = payload as NoteProcessedMsg
-          s.noteProcessed(m)
-          // 刷新受影响的 take：takes 列表（折叠态 take.notes）+ 该 take 详情（展开态 data.notes）。
+        if (topic === "note.applied") {
+          // NP 多目标 apply 完成：移 pending + 推 receipt（store），并按 changes[] 逐 take_id 失效查询。
+          const m = payload as NoteAppliedMsg
+          s.noteApplied(m)
           queryClient.invalidateQueries({ queryKey: ["takes"] })
-          queryClient.invalidateQueries({ queryKey: takeQueryKey(m.take_id) })
+          const seen = new Set<number>()
+          for (const c of m.changes) {
+            if (seen.has(c.take_id)) continue
+            seen.add(c.take_id)
+            queryClient.invalidateQueries({ queryKey: takeQueryKey(c.take_id) })
+          }
+          return
+        }
+        if (topic === "note.clarify") {
+          // 确定性解析失败：移 pending + 推 clarify item（store）。无写库，不失效查询。
+          s.noteClarify(payload as NoteClarifyMsg)
           return
         }
         if (topic === "note.failed") {
