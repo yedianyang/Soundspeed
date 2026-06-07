@@ -36,7 +36,6 @@ import { ApiError } from "@/lib/api"
 import { useLiveConnection } from "@/hooks/useLiveConnection"
 import { useSessionStore } from "@/store/session"
 import { StatusChip, LiveLevelMeter } from "./components/StatusChip"
-import { useMicLevel } from "@/hooks/useMicLevel"
 import { LiveTranscript } from "./components/LiveTranscript"
 import { ScriptPanel } from "./components/ScriptPanel"
 import { HistoryTakes } from "./components/HistoryTakes"
@@ -137,11 +136,7 @@ export default function AdminHome() {
     return ds.find((d) => d.index === selected)?.name ?? "—"
   })()
 
-  // ---- header 实时麦克风电平（ch1 监看）----
-  // 绑定到设置里选定的输入设备（后端 selected 设备名）；"—"（无权威设备）时传 undefined 走默认。
-  const micLevel = useMicLevel(true, deviceName !== "—" ? deviceName : undefined)
-
-  // 后端实际采集那路的真实 RMS（仅录制时 ~5Hz 推），用于电平条混合（见下）。
+  // 后端实际采集那路的真实 RMS（仅录制时 ~5Hz 推），用于电平条显示（见下）。
   const backendLevel = useSessionStore((s) => s.backendLevel)
   const backendLevelTs = useSessionStore((s) => s.backendLevelTs)
 
@@ -150,10 +145,10 @@ export default function AdminHome() {
   const markArchiveRead = useSessionStore((s) => s.markArchiveRead)
   const fileFormat = useFileNameFormat((s) => s.format)
 
-  // 混合电平判新鲜度需要「现在」，但 Date.now() 是非纯函数不能在 render 调（react-hooks/purity）。
+  // 判新鲜度需要「现在」，但 Date.now() 是非纯函数不能在 render 调（react-hooks/purity）。
   // 故用 nowTick 状态：收到后端帧后起一个 100ms 轮询 effect 在回调里推进 nowTick（setState 不能在
   // effect body 同步调，故只在 interval 回调里调），确认陈旧（超阈值）即自停。render 只读纯值比较。
-  // 停录后后端不再推，轮询把 nowTick 推过阈值后电平条自动回落浏览器电平。
+  // 停录后后端不再推，轮询把 nowTick 推过阈值后电平条自动归零。
   const [nowTick, setNowTick] = useState(0)
   useEffect(() => {
     if (!backendLevelTs) return
@@ -165,16 +160,15 @@ export default function AdminHome() {
     return () => clearInterval(id)
   }, [backendLevelTs])
 
-  // 混合电平：后端数据新鲜（600ms 内有新帧）就用后端真实 RMS，否则回落浏览器常驻 micLevel。
-  // 阈值 600ms：后端 ~5Hz（约 200ms/帧）留 ~3 帧容差，丢一两帧不会闪回浏览器电平；停录后后端不
-  // 再推，nowTick 过 600ms 即判陈旧自动回落。
+  // 电平条固定显示后端实际采集设备（Capture 设备）的真实 RMS，不再混合/回落浏览器麦。
+  // 后端仅录制时 ~5Hz（约 200ms/帧）推 audio.level，故非录制或数据陈旧时电平条归零静止。
+  // 阈值 600ms：留 ~3 帧容差，丢一两帧不闪断；停录后后端不再推，nowTick 过 600ms 即判陈旧归零。
   // 用 max(nowTick, backendLevelTs) 当「现在」：刚到的新帧 ts 可能 > 上一次轮询的 nowTick，取大者
-  // 保证新帧立刻判新鲜，避免首帧到轮询首次 tick（≤100ms）之间的盲区误回落。
-  // 视觉尺度对齐：useMicLevel 内浏览器电平已是 min(1, rms*3)（乘 3 增益便于观察），后端 rms 是裸
-  // [0,1]，这里给后端同乘 3 取 min(1, …)，让录制/非录制切换时电平条高度连续、不突兀跳变。
+  // 保证新帧立刻判新鲜，避免首帧到轮询首次 tick（≤100ms）之间的盲区误归零。
+  // 后端 rms 是裸 [0,1]，乘 3 取 min(1, …) 作视觉增益，便于观察小信号。
   const backendFresh =
     backendLevelTs > 0 && Math.max(nowTick, backendLevelTs) - backendLevelTs < 600
-  const displayLevel = backendFresh ? Math.min(1, backendLevel * 3) : micLevel
+  const displayLevel = backendFresh ? Math.min(1, backendLevel * 3) : 0
 
   // takes 列表 + seedTakes 桥接挂在 AdminHome（始终挂载），不在 HistoryTakes（桌面端条件挂载）。
   // 否则未打开 History 时 LLMFeedback 读空 Map，且重连时无活跃 observer → invalidate 不 refetch，
@@ -575,7 +569,7 @@ export default function AdminHome() {
         <div className="px-4 h-11 flex items-center justify-between gap-2 border-b">
           <div className="flex items-center gap-2 min-w-0">
             <StatusChip label="Input" tone="ok" detail={deviceName} className="min-w-0">
-              {/* ch1 实时电平：录制时用后端真实采集 RMS，平时用浏览器常驻电平（见 displayLevel） */}
+              {/* ch1 实时电平：固定显示后端真实采集 RMS，非录制时归零静止（见 displayLevel） */}
               <LiveLevelMeter level={displayLevel} count={7} color="bg-green-500" className="ml-0.5" />
             </StatusChip>
             <StatusChip
