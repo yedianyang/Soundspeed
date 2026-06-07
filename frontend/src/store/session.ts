@@ -145,7 +145,6 @@ interface SessionState {
   setBackendLevel: (rms: number) => void
   setViewerCount: (count: number) => void
   appendToolCall: (entry: ToolCallEntry) => void
-  clearToolCalls: () => void
   resetSegments: () => void
   addPendingNote: (n: PendingNote) => void
   removePending: (clientId: string) => void
@@ -417,8 +416,6 @@ export const useSessionStore = create<SessionState>((set) => ({
       const next = [...s.toolCalls, entry]
       return { toolCalls: next.length > TOOL_CALLS_MAX ? next.slice(-TOOL_CALLS_MAX) : next }
     }),
-
-  clearToolCalls: () => set(() => ({ toolCalls: [] })),
 
   // 放弃失败 pending：用户主动关掉这条失败行，不再重试，直接移除。
   dismissPending: (clientId) =>
