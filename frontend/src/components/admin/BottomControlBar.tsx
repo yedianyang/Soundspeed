@@ -2,6 +2,7 @@ import { useState } from "react"
 import {
   Check,
   Plus,
+  Minus,
   Trash2,
   Undo2,
   ChevronDown,
@@ -78,6 +79,61 @@ interface BottomControlBarProps {
   archiveUnread: number
   // LLM 运行态（与 header LLM chip 同源）：非 idle = 正在跑 → 入口左点呈处理态（amber + 脉冲）。
   llmState: LlmState
+}
+
+// Shot / Take 共用的步进器输入：[−] [文本框] [+]。
+// −/+ 把当前值解析成整数后 ±1（下限 1）写回；当前值非纯数字（如 "2A"）时 −/+ 自动禁用。
+// 中间框接受任意文本（Shot 可输 "2A"）。提交（✓ 或回车）由外层 <form onSubmit> 处理。
+function StepperField({
+  value,
+  onValueChange,
+  placeholder,
+}: {
+  value: string
+  onValueChange: (v: string) => void
+  placeholder?: string
+}) {
+  const n = Number.parseInt(value.trim(), 10)
+  const isNumeric = Number.isFinite(n) && String(n) === value.trim()
+  const step = (delta: number) => {
+    if (isNumeric) onValueChange(String(Math.max(1, n + delta)))
+  }
+  return (
+    <div className="flex items-center gap-1.5 px-1">
+      <Button
+        type="button"
+        size="icon-sm"
+        variant="ghost"
+        disabled={!isNumeric}
+        onClick={() => step(-1)}
+        className="rounded-full border border-border/60 shrink-0"
+        title="减 1"
+      >
+        <Minus className="size-3.5" />
+      </Button>
+      <Input
+        autoFocus
+        value={value}
+        onChange={(e) => onValueChange(e.target.value)}
+        placeholder={placeholder}
+        className="h-8 text-sm text-center"
+      />
+      <Button
+        type="button"
+        size="icon-sm"
+        variant="ghost"
+        disabled={!isNumeric}
+        onClick={() => step(1)}
+        className="rounded-full border border-border/60 shrink-0"
+        title="加 1"
+      >
+        <Plus className="size-3.5" />
+      </Button>
+      <Button type="submit" size="icon-sm" className="rounded-full shrink-0" title="确认">
+        <Check className="size-3.5" />
+      </Button>
+    </div>
+  )
 }
 
 export default function BottomControlBar({
@@ -166,7 +222,7 @@ export default function BottomControlBar({
           {/* Row 1: Scene / Shot / Take / Mark。窄屏可换行（Scene 持最长内容，给更大比例）。 */}
           <div className="flex items-center gap-2 flex-wrap">
             {/* Scene：选已有场 → activate；新建 → 弹窗。录制中禁切场（呼应后端 409）。
-                Scene 持最长内容（scene_code），单独放宽：窄屏占双倍比例、宽屏按内容撑开不截断。 */}
+                Scene 持最长内容（scene_code），单独放宽：窄屏占 1.5 倍比例、宽屏按内容撑开不截断。 */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild disabled={sceneDisabled}>
                 <Button
@@ -174,7 +230,7 @@ export default function BottomControlBar({
                   size="default"
                   className={cn(
                     stageButton,
-                    "flex-[2] sm:w-auto sm:min-w-[7rem]",
+                    "flex-[1.5] sm:w-auto sm:min-w-[6rem]",
                     disabledTone(true, sceneDisabled),
                   )}
                   title={isRecording ? "录制中不可切场" : "切换 / 新建场次"}
@@ -242,25 +298,15 @@ export default function BottomControlBar({
                   <ChevronDown className="size-3 text-muted-foreground" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-48 p-2">
+              <DropdownMenuContent align="start" className="w-56 p-2">
                 <DropdownMenuLabel className="px-1">Shot</DropdownMenuLabel>
                 <form
                   onSubmit={(e) => {
                     e.preventDefault()
                     commitShot()
                   }}
-                  className="flex items-center gap-1.5 px-1"
                 >
-                  <Input
-                    autoFocus
-                    value={shotDraft}
-                    onChange={(e) => setShotDraft(e.target.value)}
-                    placeholder="例：2A"
-                    className="h-8 text-sm"
-                  />
-                  <Button type="submit" size="icon-sm" className="rounded-full">
-                    <Check className="size-3.5" />
-                  </Button>
+                  <StepperField value={shotDraft} onValueChange={setShotDraft} placeholder="例：2A" />
                 </form>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -289,29 +335,15 @@ export default function BottomControlBar({
                   <ChevronDown className="size-3 text-muted-foreground" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-48 p-2">
+              <DropdownMenuContent align="start" className="w-56 p-2">
                 <DropdownMenuLabel className="px-1">Take</DropdownMenuLabel>
                 <form
                   onSubmit={(e) => {
                     e.preventDefault()
                     commitTake()
                   }}
-                  className="flex items-center gap-1.5 px-1"
                 >
-                  <Input
-                    autoFocus
-                    type="number"
-                    inputMode="numeric"
-                    min={1}
-                    step={1}
-                    value={takeDraft}
-                    onChange={(e) => setTakeDraft(e.target.value)}
-                    placeholder="例：5"
-                    className="h-8 text-sm"
-                  />
-                  <Button type="submit" size="icon-sm" className="rounded-full">
-                    <Check className="size-3.5" />
-                  </Button>
+                  <StepperField value={takeDraft} onValueChange={setTakeDraft} placeholder="例：5" />
                 </form>
               </DropdownMenuContent>
             </DropdownMenu>
