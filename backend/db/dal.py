@@ -831,6 +831,22 @@ class DAL:
             ).fetchall()
         return [_row_to_take(r) for r in rows]
 
+    def get_take_by_coords(
+        self, scene_id: int, shot: str, take_number: int
+    ) -> list["Take"]:
+        """按 (scene_id, shot, take_number) 查活跃 take（排除软删），按 take_suffix 升序。
+
+        返回 list：UNIQUE 四元组含 take_suffix，同坐标可对多行（''/'+'/'++'）。
+        NP 解析据「不唯一」（len>1）走 clarify，「不存在」（[]）走 clarify，「唯一」直接 apply。
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM takes "
+            "WHERE scene_id = ? AND shot = ? AND take_number = ? AND deleted_at IS NULL "
+            "ORDER BY take_suffix ASC;",
+            (scene_id, shot, take_number),
+        ).fetchall()
+        return [_row_to_take(r) for r in rows]
+
     # ── take_events ──────────────────────────────────────────────────────────
 
     def insert_take_event(
