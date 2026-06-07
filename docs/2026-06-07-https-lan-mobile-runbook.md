@@ -11,7 +11,7 @@ context，麦克风直接被禁。图片/文件走普通 `<input type=file>`，H
 连锁约束：前端页面一旦 HTTPS，就不能再发 HTTP / `ws://`（mixed content 被拦）。前端 WS 从
 `VITE_API_BASE` 派生（`config.ts`：http→ws / https→wss），所以**后端也得在 HTTPS 后面**。
 
-方案：Caddy 占 443 做唯一 HTTPS 终止点，前后端两个 HTTP 服务原封不动，同源转发。前后端代码零改动。
+方案：Caddy 在高端口（默认 8443，免 sudo）做唯一 HTTPS 终止点，前后端两个 HTTP 服务原封不动，同源转发。前后端代码零改动。
 
 ## 每台 Mac 各自配（这是 B 场景：每个人在自己 Mac 上各跑一份 server）
 
@@ -35,8 +35,8 @@ brew install mkcert caddy          # 一次性
 ```bash
 cd frontend && pnpm install && pnpm build && cd ..   # 给手机用的产物，必须 build 不是 dev
 PORT=8000 SOUNDSPEED_DEV=1 python -m backend.api      # 后端，监听 0.0.0.0:8000
-sudo caddy run --config ./Caddyfile                  # 443 是特权端口，要 sudo
-# 手机同 Wi-Fi 开 https://<本机>.local/admin
+caddy run --config ./Caddyfile                       # 8443，免 sudo
+# 手机同 Wi-Fi 开 https://<本机>.local:8443/admin
 ```
 
 **别让手机连 `pnpm dev`**：那是 PR #55 白屏 OOM 的元凶（React19 dev 的 PerformanceMeasure 泄漏

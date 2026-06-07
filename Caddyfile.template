@@ -1,9 +1,9 @@
 # Soundspeed 局域网 HTTPS 入口 —— 模板。
 #
 # 不要直接用这个文件跑 caddy。跑 scripts/setup-https.sh 会把 {{SITE}} 换成本机
-# .local 主机名，渲染出 gitignore 的 ./Caddyfile，那个才是实际启动用的。
+# .local 主机名+端口（如 macbook-pro-1370.local:8443），渲染出 gitignore 的 ./Caddyfile。
 #
-# 思路：Caddy 占 443 做唯一 HTTPS 终止点，前后端两个 HTTP 服务原封不动，同源转发：
+# 思路：Caddy 在高端口（默认 8443，免 sudo）做唯一 HTTPS 终止点，前后端两个 HTTP 服务不动，同源转发：
 #   /api/* /ws /healthz → 后端 :8000（WebSocket Upgrade 自动透传）
 #   其余                → 前端静态产物 frontend/dist（SPA，404 回 index.html）
 #
