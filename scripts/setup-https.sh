@@ -22,7 +22,8 @@ SITE="${HOSTBASE}.local"
 # 用 8443 高端口：免 sudo。443 是特权端口，每次启动都要 root 密码，对“各自跑一份”太烦。
 # 代价仅是 URL 多个 :8443。想用 443 把这里改成 443、启动命令前加 sudo 即可。
 HTTPS_PORT=8443
-echo "▶ 本机入口：https://${SITE}:${HTTPS_PORT}"
+ENTRY="https://${SITE}:${HTTPS_PORT}"
+echo "▶ 本机入口：${ENTRY}"
 
 # --- 2. 依赖检查 ---
 for bin in mkcert caddy; do
@@ -50,12 +51,12 @@ echo "▶ 写 frontend/.env.production"
 cat > frontend/.env.production <<EOF
 # 由 scripts/setup-https.sh 生成（gitignore）。指向本机 Caddy HTTPS 入口。
 # 本机 dev（pnpm dev）仍走 .env 的 http://localhost:8000，互不影响。
-VITE_API_BASE=https://${SITE}:${HTTPS_PORT}
+VITE_API_BASE=${ENTRY}
 EOF
 
 # --- 6. 渲染本机 Caddyfile（{{SITE}} 注入「主机名:端口」）---
 echo "▶ 渲染 ./Caddyfile（gitignore）"
-sed "s/{{SITE}}/${SITE}:${HTTPS_PORT}/g" Caddyfile.template > Caddyfile
+sed -e "s/{{SITE}}/${SITE}/g" -e "s/{{HTTPS_PORT}}/${HTTPS_PORT}/g" Caddyfile.template > Caddyfile
 
 # --- 7. 校验 ---
 caddy validate --config ./Caddyfile >/dev/null 2>&1 \
@@ -65,13 +66,13 @@ caddy validate --config ./Caddyfile >/dev/null 2>&1 \
 CAROOT="$(mkcert -CAROOT)"
 cat <<EOF
 
-✅ 配置完成（本机入口：https://${SITE}:${HTTPS_PORT}）
+✅ 配置完成（本机入口：${ENTRY}）
 
 下一步：
   1. 构建前端：  cd frontend && pnpm install && pnpm build && cd ..
   2. 起后端：    PORT=8000 SOUNDSPEED_DEV=1 python -m backend.api
   3. 起 Caddy：  caddy run --config ./Caddyfile          # 8443 免 sudo
-  4. 手机同 Wi-Fi 开：https://${SITE}:${HTTPS_PORT}/admin   （在「服务器连接」手填 token：devtoken）
+  4. 手机同 Wi-Fi 开：${ENTRY}/admin   （在「服务器连接」手填 token：devtoken）
 
 手机信任本机 CA（不做则 wss 连不上）：
   把这个文件传到各自手机安装：

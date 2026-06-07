@@ -1,7 +1,7 @@
 # Soundspeed 局域网 HTTPS 入口 —— 模板。
 #
-# 不要直接用这个文件跑 caddy。跑 scripts/setup-https.sh 会把 {{SITE}} 换成本机
-# .local 主机名+端口（如 macbook-pro-1370.local:8443），渲染出 gitignore 的 ./Caddyfile。
+# 不要直接用这个文件跑 caddy。跑 scripts/setup-https.sh 会填进 {{SITE}}（本机 .local
+# 主机名）和 {{HTTPS_PORT}}（默认 8443），渲染出 gitignore 的 ./Caddyfile。
 #
 # 思路：Caddy 在高端口（默认 8443，免 sudo）做唯一 HTTPS 终止点，前后端两个 HTTP 服务不动，同源转发：
 #   /api/* /ws /healthz → 后端 :8000（WebSocket Upgrade 自动透传）
@@ -10,7 +10,7 @@
 # 证书在 ./certs（gitignore），由脚本用 mkcert 生成、SAN 含本机 .local 主机名。
 # 手机要先信任本机 mkcert 根 CA 才能连（wss 没有不安全旁路）。详见 docs runbook。
 
-{{SITE}} {
+{{SITE}}:{{HTTPS_PORT}} {
 	tls ./certs/soundspeed.pem ./certs/soundspeed-key.pem
 
 	# 用 handle 互斥块隔离反代与静态。否则 try_files（rewrite 类指令，Caddy 默认
