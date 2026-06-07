@@ -24,6 +24,10 @@ reasonix.toml
 .env.*
 !.env.example
 
+# 本机 HTTPS 证书（mkcert 生成，给局域网手机访问；每台机不同，不入库）
+certs/
+*.pem
+
 # Python (backend)
 __pycache__/
 *.py[cod]
