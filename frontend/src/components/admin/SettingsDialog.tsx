@@ -21,7 +21,7 @@ import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { miniPill } from "@/lib/styles"
-import { API_BASE, LS_API_BASE_KEY, LS_TOKEN_KEY } from "@/lib/config"
+import { API_BASE, DEFAULT_API_BASE, LS_API_BASE_KEY, LS_TOKEN_KEY } from "@/lib/config"
 import { DEV_ASR_SAMPLE, DEV_SCRIPT_SAMPLE } from "@/data/devFixtures"
 import { useSessionStore } from "@/store/session"
 import type { ToolCallEntry } from "@/store/session"
@@ -197,11 +197,9 @@ function statusTextClass(kind: "info" | "error" | "done"): string {
       : "text-xs text-muted-foreground"
 }
 
-// API 地址保存时判「等于默认」用：localStorage 缺省时 config.ts 回落到的同一个 base。
-// 与设置页输入框相等即 removeItem（不留冗余 override），不等才写 localStorage。
-const DEFAULT_API_BASE = (
-  (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8000"
-).replace(/\/$/, "")
+// 环境感知默认 API base：有 VITE_API_BASE 用它，否则回落 config 的 DEFAULT_API_BASE（字面量唯一来源）。
+// 去尾斜杠后供 handleSaveApiBase 判「输入等于默认 → removeItem 不留冗余 override」。
+const ENV_DEFAULT_API_BASE = (import.meta.env.VITE_API_BASE ?? DEFAULT_API_BASE).replace(/\/$/, "")
 
 // epoch 秒 → HH:MM:SS（本地时区）。tool.call 的 ts 是 float 秒。
 function fmtTs(ts: number): string {
@@ -604,7 +602,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
   //（API_BASE 是模块加载期 const，热换不掉，必须 reload 让新 base 在所有 fetch/WS 生效）。
   const handleSaveApiBase = () => {
     const v = apiBaseInput.trim().replace(/\/$/, "")
-    if (!v || v === DEFAULT_API_BASE) {
+    if (!v || v === ENV_DEFAULT_API_BASE) {
       localStorage.removeItem(LS_API_BASE_KEY)
     } else {
       localStorage.setItem(LS_API_BASE_KEY, v)
