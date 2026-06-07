@@ -177,3 +177,33 @@ async def run_extract_np_voice(
     return await run_extract_np(
         transcript.strip(), llm_service, timeout=timeout, context_line=context_line
     )
+
+
+# ── 适配器（调度器-兼容签名）────────────────────────────────────────────────────
+# voice_dispatch.py（§9 不可碰）调用 voice_runner(input_data, audio, service) 位置参数固定；
+# 以下适配器保持该签名，内部转调新 extract runner。duck-typed on input_data。
+
+
+def _np_context_line(input_data) -> str:
+    """从 input_data 拼一行提取上下文（spike 格式）。current_* 为 None 时省略活跃条。"""
+    scene = input_data.current_scene_code or (
+        f"场id{input_data.current_scene_id}" if input_data.current_scene_id is not None else "未知场"
+    )
+    if input_data.current_take_id is not None:
+        shot = input_data.current_shot or "无镜"
+        return f"当前：{scene} / {shot} / 当前活跃第{input_data.current_take_number}条。"
+    return f"当前：{scene} / 当前无活跃录制。"
+
+
+async def np_text_adapter(input_data, svc, timeout: float = 30.0):
+    """文本 NP 适配器：保持 (input_data, svc) 位置签名，转调 run_extract_np。"""
+    return await run_extract_np(
+        input_data.raw_text, svc, timeout=timeout, context_line=_np_context_line(input_data)
+    )
+
+
+async def np_voice_adapter(input_data, audio: bytes, svc, timeout: float = 60.0):
+    """语音 NP 适配器：保持 (input_data, audio, svc) 位置签名，转调 run_extract_np_voice。"""
+    return await run_extract_np_voice(
+        audio, svc, timeout=timeout, context_line=_np_context_line(input_data)
+    )

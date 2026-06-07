@@ -194,23 +194,6 @@ class LlmStatusPayload:
     task_type: str | None
     take_id: int | None
 
-# Note 事件（4.x NP Pipeline）
-NOTE_PROCESSED = "note.processed"
-
-
-@dataclass(frozen=True)
-class NoteProcessedPayload:
-    """note.processed 的 payload：NP Pipeline 归置完成后发布。"""
-
-    event_id: int
-    take_id: int
-    category: str
-    content: str
-    ts: float
-    # 前端乐观 pending 的去重键：原样回传，content 被 LLM 改写、ts 不同源也能精确移除对应 pending。
-    client_id: str | None = None
-
-
 # Note 失败兜底（4.I）
 NOTE_FAILED = "note.failed"
 

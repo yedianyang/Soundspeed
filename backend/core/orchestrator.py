@@ -20,16 +20,18 @@ from backend.core.events import (
     ASR_FINAL_CH1,
     ASR_FINAL_CH2,
     LLM_STATUS,
+    NOTE_APPLIED,
+    NOTE_CLARIFY,
     NOTE_FAILED,
-    NOTE_PROCESSED,
     TAKE_CHANGED,
     TAKE_END,
     TAKE_PROCESSING,
     TAKE_START,
     AsrFinalPayload,
     LlmStatusPayload,
+    NoteAppliedPayload,
+    NoteClarifyPayload,
     NoteFailedPayload,
-    NoteProcessedPayload,
     TakeChangedPayload,
     TakeEndPayload,
     TakeProcessingPayload,
@@ -597,6 +599,24 @@ class Orchestrator:
             ),
         )
 
+    def _build_np_context(self) -> Any:
+        """组装 NPContext（确定性解析用）：当前场/镜/活跃 take，从 session + DAL 读。"""
+        from backend.pipelines.np_resolve import NPContext  # noqa: PLC0415
+
+        scene_id = self.session.scene_id
+        current_take_id = self.session.take_id if self.session.take_active else None
+        scene_code = None
+        if scene_id is not None:
+            info = self.dal.get_scene_info(scene_id)
+            scene_code = info.get("scene_code") if info else None
+        return NPContext(
+            current_scene_id=scene_id,
+            current_scene_code=scene_code,
+            current_shot=self.session.shot if current_take_id is not None else None,
+            current_take_id=current_take_id,
+            current_take_number=self.session.take_number if current_take_id is not None else None,
+        )
+
     async def _finalize_np(
         self,
         run_awaitable: Any,
@@ -605,82 +625,92 @@ class Orchestrator:
         client_id: str | None,
         raw_text_override: str | None,
     ) -> None:
-        """await runner → insert_note → publish（文本/语音共用，含 4.I 失败兜底）。
+        """await extract runner → NPExtraction → 解析 → clarify 或 多目标 apply → 回灌。
 
-        raw_text_override：文本路径传原始文字；语音路径传 None → 存模型转写正文（§8）。
-        机制可检测的三类失败（parse/timeout/FK）→ 发 note.failed（带 client_id），前端转失败态；
-        未知异常上抛交 _np_done_callback 记 WARNING + idle。
+        失败（parse/timeout/FK/model_unavailable）→ note.failed（带 client_id）。
+        clarify（解不出/不唯一/不存在）→ note.clarify（非失败，不经 except 分支）。
+        成功 apply → note.applied（一条带 N changes）+ 逐 marked take_id 发 take.changed。
         """
         from backend.llm.errors import ModelUnavailableError  # noqa: PLC0415
-        from backend.pipelines.np_note import NPParseError  # noqa: PLC0415
+        from backend.pipelines.np_apply import apply_targets  # noqa: PLC0415
+        from backend.pipelines.np_extract import NPParseError  # noqa: PLC0415
+        from backend.pipelines.np_resolve import NPContext, resolve_targets  # noqa: PLC0415
 
         try:
-            output = await run_awaitable
-            stored_raw = raw_text_override if raw_text_override is not None else output.content
-            event_id = self.dal.insert_note(
-                take_id=output.take_id,
-                category=output.category,
-                content=output.content,
-                raw_text=stored_raw,
-                ts=ts,
-            )
+            extraction = await run_awaitable
         except Exception as exc:
-            # 失败原因在产生地确定（typed domain error），这里只做干净映射，不靠宽泛内建异常类型反推。
             if isinstance(exc, NPParseError):
                 reason = "parse_error"
             elif isinstance(exc, asyncio.TimeoutError):
                 reason = "timeout"
-            elif isinstance(exc, sqlite3.IntegrityError):
-                reason = "take_not_found"  # 归到不存在的 take_id，insert_note 撞 FK
             elif isinstance(exc, ModelUnavailableError):
-                # 多模态模型不可用（mmproj 缺失/下载失败 → 退纯文本；或 mtmd 自检失败）。
-                # 必须发 note.failed，否则前端 pending 永久卡（复活 4.I 的 bug）。
                 reason = "model_unavailable"
             else:
-                raise  # 真正未知失败：保留安全网，交 done_callback 处理
-            logger.warning(
-                "NP Pipeline failed (%s) [client_id=%s]: %s", reason, client_id, exc
-            )
+                raise
+            logger.warning("NP extract failed (%s) [client_id=%s]: %s", reason, client_id, exc)
+            self.publish(NOTE_FAILED, NoteFailedPayload(reason=reason, ts=ts, client_id=client_id))
+            return
+
+        # 确定性解析（不引用 take_context，直接打 DAL）。
+        ctx = self._build_np_context()
+        result = resolve_targets(extraction, ctx, self.dal)
+        if result.clarify:
             self.publish(
-                NOTE_FAILED,
-                NoteFailedPayload(reason=reason, ts=ts, client_id=client_id),
+                NOTE_CLARIFY,
+                NoteClarifyPayload(
+                    client_id=client_id,
+                    message=result.message or "无法定位，请说清楚是哪一条",
+                    candidates=[asdict(c) for c in result.candidates],
+                    ts=ts,
+                ),
             )
             return
 
-        # note 已 durable 落库 → 无条件发 note.processed 解除 pending：与「note 已保存」绑定，
-        # 不被后续 Mark 副作用回退（否则 Mark 抛非 typed 异常会留孤儿 pending，复活 4.I 的 bug）。
+        # 语音无原文：raw_text 存模型转写 note_text（§8）；文本存原话。
+        raw_for_note = raw_text_override if raw_text_override is not None else extraction.note_text
+        try:
+            changes = apply_targets(
+                extraction, result.take_ids, self.dal, raw_text=raw_for_note, ts=ts
+            )
+        except sqlite3.IntegrityError as exc:
+            logger.warning("NP apply FK failed [client_id=%s]: %s", client_id, exc)
+            self.publish(
+                NOTE_FAILED, NoteFailedPayload(reason="take_not_found", ts=ts, client_id=client_id)
+            )
+            return
+
+        # 填 changes 的 scene_code（apply 留空，这里用 scene_id→code 映射补）。
+        scene_code_by_id = {
+            s.get("scene_id"): s.get("scene_code", "") for s in self.dal.list_scenes()
+        }
+        change_dicts = []
+        for c in changes:
+            d = asdict(c)
+            take = self.dal.get_take(c.take_id)
+            if take is not None:
+                d["scene_code"] = scene_code_by_id.get(take.scene_id, "")
+            change_dicts.append(d)
+
+        # note.applied 一条（驱动 FEED receipt），纯 mark 也走这里。
         self.publish(
-            NOTE_PROCESSED,
-            NoteProcessedPayload(
-                event_id=event_id,
-                take_id=output.take_id,
-                category=output.category,
-                content=output.content,
-                ts=ts,
-                client_id=client_id,
-            ),
+            NOTE_APPLIED,
+            NoteAppliedPayload(client_id=client_id, changes=change_dicts, ts=ts),
         )
 
-        # pass/ng/keep 类别把该 take 标成对应 status（= UI Mark）+ 广播 take.changed；note/issue 不动。
-        # Mark 是 note 落库后的独立副作用——失败只记日志，绝不回退已发的 note.processed。
-        if output.category in _STATUS_CATEGORIES:
-            try:
-                self.dal.set_take_status(output.take_id, output.category)
-                take = self.dal.get_take(output.take_id)
-                if take is not None:
-                    self.publish(
-                        TAKE_CHANGED,
-                        TakeChangedPayload(
-                            take_id=take.take_id,
-                            scene_id=take.scene_id,
-                            take_number=take.take_number,
-                            status=take.status,
-                            script_diff=take.script_diff,
-                        ),
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "NP take Mark failed after note stored [client_id=%s]: %s", client_id, exc
+        # take.changed 逐被 mark 的 take（驱动卡片），与 note.applied 共存（recon gotcha #3）。
+        marked_ids = {c.take_id for c in changes if c.op == "mark"}
+        for take_id in marked_ids:
+            take = self.dal.get_take(take_id)
+            if take is not None:
+                self.publish(
+                    TAKE_CHANGED,
+                    TakeChangedPayload(
+                        take_id=take.take_id,
+                        scene_id=take.scene_id,
+                        take_number=take.take_number,
+                        status=take.status,
+                        script_diff=take.script_diff,
+                    ),
                 )
 
     async def _run_np_async(
@@ -767,11 +797,11 @@ def create_orchestrator(
             from backend.pipelines.l2_take import run_l2_take
             l2_runner = run_l2_take
         if np_runner is None:
-            from backend.pipelines.np_note import run_np_note
-            np_runner = run_np_note
+            from backend.pipelines.np_extract import np_text_adapter
+            np_runner = np_text_adapter
         if voice_runner is None:
-            from backend.pipelines.np_note import run_np_voice
-            voice_runner = run_np_voice
+            from backend.pipelines.np_extract import np_voice_adapter
+            voice_runner = np_voice_adapter
     return Orchestrator(
         dal, session,
         llm_service=llm_service,
