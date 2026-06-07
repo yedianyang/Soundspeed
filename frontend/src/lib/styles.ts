@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react"
 import { cn } from "@/lib/utils"
 
 // ---- 业务层共享视觉 token ----
@@ -51,3 +52,6 @@ export const feedBlock = {
   alert: "rounded-md bg-primary/20 ring-1 ring-primary/30 text-foreground",
   note: "rounded-md bg-muted text-foreground",
 } as const
+
+// 底栏 / History 下拉弹窗共用：关掉 tw-animate-css 的 zoom-in 入场缩放，消除打开时 1-2px 横向抖动。
+export const STAGE_POP_STYLE = { "--tw-enter-scale": "1" } as CSSProperties

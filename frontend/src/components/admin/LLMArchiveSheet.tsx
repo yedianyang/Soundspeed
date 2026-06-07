@@ -5,6 +5,7 @@ import { feedBlock } from "@/lib/styles"
 import { Button } from "@/components/ui/button"
 import { useSessionStore } from "@/store/session"
 import { ScriptDiffView } from "@/routes/admin/components/ScriptDiffView"
+import GemmaIcon from "@/components/icons/GemmaIcon"
 
 // 时间线一项：QP 问答 = answer 块（淡主题色底）；L2 推送 = note 块（中性灰底）。
 // 与就地层同一套 feedBlock 语言，靠背景色相区分 LLM 答案 / L2 记录，无装饰图标。
@@ -85,7 +86,11 @@ export function LLMArchiveSheet({
         <div className="pointer-events-auto flex max-h-[70vh] flex-col overflow-hidden rounded-t-2xl border-t border-x bg-background shadow-[0_-12px_28px_-20px_rgba(0,0,0,0.25)]">
           <header className="flex flex-shrink-0 items-center justify-between border-b px-4 py-3">
             <div className="flex items-center gap-2">
-              <span className="text-base font-semibold text-primary">LLM 反馈</span>
+              <span className="flex items-center gap-1.5 text-base font-semibold text-foreground">
+                <GemmaIcon className="size-6 text-[#4285F4]" />
+                Gemma 4
+                <span className="font-normal text-muted-foreground">· 反馈</span>
+              </span>
               <span className="text-xs text-muted-foreground">QP 问答 · L2 推送 · 全历史</span>
             </div>
             <Button
