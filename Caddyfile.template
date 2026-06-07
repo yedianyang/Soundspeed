@@ -1,0 +1,22 @@
+# Soundspeed 局域网 HTTPS 入口 —— 模板。
+#
+# 不要直接用这个文件跑 caddy。跑 scripts/setup-https.sh 会把 {{SITE}} 换成本机
+# .local 主机名，渲染出 gitignore 的 ./Caddyfile，那个才是实际启动用的。
+#
+# 思路：Caddy 占 443 做唯一 HTTPS 终止点，前后端两个 HTTP 服务原封不动，同源转发：
+#   /api/* /ws /healthz → 后端 :8000（WebSocket Upgrade 自动透传）
+#   其余                → 前端静态产物 frontend/dist（SPA，404 回 index.html）
+#
+# 证书在 ./certs（gitignore），由脚本用 mkcert 生成、SAN 含本机 .local 主机名。
+# 手机要先信任本机 mkcert 根 CA 才能连（wss 没有不安全旁路）。详见 docs runbook。
+
+{{SITE}} {
+	tls ./certs/soundspeed.pem ./certs/soundspeed-key.pem
+
+	@backend path /api/* /ws /healthz
+	reverse_proxy @backend localhost:8000
+
+	root * ./frontend/dist
+	file_server
+	try_files {path} /index.html
+}
