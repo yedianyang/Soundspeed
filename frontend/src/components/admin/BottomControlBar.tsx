@@ -2,13 +2,11 @@ import { useState } from "react"
 import {
   Check,
   Plus,
-  Minus,
   Trash2,
   Undo2,
   ChevronDown,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,16 +24,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { STATUS_DOT, STATUS_LABEL } from "@/lib/constants"
-import { stageButton, recordingDisabled } from "@/lib/styles"
+import { stageButton, recordingDisabled, STAGE_POP_STYLE } from "@/lib/styles"
 import { cn, formatElapsed } from "@/lib/utils"
 import type { Status } from "@/types/take"
 import type { SceneDTO, LlmState } from "@/types/api"
 import TakeSpeakerSelect from "@/components/admin/TakeSpeakerSelect"
+import StepperField from "@/components/admin/StepperField"
 import MemoInput from "@/components/admin/MemoInput"
 import GemmaIcon from "@/components/icons/GemmaIcon"
-
-// 关掉 tw-animate-css 的 zoom-in 入场缩放（消除底栏弹窗打开时 1-2px 横向抖动）。
-const STAGE_POP_STYLE = { "--tw-enter-scale": "1" } as React.CSSProperties
 
 interface BottomControlBarProps {
   isRecording: boolean
@@ -82,61 +78,6 @@ interface BottomControlBarProps {
   archiveUnread: number
   // LLM 运行态（与 header LLM chip 同源）：非 idle = 正在跑 → 入口左点呈处理态（amber + 脉冲）。
   llmState: LlmState
-}
-
-// Shot / Take 共用的步进器输入：[−] [文本框] [+]。
-// −/+ 把当前值解析成整数后 ±1（下限 1）写回；当前值非纯数字（如 "2A"）时 −/+ 自动禁用。
-// 中间框接受任意文本（Shot 可输 "2A"）。提交（✓ 或回车）由外层 <form onSubmit> 处理。
-function StepperField({
-  value,
-  onValueChange,
-  placeholder,
-}: {
-  value: string
-  onValueChange: (v: string) => void
-  placeholder?: string
-}) {
-  const n = Number.parseInt(value.trim(), 10)
-  const isNumeric = Number.isFinite(n) && String(n) === value.trim()
-  const step = (delta: number) => {
-    if (isNumeric) onValueChange(String(Math.max(1, n + delta)))
-  }
-  return (
-    <div className="flex items-center gap-1.5 px-1">
-      <Button
-        type="button"
-        size="icon-sm"
-        variant="ghost"
-        disabled={!isNumeric}
-        onClick={() => step(-1)}
-        className="rounded-full border border-border/60 shrink-0"
-        title="减 1"
-      >
-        <Minus className="size-3.5" />
-      </Button>
-      <Input
-        autoFocus
-        value={value}
-        onChange={(e) => onValueChange(e.target.value)}
-        placeholder={placeholder}
-        className="h-8 text-sm text-center"
-      />
-      <Button
-        type="button"
-        size="icon-sm"
-        variant="ghost"
-        disabled={!isNumeric}
-        onClick={() => step(1)}
-        className="rounded-full border border-border/60 shrink-0"
-        title="加 1"
-      >
-        <Plus className="size-3.5" />
-      </Button>
-      <Button type="submit" size="icon-sm" className="rounded-full shrink-0" title="确认">
-        <Check className="size-3.5" />
-      </Button>
-    </div>
-  )
 }
 
 // Shot / Take 共用的「点开→步进器→✓」下拉。受控 open：commit 后自动关闭（修 ✓ 不关弹窗）。
@@ -455,9 +396,9 @@ export default function BottomControlBar({
                       : "bg-green-500",
                 )}
               />
-              {/* 窄屏只留状态点 + 图标省宽；宽屏（横屏 lg）恢复「LLM 历史」全文。 */}
-              <GemmaIcon className="size-6 text-[#4285F4] lg:hidden" />
-              <span className="hidden lg:inline text-sm font-medium text-foreground">LLM 历史</span>
+              {/* 状态点 + Gemma 图标；宽屏（横屏 lg）附「Gemma 4」文字。 */}
+              <GemmaIcon className="size-6 text-[#4285F4]" />
+              <span className="hidden lg:inline text-sm font-medium text-foreground">Gemma 4</span>
             </Button>
           </div>
         </div>
@@ -489,13 +430,15 @@ export default function BottomControlBar({
       </div>
 
       {/* Log */}
-      <div className="px-4 pb-1.5 pt-0.5 border-t">
-        <div className="mx-auto w-full max-w-screen-2xl flex items-center justify-between">
-          <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap py-1">
+      <div className="px-4 py-[5px] border-t flex-shrink-0">
+        <div className="mx-auto w-full max-w-screen-2xl flex items-center">
+          {/* debug log 占位（功能未接入，先隐藏，接入后恢复）：
+          <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap">
             <span className="size-1.5 rounded-full bg-green-500 flex-shrink-0" />
             <span>debug log</span>
           </div>
-          <span className="text-[10px] font-mono text-muted-foreground/50">
+          */}
+          <span className="ml-auto text-[10px] font-mono text-muted-foreground/50">
             powered by Gemma 4
           </span>
         </div>
