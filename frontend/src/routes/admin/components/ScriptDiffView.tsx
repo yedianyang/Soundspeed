@@ -16,15 +16,23 @@ const DIFF_ORDER: LineMatch["diff_type"][] = [
 
 // 并置文档（缺口③）：剧本台词 ‖ 实际说的，逐行对照。这是 take 的最终输出文档主体。
 // 以剧本行为骨架；漏说 → 实际侧「（未说）」；insertion（line_no<0）→ 剧本侧「（剧本无）」。
+// 只显示「对白行」（有角色，或确实有人说了话/insertion）的左右对比；非对白（动作/场景描述：
+// 无角色且无人对白）不在此呈现——剧本页已完整展示剧本，History 里无需重复表演/描述文本。
+// 注：line_no 仍按原始剧本编号（含非对白），故对白行的 L 号可能有跳号；将 L 收敛为仅对白
+// 编号属 line_no 语义变更（跨人契约边界），留待与境熙拉通后单独做。
 function JuxtapositionView({ rows }: { rows: JuxtaLine[] }) {
+  // 只保留对白行：有角色（剧本台词）或确实有人说了话（含 insertion：剧本无、实际有）。
+  const dialogue = rows.filter((row) => row.character != null || row.spoken_text != null)
+  if (dialogue.length === 0) return null
   return (
     <div className="space-y-1.5">
       <div className="grid grid-cols-2 gap-3 text-[10px] font-mono text-muted-foreground/60 uppercase tracking-wide">
         <span>剧本台词</span>
         <span>实际说的</span>
       </div>
-      {rows.map((row, i) => {
+      {dialogue.map((row, i) => {
         const isInsertion = row.line_no < 0
+        const lineLabel = isInsertion ? "—" : `L${row.line_no}`
         const missing = row.spoken_text == null
         return (
           <div
@@ -34,7 +42,7 @@ function JuxtapositionView({ rows }: { rows: JuxtaLine[] }) {
             {/* 剧本侧：行号 + 角色 + 台词 */}
             <div className="flex gap-1.5 min-w-0">
               <span className="text-[10px] font-mono text-muted-foreground/50 mt-1 w-7 flex-shrink-0 text-right">
-                {isInsertion ? "—" : `L${row.line_no}`}
+                {lineLabel}
               </span>
               <div className="min-w-0">
                 {row.character && (
@@ -68,7 +76,15 @@ function JuxtapositionView({ rows }: { rows: JuxtaLine[] }) {
 // L2 script_diff 显示。主体是 juxtaposition 两列对照（剧本 ‖ 实际）；summary 置顶一句话概览，
 // corrected_segments（原→改 ASR 纠错）放下方。老库/无剧本无 juxtaposition 时回退到旧的
 // line_matches 计数视图。降级：无 diff →「L2 未完成 / 无剧本」；全空 →「无偏差」。
-export function ScriptDiffView({ diff }: { diff: ScriptDiff | null }) {
+// hideJuxtaposition：History 详情用 MergedTranscriptView（实录可改）渲染并置时，这里只出
+// summary + corrected（避免重复渲染只读的 juxtaposition）。
+export function ScriptDiffView({
+  diff,
+  hideJuxtaposition = false,
+}: {
+  diff: ScriptDiff | null
+  hideJuxtaposition?: boolean
+}) {
   if (!diff) {
     return <p className="text-sm text-muted-foreground/60">L2 未完成 / 无剧本</p>
   }
@@ -104,8 +120,9 @@ export function ScriptDiffView({ diff }: { diff: ScriptDiff | null }) {
         </p>
       )}
 
-      {/* 主体：并置文档（剧本 ‖ 实际）。有 juxtaposition 就以它为准。 */}
-      {juxta.length > 0 && <JuxtapositionView rows={juxta} />}
+      {/* 主体：并置文档（剧本 ‖ 实际）。有 juxtaposition 就以它为准；hideJuxtaposition 时跳过
+          （History 详情改用 MergedTranscriptView 渲染可编辑实录侧）。 */}
+      {!hideJuxtaposition && juxta.length > 0 && <JuxtapositionView rows={juxta} />}
 
       {/* a. corrected_segments —— 辅助信息：原 → 改 */}
       {corrected.length > 0 && (

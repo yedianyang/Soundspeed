@@ -130,12 +130,14 @@ class _StubToolClientEmptyToolCalls:
 def stub_segments() -> list[dict]:
     return [
         {
+            "segment_id": 100,
             "speaker": "SPEAKER_00",
             "text": "我不想走，请别拦着我。",
             "start_frame": 0,
             "end_frame": 16000,
         },
         {
+            "segment_id": 101,
             "speaker": "SPEAKER_01",
             "text": "你必须留下来。",
             "start_frame": 16000,
@@ -696,26 +698,56 @@ async def test_run_l2_take_juxtaposition_insertion_detail_fallback(l2_input: L2I
     assert result.juxtaposition[-1].spoken_text == "导演我们再来一条"
 
 
+@pytest.mark.asyncio
+async def test_run_l2_take_juxtaposition_carries_segment_ids(l2_input: L2Input) -> None:
+    """juxtaposition 每行带真实 segment_id（前端据此重接可编辑的最新转录段）。"""
+    svc = _mock_tool_llm(_args_with_seg_idx())
+    result = await run_l2_take(l2_input, svc)
+
+    jx = {j.line_no: j for j in result.juxtaposition}
+    assert jx[1].segment_ids == (100,)  # 行1 → 转录段0 的 segment_id
+    assert jx[2].segment_ids == (101,)  # 行2 → 转录段1 的 segment_id
+
+
+@pytest.mark.asyncio
+async def test_run_l2_take_juxtaposition_missing_line_has_empty_segment_ids(
+    l2_input: L2Input,
+) -> None:
+    """漏说行（seg_idx=[]）的 segment_ids 为空 tuple。"""
+    args = {
+        "script_diff_summary": "行2漏说。",
+        "line_matches": [
+            {"line_no": 1, "diff_type": "match", "detail": None, "seg_idx": [0]},
+            {"line_no": 2, "diff_type": "missing", "detail": None, "seg_idx": []},
+        ],
+        "corrected_segments": [],
+    }
+    result = await run_l2_take(l2_input, _mock_tool_llm(args))
+    jx = {j.line_no: j for j in result.juxtaposition}
+    assert jx[2].segment_ids == ()
+
+
 def test_resolve_spoken_multi_segment_joins_and_takes_first_speaker() -> None:
-    """多段 seg_idx：原文按序拼接，speaker 取首个非空段。"""
+    """多段 seg_idx：原文按序拼接，speaker 取首个非空段，segment_ids 按序收集。"""
     from backend.pipelines.l2_take import _resolve_spoken
 
     segs = [
-        {"speaker": "顾朗", "text": "你来了"},
-        {"speaker": "顾朗", "text": "我等你很久了"},
+        {"segment_id": 7, "speaker": "顾朗", "text": "你来了"},
+        {"segment_id": 8, "speaker": "顾朗", "text": "我等你很久了"},
     ]
-    text, speaker = _resolve_spoken(segs, (0, 1))
+    text, speaker, seg_ids = _resolve_spoken(segs, (0, 1))
     assert text == "你来了我等你很久了"
     assert speaker == "顾朗"
+    assert seg_ids == (7, 8)
 
 
 def test_resolve_spoken_out_of_range_idx_skipped() -> None:
-    """越界下标静默跳过；全越界 → (None, None)。"""
+    """越界下标静默跳过；全越界 → (None, None, ())。缺 segment_id 的段不计入 seg_ids。"""
     from backend.pipelines.l2_take import _resolve_spoken
 
     segs = [{"speaker": "A", "text": "x"}]
-    assert _resolve_spoken(segs, (5, 9)) == (None, None)
-    assert _resolve_spoken(segs, (0, 5)) == ("x", "A")
+    assert _resolve_spoken(segs, (5, 9)) == (None, None, ())
+    assert _resolve_spoken(segs, (0, 5)) == ("x", "A", ())
 
 
 @pytest.mark.asyncio

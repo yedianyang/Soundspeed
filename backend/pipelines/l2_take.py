@@ -80,6 +80,10 @@ class JuxtaLine:
     spoken_text: str | None     # 实际说的（转录原文，逐字）；漏说为 None
     speaker: str | None         # 谁说的（转录 speaker=角色名/说话人N）；漏说为 None
     diff_type: str | None       # 副产物，前端可忽略；无对应 line_match 为 None
+    # 本行对齐到的真实转录段 segment_id（稳定 DB 主键，非位置下标）。前端据此把"实录侧"
+    # 重接到最新可编辑的转录段——说话人纠正后即时同步，绕开 seg_idx 的截断/排序不稳定问题。
+    # 漏说行为空 tuple；老库/无 segment_id 的输入也为空（前端按行回退到 spoken_text/speaker）。
+    segment_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -414,23 +418,29 @@ def _parse_llm_output(raw_text: str) -> L2Output:
 
 def _resolve_spoken(
     segments: list[dict], seg_idx: tuple[int, ...]
-) -> tuple[str | None, str | None]:
-    """按 seg_idx 从（截断后）转录段取真实原文 + speaker。
+) -> tuple[str | None, str | None, tuple[int, ...]]:
+    """按 seg_idx 从（截断后）转录段取真实原文 + speaker + 真实 segment_id 列表。
 
-    多段按下标顺序拼接（中文无空格，直接相连）；speaker 取首个非空段的 speaker。
-    无有效下标 → (None, None)，对应"漏说该行"。越界下标静默跳过（LLM best-effort）。
+    多段按下标顺序拼接（中文无空格，直接相连）；speaker 取首个非空段的 speaker；
+    segment_ids 收集所有命中段的真实 segment_id（供前端把"实录侧"重接到可编辑的最新段）。
+    无有效下标 → (None, None, ())，对应"漏说该行"。越界下标静默跳过（LLM best-effort）。
+    输入段缺 segment_id（老库/直接构造的测试输入）时该段不计入 segment_ids。
     """
     parts: list[str] = []
     speaker: str | None = None
+    seg_ids: list[int] = []
     for i in seg_idx:
         if 0 <= i < len(segments):
             seg = segments[i]
             parts.append(seg.get("text", ""))
             if speaker is None:
                 speaker = seg.get("speaker")
+            sid = seg.get("segment_id")
+            if isinstance(sid, int) and not isinstance(sid, bool):
+                seg_ids.append(sid)
     if not parts:
-        return None, None
-    return "".join(parts), speaker
+        return None, None, ()
+    return "".join(parts), speaker, tuple(seg_ids)
 
 
 def _build_juxtaposition(
@@ -457,7 +467,7 @@ def _build_juxtaposition(
     for line in script_lines:
         line_no = line["line_no"]
         m = match_by_no.get(line_no)
-        spoken_text, speaker = _resolve_spoken(segments, m.seg_idx if m else ())
+        spoken_text, speaker, seg_ids = _resolve_spoken(segments, m.seg_idx if m else ())
         rows.append(
             JuxtaLine(
                 line_no=line_no,
@@ -466,11 +476,12 @@ def _build_juxtaposition(
                 spoken_text=spoken_text,
                 speaker=speaker,
                 diff_type=m.diff_type if m else None,
+                segment_ids=seg_ids,
             )
         )
 
     for m in insertions:
-        spoken_text, speaker = _resolve_spoken(segments, m.seg_idx)
+        spoken_text, speaker, seg_ids = _resolve_spoken(segments, m.seg_idx)
         if spoken_text is None and m.detail:  # seg_idx 缺失 → detail 兜底
             spoken_text = m.detail
         rows.append(
@@ -481,6 +492,7 @@ def _build_juxtaposition(
                 spoken_text=spoken_text,
                 speaker=speaker,
                 diff_type="insertion",
+                segment_ids=seg_ids,
             )
         )
 

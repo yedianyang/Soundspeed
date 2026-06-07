@@ -34,6 +34,7 @@ import {
 import { useSessionStore } from "@/store/session"
 import { ScriptDiffView } from "./ScriptDiffView"
 import { SpeakerLabel } from "./SpeakerLabel"
+import { MergedTranscriptView } from "./MergedTranscriptView"
 
 type PatchTakeMutation = UseMutationResult<
   TakeDTO,
@@ -339,6 +340,13 @@ function TakeDetail({
   // NP note（打字/语音备注归置到本 take，take.notes 聚合）。
   const noteLines = parseNoteLines(data.notes)
 
+  // 有剧本对比（juxtaposition）→ 用合并并置视图（左实录可改 ‖ 右台词），取代独立实录块 + 只读 juxta。
+  // L2 摘要 / 纠错仍是分析时快照，单独在下方显示（有才显示）。
+  const juxta = diff?.juxtaposition ?? []
+  const hasJuxta = juxta.length > 0
+  const hasL2Extra =
+    !!diff?.script_diff_summary || (diff?.corrected_segments?.length ?? 0) > 0
+
   async function handleCorrect(seg: TranscriptSegmentDTO, next: string | null) {
     // 点当前值是 no-op：不发 PATCH、不标记已纠正。
     if (next === seg.speaker) return
@@ -356,41 +364,73 @@ function TakeDetail({
 
   return (
     <div className="space-y-3">
-      {/* ch1 主对话转录：speaker 可点纠正。key 绑 speaker 强制 SpeakerLabel 重挂载，
-          绕过 Radix asChild trigger 复用 DOM、重渲染却不重绘文本的问题（数据/重渲染本身正常，见排查记录）。 */}
-      {ch1Segs.length > 0 ? (
-        <div className="space-y-1.5">
-          {ch1Segs.map((seg) => (
-            <div key={seg.segment_id}>
-              <p className="text-sm">
-                <SpeakerLabel
-                  key={String(seg.speaker)}
-                  speaker={seg.speaker}
-                  options={candidates}
-                  onChange={(next) => handleCorrect(seg, next)}
-                />{" "}
-                {seg.text}
-              </p>
-              {failedSegId === seg.segment_id && (
-                <p className="text-xs text-destructive">说话人纠正失败，请重试</p>
-              )}
-            </div>
-          ))}
-        </div>
-      ) : (
-        <p className="text-sm text-muted-foreground/60">无转录片段</p>
-      )}
+      {hasJuxta ? (
+        <>
+          {/* 合并并置视图：左实录（说话人可改、即时同步）‖ 右台词。取代独立实录块 + 只读 juxtaposition。 */}
+          <MergedTranscriptView
+            rows={juxta}
+            ch1Segs={ch1Segs}
+            candidates={candidates}
+            onCorrect={handleCorrect}
+            failedSegId={failedSegId}
+          />
 
-      {/* L2 diff */}
-      <div className="flex items-center gap-2">
-        <div className="flex-1 h-px bg-border" />
-        <span className="text-[10px] text-muted-foreground whitespace-nowrap">L2</span>
-        <div className="flex-1 h-px bg-border" />
-      </div>
-      {corrected && (
-        <p className="text-[11px] text-muted-foreground/80">说话人已纠正，剧本分析未更新</p>
+          {/* L2 摘要 / 纠错（仍是分析时快照，与说话人纠正无关）；有才显示。 */}
+          {hasL2Extra && (
+            <>
+              <div className="flex items-center gap-2">
+                <div className="flex-1 h-px bg-border" />
+                <span className="text-[10px] text-muted-foreground whitespace-nowrap">L2</span>
+                <div className="flex-1 h-px bg-border" />
+              </div>
+              {corrected && (
+                <p className="text-[11px] text-muted-foreground/80">
+                  摘要 / 纠错为分析时快照，未随说话人纠正更新
+                </p>
+              )}
+              <ScriptDiffView diff={diff} hideJuxtaposition />
+            </>
+          )}
+        </>
+      ) : (
+        <>
+          {/* 无 juxtaposition（无剧本 / 老库 / L2 未完成）：保留独立实录块 + 完整 ScriptDiffView。
+              ch1 主对话转录 speaker 可点纠正；key 绑 speaker 强制 SpeakerLabel 重挂载，绕过 Radix
+              asChild trigger 复用 DOM、重渲染却不重绘文本的问题（数据/重渲染本身正常，见排查记录）。 */}
+          {ch1Segs.length > 0 ? (
+            <div className="space-y-1.5">
+              {ch1Segs.map((seg) => (
+                <div key={seg.segment_id}>
+                  <p className="text-sm">
+                    <SpeakerLabel
+                      key={String(seg.speaker)}
+                      speaker={seg.speaker}
+                      options={candidates}
+                      onChange={(next) => handleCorrect(seg, next)}
+                    />{" "}
+                    {seg.text}
+                  </p>
+                  {failedSegId === seg.segment_id && (
+                    <p className="text-xs text-destructive">说话人纠正失败，请重试</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground/60">无转录片段</p>
+          )}
+
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-px bg-border" />
+            <span className="text-[10px] text-muted-foreground whitespace-nowrap">L2</span>
+            <div className="flex-1 h-px bg-border" />
+          </div>
+          {corrected && (
+            <p className="text-[11px] text-muted-foreground/80">说话人已纠正，剧本分析未更新</p>
+          )}
+          <ScriptDiffView diff={diff} />
+        </>
       )}
-      <ScriptDiffView diff={diff} />
 
       {/* note 区：NP note（打字/语音备注归置到本 take）。L2 下方独立分隔线，正文逐条显示。 */}
       {noteLines.length > 0 && (

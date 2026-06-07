@@ -110,6 +110,9 @@ export interface JuxtaLine {
   spoken_text: string | null // 实际说的（转录原文）；漏说为 null
   speaker: string | null // 谁说的（角色名/说话人N）；漏说为 null
   diff_type: "match" | "missing" | "substitution" | "insertion" | null
+  // 本行对齐到的真实转录段 segment_id（稳定主键）。History 合并视图据此把"实录侧"重接到
+  // 最新可编辑的转录段（说话人纠正即时同步）；漏说/老库为空或缺省，前端回退到 spoken_text/speaker。
+  segment_ids?: number[]
 }
 
 export interface ScriptDiff {
