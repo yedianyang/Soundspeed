@@ -8,9 +8,18 @@ import {
   deleteSpeaker,
   enrollSpeaker,
   speakersQueryKey,
+  useCharacters,
   useSpeakers,
 } from "@/lib/api"
-import { CheckCircle2, Loader2, Mic, Plus, Trash2, Upload, User } from "lucide-react"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { CheckCircle2, ChevronDown, Loader2, Mic, Plus, Trash2, Upload, User } from "lucide-react"
 import EnrollRecorderDialog from "@/components/admin/EnrollRecorderDialog"
 import type { SpeakerDTO } from "@/types/api"
 
@@ -20,6 +29,7 @@ type Msg = { kind: "error" | "done" | "info"; text: string }
 // take 创建时从这里选"在场演员"，diarization 回填只在所选演员里匹配。
 export default function ActorManagementPanel() {
   const { data: speakers, isLoading, error } = useSpeakers()
+  const { data: characters } = useCharacters() // 整部戏角色全集，"选角色"下拉用
   const qc = useQueryClient()
   const [newName, setNewName] = useState("")
   const [busy, setBusy] = useState<number | "add" | null>(null)
@@ -152,10 +162,11 @@ export default function ActorManagementPanel() {
         )}
       </div>
 
-      {/* 添加演员 */}
+      {/* 添加演员：可从剧本角色下拉选（填名），也可自由输入；名字即角色名，diarization
+          命中声纹后转录段 speaker 直接显示这个名。已注册的角色名置灰提示。 */}
       <div className="flex gap-2">
         <Input
-          placeholder="新演员姓名"
+          placeholder="角色名 / 演员名"
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           onKeyDown={(e) => {
@@ -164,6 +175,44 @@ export default function ActorManagementPanel() {
           className="flex-1"
           disabled={busy === "add"}
         />
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="secondary"
+              size="icon-sm"
+              disabled={busy === "add"}
+              title="从剧本角色里选（填入名字，可再改）"
+            >
+              <ChevronDown className="size-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48 max-h-72 overflow-y-auto">
+            <DropdownMenuLabel>剧本角色</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            {(characters ?? []).length === 0 && (
+              <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                无剧本角色（先导入并解析剧本）
+              </div>
+            )}
+            {(characters ?? []).map((c) => {
+              const taken = (speakers ?? []).some((s) => s.display_name === c)
+              return (
+                <DropdownMenuItem
+                  key={c}
+                  onSelect={() => setNewName(c)}
+                  className="gap-2"
+                >
+                  <span className="truncate">{c}</span>
+                  {taken && (
+                    <span className="ml-auto text-[10px] text-muted-foreground flex-shrink-0">
+                      已注册
+                    </span>
+                  )}
+                </DropdownMenuItem>
+              )
+            })}
+          </DropdownMenuContent>
+        </DropdownMenu>
         <Button variant="secondary" size="icon-sm" onClick={handleAdd} disabled={busy === "add"}>
           {busy === "add" ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
         </Button>

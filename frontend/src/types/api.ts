@@ -67,12 +67,31 @@ export interface ScriptDTO {
   lines: ScriptLineDTO[]
 }
 
+// 单场原生 FC 解析结果（POST /scripts/parse-single，不入库，供预览/确认）
+export interface ParseSingleResult {
+  scene_code: string | null
+  int_ext: string | null
+  time_of_day: string | null
+  location: string | null
+  lines: { character: string | null; text: string }[]
+}
+
+// 选中场更新结果（POST /scenes/{id}/script）。skipped=true → 内容无变化未新建版本
+export interface ScriptCommitResult {
+  scene_id: number
+  script_id: number
+  version: number
+  line_count: number
+  skipped: boolean
+}
+
 // ── L2 输出：takes.script_diff JSON 顶层形状（docs/specs/2026-05-27-l2-pipeline.md §）──
 
 export interface LineMatch {
   line_no: number // insertion 时为 -1
   diff_type: "match" | "missing" | "substitution" | "insertion"
   detail: string | null
+  seg_idx?: number[] // 对齐的转录段下标（juxtaposition 用），可缺省
 }
 
 // L2 修正输出：原始转录 → 对齐剧本后的文本。diff 显示的主内容。
@@ -82,10 +101,25 @@ export interface CorrectedSegment {
   corrected: string
 }
 
+// 并置文档一行（缺口③）：剧本台词 ‖ 实际说的。take 详情两列对照视图直接渲染它。
+// line_no=-1 → insertion（剧本无此行）；spoken_text=null → 漏说该行。
+export interface JuxtaLine {
+  line_no: number
+  character: string | null // 角色（剧本侧）；insertion 为 null
+  script_text: string | null // 剧本台词；insertion 为 null
+  spoken_text: string | null // 实际说的（转录原文）；漏说为 null
+  speaker: string | null // 谁说的（角色名/说话人N）；漏说为 null
+  diff_type: "match" | "missing" | "substitution" | "insertion" | null
+  // 本行对齐到的真实转录段 segment_id（稳定主键）。History 合并视图据此把"实录侧"重接到
+  // 最新可编辑的转录段（说话人纠正即时同步）；漏说/老库为空或缺省，前端回退到 spoken_text/speaker。
+  segment_ids?: number[]
+}
+
 export interface ScriptDiff {
   script_diff_summary: string | null // 无剧本场景可为 null
   line_matches: LineMatch[]
   corrected_segments?: CorrectedSegment[]
+  juxtaposition?: JuxtaLine[] // 并置文档；老库/无剧本路径可缺省
 }
 
 // ── Take DTO（dal.Take 投影）──
@@ -233,11 +267,24 @@ export interface NoteListResponse {
   events: NoteDTO[]
 }
 
-// POST /notes 202 响应（NP Pipeline 非阻塞归置）
+// POST /notes 202 响应（NP Pipeline 非阻塞归置）。
+// note 分支带 category/content；入口调度器判定为查询时后端返 {status,kind:"query"}（无 category/content），
+// 故全放宽为可选，调用方据 kind 分支（query 撤掉乐观 pending，答案走 qp.answer 气泡）。
 export interface NoteCreateResponse {
   status: "processing"
-  category: string
-  content: string
+  category?: string
+  content?: string
+  kind?: "query"
+}
+
+// WS qp.answer.{conn_id} payload（入口调度器 query 分支：QP 跑完把答案广播回发起 tab）。
+// client_id：发起这条 query 的乐观去重键。队列模型据此把答案 resolveQa 到对应那条 qaItem。
+// 文本 query 由 /notes 调度分支透传；语音 query 由 voice dispatch 透传（与 voice-qp 共享契约）。
+// 直连 /api/v1/query demo 不带，故可选。
+export interface QpAnswerMsg {
+  connection_id: string
+  answer_text: string
+  client_id?: string
 }
 
 // 前端 pending note（已提交、等待 LLM 归置）

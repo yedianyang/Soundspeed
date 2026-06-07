@@ -1,17 +1,14 @@
 import { postNote, postQuery } from "@/lib/api"
+import { randomId } from "@/lib/uuid"
 import { useSessionStore } from "@/store/session"
-import type { NoteCreateResponse } from "@/types/api"
 
-// client_id 只需全局唯一（pending 乐观去重/精确移除/标失败的键），不要求密码学强度。
-// crypto.randomUUID 仅在安全源（HTTPS / localhost）可用，局域网 HTTP（iPad/手机经 LAN IP 访问）
-// 下为 undefined，直接调用会抛 TypeError 让提交失败，故加回退。
+// client_id 全局唯一去重键（与 MemoInput 同源 randomId；局域网 HTTP 无 crypto 时回退，见 uuid.ts）。
 export function newClientId(): string {
-  return crypto?.randomUUID?.() ?? `nid-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return randomId("nid")
 }
 
-// 跑一条 QP 查询：乐观插 processing → 同步返回填 done / 异常填 failed。
-// MemoInput 的 ? 前缀路由、回执「↩ 其实是提问」改判共用——异常自吞成 failed 态（有专门渲染），
-// 调用方不必 try/catch。
+// 跑一条 QP 查询（显式强制查询，绕过 /notes 自动分类器）：乐观插 processing → 同步返回填 done /
+// 异常填 failed。回执「↩ 其实是提问」误判兜底共用——异常自吞成 failed 态（有专门渲染），调用方不必 try/catch。
 export async function runQuery(text: string): Promise<void> {
   const clientId = newClientId()
   const ts = Date.now() / 1000
@@ -24,17 +21,22 @@ export async function runQuery(text: string): Promise<void> {
   }
 }
 
-// 跑一条文本 note：await postNote 拿到 LLM 归置的 category/content 后乐观插 pending。
-// QaRow「✎ 记为备注」改判共用。postNote 失败抛出（无 pending 可标），由调用方 catch 提示。
+// 跑一条文本 note（显式强制备注，不带 conn_id → 后端跳过分类恒走 NP）：乐观优先插 pending（占位
+// 类别 note / 正文原文），真类别/正文经 note.processed WS 回灌转成回执。QaRow「✎ 记为备注」误判兜底用。
 export async function runNote(text: string): Promise<void> {
   const clientId = newClientId()
-  const resp: NoteCreateResponse = await postNote(text, undefined, clientId)
+  const ts = Date.now() / 1000
   useSessionStore.getState().addPendingNote({
     client_id: clientId,
     kind: "text",
-    ts: Date.now() / 1000,
-    category: resp.category,
-    content: resp.content,
+    ts,
+    category: "note",
+    content: text,
     rawText: text,
   })
+  try {
+    await postNote(text, undefined, clientId) // 无 conn_id = 强制 note，不触发块③分类
+  } catch {
+    useSessionStore.getState().noteFailed({ reason: "upload_failed", ts, client_id: clientId })
+  }
 }

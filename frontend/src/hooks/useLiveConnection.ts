@@ -1,6 +1,7 @@
 import { useEffect } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { getTake, takeQueryKey } from "@/lib/api"
+import { CONN_ID } from "@/lib/connId"
 import { LiveSocket } from "@/lib/ws"
 import { useSessionStore } from "@/store/session"
 import type {
@@ -9,6 +10,7 @@ import type {
   LlmStatusMsg,
   NoteFailedMsg,
   NoteProcessedMsg,
+  QpAnswerMsg,
   SceneChangedMsg,
   TakeChangedMsg,
   TakeDeletedMsg,
@@ -115,6 +117,16 @@ export function useLiveConnection(): void {
           // 4.I：NP 失败 → 对应 pending 转失败态（红 + reason + 重试），不再永久卡处理中
           const m = payload as NoteFailedMsg
           s.noteFailed(m)
+          return
+        }
+        if (topic === `qp.answer.${CONN_ID}`) {
+          // 入口调度器查询答案：广播 send-to-all，按 CONN_ID 后缀认领本 tab，其余 tab 过滤掉。
+          // 队列模型 promote：按 client_id 调 qpAnswerArrived。文本 query 命中预建的 processing
+          // qaItem（/notes 分支已 addQa）→ 置 done + answer；语音 query 此刻才知是 query，命中
+          // 那条语音 pending → 撤 pending 并新建一条 done qaItem 进队列/档案。缺 client_id 的旧广播
+          // 无对应项 → no-op。「其实是提问」强制查询走同步 postQuery 不经此路。
+          const m = payload as QpAnswerMsg
+          if (m.client_id) s.qpAnswerArrived(m.client_id, m.answer_text)
           return
         }
         if (topic === "device.warning") {

@@ -25,6 +25,7 @@ target 取值（spec §6）：
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 import uuid
@@ -47,7 +48,12 @@ from backend.core.script_import import (
     import_single_scene,
     plan_import,
 )
-from backend.pipelines.sp_script import SPParseError, parse_scene_block, split_for_parse
+from backend.pipelines.sp_script import (
+    SPParseError,
+    parse_scene_block,
+    parse_scene_block_fc,
+    split_for_parse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +130,25 @@ class SceneDecision(BaseModel):
 class ConfirmBody(BaseModel):
     plan: dict  # upload 阶段返回的 plan（原样回传，解析只发生一次）
     decisions: list[SceneDecision] = []
+
+
+class ParseSingleBody(BaseModel):
+    text: str  # 单场剧本文本（可含场头行）
+
+
+class ParsedLineOut(BaseModel):
+    character: str | None  # 对白角色名；描述/动作行为 None
+    text: str
+
+
+class ParseSingleResult(BaseModel):
+    """单场原生 FC 解析结果（不入库，仅返回结构化内容供预览/确认）。"""
+
+    scene_code: str | None
+    int_ext: str | None
+    time_of_day: str | None
+    location: str | None
+    lines: list[ParsedLineOut]
 
 
 # ── 内部辅助 ─────────────────────────────────────────────────────────────────
@@ -233,12 +258,25 @@ async def list_uploads(
     return [ScriptUploadInfo(**u) for u in dal.list_script_uploads()]
 
 
+def _block_fingerprint(block: str) -> str:
+    """无号场的稳定合成 code 指纹：对源文本块（去空白）取 sha1 前 12 位。
+
+    源块由 split_for_parse 从 raw_text 确定性切出（不经 LLM），故同一原文重传 →
+    同一指纹 → get_or_create_scene 复用既有场，无号场不再每次重传都建重复场
+    （旧实现用随机 batch_id，每次解析都不同 → 累积重复，见 soundspeed_script_reupload_design）。
+    去空白抗换行/缩进抖动；不同内容 → 不同指纹，自然区分同次多无号场。
+    """
+    norm = "".join(block.split())
+    return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:12]
+
+
 async def run_parse_job(
     dal,
     llm_service,
     upload_id: int,
     raw_text: str,
     target: Literal["multi_scene", "current_scene"],
+    on_conflict: Literal["skip", "version"] = "skip",
 ) -> None:
     """后台解析任务：瞬时切场 → 逐场 Gemma 结构化 → 每场即时入库（前端实时刷出）。
 
@@ -258,9 +296,9 @@ async def run_parse_job(
             await _run_parse_batch(dal, llm_service, upload_id, blocks, total)
             return
 
-        # multi_scene：逐场解析 → 逐场入库
-        batch_id = uuid.uuid4().hex[:8]
-        imported = skipped = synthetic_n = 0
+        # multi_scene：逐场解析 → 逐场入库。无号场的合成 code 用源块内容指纹（稳定），
+        # 同一原文重传 → 同场复用、不再建重复场（旧实现用随机 batch_id 每次都新建）。
+        imported = skipped = 0
         for i, block in enumerate(blocks, 1):
             dal.update_script_upload_status(upload_id, "parsing", f"解析中 {i}/{total} 场…")
             t0 = time.monotonic()
@@ -273,12 +311,16 @@ async def run_parse_job(
                 "场块 %d/%d 解析耗时 %.1fs（输入 %d 字，得 %d 场）",
                 i, total, time.monotonic() - t0, len(block), len(scenes),
             )
-            for scene in scenes:
-                synth = f"import:{batch_id}:{synthetic_n}"
-                if scene.scene_code is None:
-                    synthetic_n += 1
+            block_fp = _block_fingerprint(block)
+            for j, scene in enumerate(scenes):
+                # 一块通常一场；偶发多场用 :j 区分，仍随源块内容稳定
+                synth = f"import:{block_fp}" if j == 0 else f"import:{block_fp}:{j}"
                 res = import_single_scene(
-                    scene, target="multi_scene", synthetic_code=synth, dal=dal
+                    scene,
+                    target="multi_scene",
+                    synthetic_code=synth,
+                    dal=dal,
+                    on_conflict=on_conflict,
                 )
                 if res is None:
                     skipped += 1
@@ -324,11 +366,14 @@ async def parse_upload(
     request: Request,
     upload_id: int,
     target: Literal["multi_scene", "current_scene"] = "multi_scene",
+    on_conflict: Literal["skip", "version"] = "skip",
     _: None = Depends(require_admin),
 ) -> ScriptUploadInfo:
     """阶段 2（解析）：启动后台解析任务，立即返回（status=parsing）。
 
     解析与上传解耦、且不阻塞请求：后台逐场处理并更新进度，前端轮询 GET /uploads 展示。
+    on_conflict=version（multi_scene 更新全本）：命中已有场追加新版本（内容无变化则幂等跳过）；
+    默认 skip 保持首次导入语义（命中已有场跳过不替换）。
     """
     dal = request.app.state.orchestrator.dal
     llm_service = request.app.state.llm_service
@@ -355,7 +400,7 @@ async def parse_upload(
         tasks = set()
         request.app.state.parse_tasks = tasks
     task = asyncio.create_task(
-        run_parse_job(dal, llm_service, upload_id, raw_text, target)
+        run_parse_job(dal, llm_service, upload_id, raw_text, target, on_conflict)
     )
     tasks.add(task)
     task.add_done_callback(tasks.discard)
@@ -379,4 +424,35 @@ async def confirm_import(
     return UploadResult(
         status="imported",
         scenes=_build_imported_scenes(results, dal),
+    )
+
+
+@router.post("/parse-single", response_model=ParseSingleResult)
+async def parse_single(
+    request: Request,
+    body: ParseSingleBody,
+    _: None = Depends(require_admin),
+) -> ParseSingleResult:
+    """单场解析（Gemma 原生 function calling）：一段剧本文本 → 结构化一场，**不入库**。
+
+    走 report_parsed_lines 工具（forced tool_choice），输出结构由 grammar 物理保证。
+    是「照片增补 / 更新对话框」单场路径的基础，也是黑客松原生 FC 的展示点；
+    整本批量导入仍走 POST /uploads/{id}/parse（快路径，不上 FC）。
+    """
+    llm_service = request.app.state.llm_service
+    if llm_service is None:
+        raise HTTPException(503, "LLM 服务未启用，无法解析剧本")
+
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(422, "文本为空")
+
+    scenes = await parse_scene_block_fc(text, llm_service, timeout=180.0)
+    scene = scenes[0]  # 单场：parse_scene_block_fc 恒返回一个 ParsedScene
+    return ParseSingleResult(
+        scene_code=scene.scene_code,
+        int_ext=scene.slugline.int_ext,
+        time_of_day=scene.slugline.time_of_day,
+        location=scene.slugline.location,
+        lines=[ParsedLineOut(character=ln.character, text=ln.text) for ln in scene.lines],
     )

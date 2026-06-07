@@ -10,7 +10,13 @@ import type {
   TranscriptSegmentDTO,
 } from "@/types/api"
 
-import type { FeedReceipt, NoteFailedMsg, NoteProcessedMsg, PendingNote, QaItem } from "@/types/api"
+import type {
+  FeedReceipt,
+  NoteFailedMsg,
+  NoteProcessedMsg,
+  PendingNote,
+  QaItem,
+} from "@/types/api"
 
 export type ConnectionState = "connecting" | "open" | "closed" | "no-token"
 
@@ -21,6 +27,14 @@ export interface LiveSeg {
   start_frame: number
   end_frame: number
   isPartial: boolean
+}
+
+// QP 答案到达：把命中 client_id 的 qaItem 置 done + answer（其余不动）。resolveQa 与
+// qpAnswerArrived 的命中分支共用同一 transition；archiveUnread+1 的 bump 仍留在各自 set()。
+function resolveQaItems(items: QaItem[], clientId: string, answer: string): QaItem[] {
+  return items.map((q) =>
+    q.client_id === clientId ? { ...q, status: "done", answer } : q,
+  )
 }
 
 function readToken(): string | null {
@@ -63,15 +77,15 @@ interface SessionState {
   feedReceipts: FeedReceipt[]
 
   // QP 问答项：就地队列渲染（processing/done/failed）+ 留存供档案（P5）。
-  // inlineDismissed 后只在档案显示，不在就地层。query 走同步 HTTP（postQuery），不经 WS。
+  // inlineDismissed 后只在档案显示，不在就地层。query 答案经 qp.answer.{CONN_ID} WS 按 client_id resolveQa。
   qaItems: QaItem[]
 
   // LLM 反馈档案未读数：L2 推送实时到达（take.changed 带 script_diff null→非 null）/ QP 新答案落定
   // 时 +1；打开档案 Sheet 时 markArchiveRead 清 0。seedTakes（历史加载/refetch）不 bump——非新事件。
   archiveUnread: number
 
-  // note 队列版本号：note.processed 落库后递增，NoteList 据此 refetch resolved（让落定的 note 及时显示，
-  // 不只移除 pending）。提交时不 bump——那时 note 未落库，refetch 拿不到，pending 已由 store 直接显示。
+  // note 队列版本号：note.processed 落库后递增，据此 refetch resolved notes（History/take 详情）。
+  // 提交时不 bump——那时 note 未落库，refetch 拿不到，pending 已由 store 直接显示。
   notesVersion: number
 
   // take.end 后处理状态条（diarization + Gemma）；done 清空，error 保留到下次录制。null=不显示。
@@ -107,6 +121,7 @@ interface SessionState {
   setViewerCount: (count: number) => void
   resetSegments: () => void
   addPendingNote: (n: PendingNote) => void
+  removePending: (clientId: string) => void
   noteProcessed: (m: NoteProcessedMsg) => void
   noteFailed: (m: NoteFailedMsg) => void
   retryPending: (clientId: string) => void
@@ -114,6 +129,7 @@ interface SessionState {
   dismissReceipt: (clientId: string) => void
   addQa: (q: QaItem) => void
   resolveQa: (clientId: string, answer: string) => void
+  qpAnswerArrived: (clientId: string, answerText: string) => void
   failQa: (clientId: string, reason: string) => void
   dismissQaInline: (clientId: string) => void
   markArchiveRead: () => void
@@ -298,6 +314,14 @@ export const useSessionStore = create<SessionState>((set) => ({
   addPendingNote: (n) =>
     set((s) => ({ pendingNotes: [...s.pendingNotes, n] })),
 
+  // 按 client_id 精确移除一条 pending（无 version bump，区别于 noteProcessed）。
+  // 入口调度器判这条 memo 其实是查询（kind=query）时，乐观插的 note pending 要撤掉——
+  // 它不是备注、不会落库、无 note.processed 回灌，留着会永久卡「处理中」。
+  removePending: (clientId) =>
+    set((s) => ({
+      pendingNotes: s.pendingNotes.filter((p) => p.client_id !== clientId),
+    })),
+
   // client_id 精确移除对应 pending（content 被 LLM 改写、ts 前后端不同源，旧的三元匹配必失败 → 永久卡
   // 「处理中」）。client_id 缺失（异常/旧后端）时不误删，仅 bump version。notesVersion 递增触发 refetch。
   noteProcessed: (m) =>
@@ -346,6 +370,19 @@ export const useSessionStore = create<SessionState>((set) => ({
       ),
     })),
 
+  setRecording: (recording) =>
+    set((state) => (state.isRecording === recording ? {} : { isRecording: recording })),
+
+  // device.warning：设备拔走提示；null=清空（手动 dismiss）。
+  setDeviceWarning: (message) =>
+    set((state) => (state.deviceWarning === message ? {} : { deviceWarning: message })),
+
+  // audio.level：每帧同时写 rms 值和到达时间戳，供电平条判断新鲜度后混合。
+  setBackendLevel: (rms) => set(() => ({ backendLevel: rms, backendLevelTs: Date.now() })),
+
+  // viewer.count：后端广播的在线观看数；onClose 调 setViewerCount(0) 清陈旧值。
+  setViewerCount: (count) => set(() => ({ viewerCount: count })),
+
   // 放弃失败 pending：用户主动关掉这条失败行，不再重试，直接移除。
   dismissPending: (clientId) =>
     set((s) => ({ pendingNotes: s.pendingNotes.filter((p) => p.client_id !== clientId) })),
@@ -354,17 +391,55 @@ export const useSessionStore = create<SessionState>((set) => ({
   dismissReceipt: (clientId) =>
     set((s) => ({ feedReceipts: s.feedReceipts.filter((r) => r.client_id !== clientId) })),
 
-  // QP 问答：提交即乐观插 processing；同步返回填 done；异常填 failed。
+  // QP 问答：提交即乐观插 processing；qp.answer WS（按 client_id resolveQa）填 done；异常填 failed。
   // query 项就地 lingers（不像 note 回执 3s 自走），点开看长答案，由 dismissQaInline 手动收进档案。
   addQa: (q) => set((s) => ({ qaItems: [...s.qaItems, q] })),
   resolveQa: (clientId, answer) =>
     set((s) => ({
-      qaItems: s.qaItems.map((q) =>
-        q.client_id === clientId ? { ...q, status: "done", answer } : q,
-      ),
+      qaItems: resolveQaItems(s.qaItems, clientId, answer),
       // QP 新答案进档案 → 未读 +1（打开档案清 0）。
       archiveUnread: s.archiveUnread + 1,
     })),
+
+  // QP 答案到达时把答案落进队列。两种 client_id 来源：
+  //  1. 文本 query：提交时已 addQa 一条 processing qaItem（MemoInput 的 postNote.then 分支）。
+  //     命中它 → 等价 resolveQa（置 done + answer + archiveUnread+1）。
+  //  2. 语音 query：提交 202 只回 kind="dispatching"，那刻不知 note/query，故只插了一条
+  //     kind="voice" 的 pending、没 addQa。答案到达此刻才确定是 query → 撤掉那条语音 pending，
+  //     新建一条 done qaItem 进队列/档案。MVP 局限：qp.answer 只带 answer_text/client_id 不带
+  //     问题原文，语音 pending 的 rawText 为空，故问题文案只能用占位「🎤 语音提问」。
+  //  3. 既无 qaItem 也无 pending（陈旧/旧广播）→ no-op。
+  qpAnswerArrived: (clientId, answerText) =>
+    set((s) => {
+      if (s.qaItems.some((q) => q.client_id === clientId)) {
+        return {
+          qaItems: resolveQaItems(s.qaItems, clientId, answerText),
+          archiveUnread: s.archiveUnread + 1,
+        }
+      }
+      const pending = s.pendingNotes.find(
+        (p) => p.client_id === clientId && p.kind === "voice",
+      )
+      if (pending) {
+        return {
+          pendingNotes: s.pendingNotes.filter((p) => p.client_id !== clientId),
+          qaItems: [
+            ...s.qaItems,
+            {
+              client_id: clientId,
+              // 语音 query 无问题原文（rawText 空），用通用占位。content 是「语音备注」的乐观
+              // 文案，对 query 而言是错标，故不用它。
+              question: pending.rawText || "🎤 语音提问",
+              status: "done",
+              answer: answerText,
+              ts: pending.ts,
+            },
+          ],
+          archiveUnread: s.archiveUnread + 1,
+        }
+      }
+      return {}
+    }),
   failQa: (clientId, reason) =>
     set((s) => ({
       qaItems: s.qaItems.map((q) =>
@@ -380,19 +455,6 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   // 打开档案 Sheet 时清未读（看过即已读）。
   markArchiveRead: () => set((s) => (s.archiveUnread === 0 ? {} : { archiveUnread: 0 })),
-
-  setRecording: (recording) =>
-    set((state) => (state.isRecording === recording ? {} : { isRecording: recording })),
-
-  // device.warning：设备拔走提示；null=清空（手动 dismiss）。
-  setDeviceWarning: (message) =>
-    set((state) => (state.deviceWarning === message ? {} : { deviceWarning: message })),
-
-  // audio.level：每帧同时写 rms 值和到达时间戳，供电平条判断新鲜度后混合。
-  setBackendLevel: (rms) => set(() => ({ backendLevel: rms, backendLevelTs: Date.now() })),
-
-  // viewer.count：后端广播的在线观看数；onClose 调 setViewerCount(0) 清陈旧值。
-  setViewerCount: (count) => set(() => ({ viewerCount: count })),
 
   // 清实时转录（REC 开始 / dev 注入开始时调，避免上一条 take 的转录残留）。
   resetSegments: () => set(() => ({ segments: { ch1: [], ch2: [] } })),

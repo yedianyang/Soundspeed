@@ -76,6 +76,21 @@ def _patch_parse(monkeypatch, blocks, per_block_scenes):
     monkeypatch.setattr("backend.api.routes.scripts.parse_scene_block", _fake_block)
 
 
+# ── 无号场内容指纹（_block_fingerprint）──────────────────────────────────────
+
+
+def test_block_fingerprint_stable_and_ws_insensitive():
+    """同源块（含空白抖动）→ 同指纹；不同内容 → 不同指纹。无号场重传复用同场的基础。"""
+    from backend.api.routes.scripts import _block_fingerprint
+
+    a = _block_fingerprint("场1 内 咖啡馆 日\n罗湘：你好。")
+    b = _block_fingerprint("场1 内 咖啡馆 日\n 罗湘：你好。 ")  # 换行/缩进抖动
+    c = _block_fingerprint("场2 外 广场 夜\n阿明：再见。")
+    assert a == b  # 去空白后内容相同 → 指纹相同（重传幂等）
+    assert a != c  # 内容不同 → 指纹不同
+    assert len(a) == 12 and all(ch in "0123456789abcdef" for ch in a)
+
+
 # ── 阶段 1：上传（只入库，不碰 LLM）─────────────────────────────────────────
 
 
@@ -312,3 +327,47 @@ def test_confirm_replace(tmp_dal: DAL, monkeypatch):
         assert body["status"] == "imported"
         assert body["scenes"][0]["lines"][0]["character"] == "乙"
         assert tmp_dal.get_latest_script(sid)["version"] == 2
+
+
+# ── 单场原生 FC：POST /scripts/parse-single（不入库）─────────────────────────
+
+
+def _patch_parse_fc(monkeypatch, scene: ParsedScene) -> None:
+    """monkeypatch parse_scene_block_fc → 固定返回 [scene]（不跑真 Gemma）。"""
+    async def _fake_fc(block, llm, **k):
+        return [scene]
+
+    monkeypatch.setattr("backend.api.routes.scripts.parse_scene_block_fc", _fake_fc)
+
+
+def test_parse_single_returns_structured(tmp_dal: DAL, monkeypatch):
+    scene = _scene(
+        "3", [("罗湘", "你好。"), (None, "罗湘走到窗边。")], int_ext="内", tod="日", loc="咖啡馆"
+    )
+    _patch_parse_fc(monkeypatch, scene)
+    with _client(tmp_dal, monkeypatch) as c:
+        r = c.post(
+            "/api/v1/scripts/parse-single",
+            json={"text": "场3 内 咖啡馆 日\n罗湘：你好。\n罗湘走到窗边。"},
+            headers=_HEADERS,
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["scene_code"] == "3"
+        assert (body["int_ext"], body["time_of_day"], body["location"]) == ("内", "日", "咖啡馆")
+        assert body["lines"][0] == {"character": "罗湘", "text": "你好。"}
+        assert body["lines"][1] == {"character": None, "text": "罗湘走到窗边。"}
+
+
+def test_parse_single_503_when_no_llm(tmp_dal: DAL, monkeypatch):
+    with _client(tmp_dal, monkeypatch, llm=False) as c:
+        r = c.post(
+            "/api/v1/scripts/parse-single", json={"text": "罗湘：你好。"}, headers=_HEADERS
+        )
+        assert r.status_code == 503
+
+
+def test_parse_single_422_empty_text(tmp_dal: DAL, monkeypatch):
+    with _client(tmp_dal, monkeypatch) as c:  # llm 在，过 503 门控；文本空 → 422
+        r = c.post("/api/v1/scripts/parse-single", json={"text": "   "}, headers=_HEADERS)
+        assert r.status_code == 422

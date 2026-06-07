@@ -49,6 +49,7 @@ from backend.core.events import (
     TAKE_DELETED,
     TAKE_PROCESSING,
     TAKE_SEGMENTS_UPDATED,
+    broadcast_qp_answer,
 )
 from backend.core.orchestrator import Orchestrator
 
@@ -100,6 +101,33 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
         if warmup_coro is not None:
             asyncio.ensure_future(warmup_coro())
 
+        # voice dispatch 接线：注入 _persist_np_output_callable + _schedule_qp_broadcast
+        # 仅当 llm_service 存在时绑定（无 LLM 时 dispatch 入口不会被调，无需接线）。
+        if app.state.llm_service is not None:
+            import backend.pipelines.voice_dispatch as _vd  # noqa: PLC0415
+
+            async def _persist_np_wrapper(
+                run_awaitable: Any, *, ts: float, client_id: str | None, raw_text_override: str | None
+            ) -> None:
+                await orch._finalize_np(
+                    run_awaitable, ts=ts, client_id=client_id, raw_text_override=raw_text_override
+                )
+
+            async def _broadcast_wrapper(
+                answer: str,
+                conn_id: str,
+                *,
+                client_id: str | None = None,
+                dal: Any,
+                service: Any,
+                cm: Any,
+            ) -> None:
+                # client_id 进 payload：前端据此精确撤那条语音 pending（不盲清所有语音 pending）。
+                broadcast_qp_answer(cm, conn_id, answer, client_id=client_id)
+
+            _vd._persist_np_output_callable = _persist_np_wrapper  # type: ignore[assignment]
+            _vd._schedule_qp_broadcast = _broadcast_wrapper  # type: ignore[assignment]
+
         yield
         # shutdown：清 loop 引用。loop 停后若仍有同步 handler 触发 broadcast
         # （后台线程尚未收束），_loop is None 守卫使其安全 no-op，防 coroutine 泄漏。
@@ -116,6 +144,8 @@ def create_app(orchestrator: Orchestrator, llm_service: Any = None) -> FastAPI:
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+        # 前端跨域读取 CSV 导出的文件名需暴露 Content-Disposition（非 CORS-safelisted 响应头）。
+        expose_headers=["Content-Disposition"],
     )
 
     app.state.orchestrator = orchestrator

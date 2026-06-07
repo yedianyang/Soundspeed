@@ -1,13 +1,22 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import {
+  CalendarDays,
   Eye,
+  Layers,
   Settings,
   Upload,
   X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import BottomControlBar from "@/components/admin/BottomControlBar"
 import InlineFeedbackQueue from "@/components/admin/InlineFeedbackQueue"
@@ -20,12 +29,13 @@ import { useFileNameFormat } from "@/store/filename"
 import type { Status } from "@/types/take"
 import type { LlmState, TakeStatus, TakeDTO } from "@/types/api"
 import {
+  exportTakesCsv,
+  todayRange,
   pickActiveScene,
   takesQueryKey,
   useActivateScene,
   useCreateScene,
   useDeleteTake,
-  useDevices,
   useEndTake,
   usePatchTake,
   useRestoreTake,
@@ -36,7 +46,8 @@ import {
 import { ApiError } from "@/lib/api"
 import { useLiveConnection } from "@/hooks/useLiveConnection"
 import { useSessionStore } from "@/store/session"
-import { StatusChip, LiveLevelMeter } from "./components/StatusChip"
+import { StatusChip } from "./components/StatusChip"
+import { InputLevelChip } from "./components/InputLevelChip"
 import { LiveTranscript } from "./components/LiveTranscript"
 import { ScriptPanel } from "./components/ScriptPanel"
 import { HistoryTakes } from "./components/HistoryTakes"
@@ -128,48 +139,33 @@ export default function AdminHome() {
   const { data: scenes } = useScenes()
   const activeScene = pickActiveScene(scenes)
 
-  // 头部 Input 芯片显示真实会采集的设备名：selected 是后端权威 index（持久化设备不在场时已是
-  // fallback 设备的 index），直接按它查名，无需前端再算默认/首个 fallback。
-  const { data: devicesData } = useDevices()
-  const deviceName = (() => {
-    const ds = devicesData?.devices ?? []
-    const selected = devicesData?.selected
-    return ds.find((d) => d.index === selected)?.name ?? "—"
-  })()
-
-  // 后端实际采集那路的真实 RMS（仅录制时 ~5Hz 推），用于电平条显示（见下）。
-  const backendLevel = useSessionStore((s) => s.backendLevel)
-  const backendLevelTs = useSessionStore((s) => s.backendLevelTs)
+  // header Input 电平芯片（设备名 + ch1 实时电平）已下沉到 InputLevelChip 叶子组件：
+  // 把高频更新的麦克风电平状态关在那里，避免它每帧拖着整棵 AdminHome 重渲。
 
   // P5：LLM 反馈档案未读数 + 标记已读（打开 Sheet 时清）。
   const archiveUnread = useSessionStore((s) => s.archiveUnread)
   const markArchiveRead = useSessionStore((s) => s.markArchiveRead)
   const fileFormat = useFileNameFormat((s) => s.format)
 
-  // 判新鲜度需要「现在」，但 Date.now() 是非纯函数不能在 render 调（react-hooks/purity）。
-  // 故用 nowTick 状态：收到后端帧后起一个 100ms 轮询 effect 在回调里推进 nowTick（setState 不能在
-  // effect body 同步调，故只在 interval 回调里调），确认陈旧（超阈值）即自停。render 只读纯值比较。
-  // 停录后后端不再推，轮询把 nowTick 推过阈值后电平条自动归零。
-  const [nowTick, setNowTick] = useState(0)
-  useEffect(() => {
-    if (!backendLevelTs) return
-    const id = setInterval(() => {
-      const t = Date.now()
-      setNowTick(t)
-      if (t - backendLevelTs >= 600) clearInterval(id) // 已陈旧，停轮询
-    }, 100)
-    return () => clearInterval(id)
-  }, [backendLevelTs])
-
-  // 电平条固定显示后端实际采集设备（Capture 设备）的真实 RMS，不再混合/回落浏览器麦。
-  // 后端仅录制时 ~5Hz（约 200ms/帧）推 audio.level，故非录制或数据陈旧时电平条归零静止。
-  // 阈值 600ms：留 ~3 帧容差，丢一两帧不闪断；停录后后端不再推，nowTick 过 600ms 即判陈旧归零。
-  // 用 max(nowTick, backendLevelTs) 当「现在」：刚到的新帧 ts 可能 > 上一次轮询的 nowTick，取大者
-  // 保证新帧立刻判新鲜，避免首帧到轮询首次 tick（≤100ms）之间的盲区误归零。
-  // 后端 rms 是裸 [0,1]，乘 3 取 min(1, …) 作视觉增益，便于观察小信号。
-  const backendFresh =
-    backendLevelTs > 0 && Math.max(nowTick, backendLevelTs) - backendLevelTs < 600
-  const displayLevel = backendFresh ? Math.min(1, backendLevel * 3) : 0
+  // 顶栏导出 Sound Report：下拉两项——今天 / 全部（不弹 modal）。
+  // FileName 列按当前命名格式渲染，与 UI 一致；"今天" 按 take 开录时间落在本地今天过滤。
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const handleExport = async (scope: "today" | "all") => {
+    if (exporting) return
+    setExporting(true)
+    setExportError(null)
+    try {
+      const range = scope === "today" ? todayRange() : undefined
+      await exportTakesCsv(fileFormat, scope, range)
+    } catch (err) {
+      // 不能只 console：顶栏图标下拉无内联错误位，失败会完全不可见（401/CORS 是已知坑）。
+      console.error("导出 CSV 失败", err)
+      setExportError(`导出失败：${err instanceof Error ? err.message : "未知错误"}`)
+    } finally {
+      setExporting(false)
+    }
+  }
 
   // takes 列表 + seedTakes 桥接挂在 AdminHome（始终挂载），不在 HistoryTakes（桌面端条件挂载）。
   // 否则未打开 History 时 LLMFeedback 读空 Map，且重连时无活跃 observer → invalidate 不 refetch，
@@ -552,10 +548,7 @@ export default function AdminHome() {
       <header className="flex-shrink-0 bg-background">
         <div className="px-4 h-11 flex items-center justify-between gap-2 border-b">
           <div className="flex items-center gap-2 min-w-0">
-            <StatusChip label="Input" tone="ok" detail={deviceName} className="min-w-0">
-              {/* ch1 实时电平：固定显示后端真实采集 RMS，非录制时归零静止（见 displayLevel） */}
-              <LiveLevelMeter level={displayLevel} count={7} color="bg-green-500" className="ml-0.5" />
-            </StatusChip>
+            <InputLevelChip />
             <StatusChip
               label="Gemma 4"
               icon={<GemmaIcon className="size-5 text-[#4285F4]" />}
@@ -590,9 +583,29 @@ export default function AdminHome() {
               <Eye />
               <span className="font-mono text-xs">{viewerCount}</span>
             </Button>
-            <Button variant="ghost" size="icon-sm" className="rounded-full text-muted-foreground" title="导出">
-              <Upload className="size-4" />
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild disabled={exporting}>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="rounded-full text-muted-foreground"
+                  title="导出 Sound Report"
+                >
+                  <Upload className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuLabel>导出 Sound Report</DropdownMenuLabel>
+                <DropdownMenuItem onClick={() => void handleExport("today")}>
+                  <CalendarDays className="size-3.5" />
+                  导出今天的内容
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => void handleExport("all")}>
+                  <Layers className="size-3.5" />
+                  导出全部内容
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <Button
               variant="ghost"
               size="icon-sm"
@@ -614,6 +627,20 @@ export default function AdminHome() {
               className="ml-auto flex-shrink-0 text-amber-600/70 hover:text-amber-600"
               title="忽略提示"
               onClick={() => setDeviceWarning(null)}
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+        )}
+        {/* 导出失败可见反馈：顶栏图标下拉本身无内联错误位，否则失败完全静默。可手动 dismiss。 */}
+        {exportError && (
+          <div className="px-4 py-1 flex items-center gap-1.5 border-b bg-destructive/10">
+            <span className="text-xs text-destructive min-w-0 truncate">{exportError}</span>
+            <button
+              type="button"
+              className="ml-auto flex-shrink-0 text-destructive/70 hover:text-destructive"
+              title="忽略提示"
+              onClick={() => setExportError(null)}
             >
               <X className="size-3.5" />
             </button>

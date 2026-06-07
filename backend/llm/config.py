@@ -25,7 +25,12 @@ tools / tool_choice 字段（Tier 1 function calling）：
   tool-calling/grammar 留给只调一两次的路由 / 场记分析，不进逐场热循环。
 """
 
-from backend.llm.tools.script import build_l2_no_script_tool, build_l2_tool
+from backend.llm.tools.route import ROUTE_TOOL_NAME, build_route_memo_tool
+from backend.llm.tools.script import (
+    build_l2_no_script_tool,
+    build_l2_tool,
+    build_parse_lines_tool,
+)
 from backend.llm.tools.transcript import build_qp_tools
 
 
@@ -79,13 +84,20 @@ TASK_CONFIG: dict[str, dict] = {
             "职责：\n"
             "1. 剧本偏差检测：对比剧本台词与转录记录，识别漏词/改词/加词。\n"
             "2. 错别字修正：检查转录文本中的明显错别字（同音字、形近字误识别），输出修正结果到 corrected_segments 字段。\n\n"
+            "判定优先（匹配台词时最重要）：\n"
+            "- 若某段实录在语义/剧情位置上对应某剧本行（即使措辞差异很大、被大幅改写），判 substitution，"
+            "seg_idx 指向该剧本行、detail 写实际说法；只有当实录完全无法对应任何剧本行时，才用 insertion（line_no=-1）。"
+            "不要因为用词不同，就把同一句话拆成 insertion + missing。\n"
+            "- 例：剧本「[行5] 顾朗：你必须留下来，不然一切都完了。」 实录「[3][顾朗] 哎你别走啊，走了就全完蛋了。」"
+            "→ 判 {\"line_no\":5,\"diff_type\":\"substitution\",\"detail\":\"哎你别走啊，走了就全完蛋了\",\"seg_idx\":[3]}，"
+            "而不是把 行5 标 missing + 再加一条 insertion。\n\n"
             "输出格式要求（严格遵守）：\n"
             "- 只输出合法 JSON，不要 markdown 代码块，不要注释，不要额外解释。\n"
             "- JSON schema：\n"
             "  {\n"
             '    "script_diff_summary": "<str 或 null>",\n'
             '    "line_matches": [\n'
-            '      {"line_no": <int>, "diff_type": "<match|missing|substitution|insertion>", "detail": "<str 或 null>"}\n'
+            '      {"line_no": <int>, "diff_type": "<match|missing|substitution|insertion>", "detail": "<str 或 null>", "seg_idx": [<int>...]}\n'
             "    ],\n"
             '    "corrected_segments": [\n'
             '      {"idx": <int>, "original": "<str>", "corrected": "<str>"}\n'
@@ -95,6 +107,9 @@ TASK_CONFIG: dict[str, dict] = {
             "- insertion 类型（演员台词剧本无对应行）line_no 必须填 -1，禁止填剧本行号。\n"
             "- missing 类型 detail 必须为 null，禁止填任何字符串。\n"
             "- match 类型 detail 必须为 null。\n"
+            "- seg_idx 是本行实际对应的转录记录下标数组（0-indexed，见转录记录每段前的序号）："
+            "match/substitution 填实际说出该行的转录段下标（一行被拆成多段就填多个）；"
+            "missing（漏说）填 []；insertion 填演员多说内容所在的转录段下标。\n"
             "- corrected_segments 每条的 corrected 必须是修正后的字符串，禁止为 null；无法确认修正时直接不输出该条。\n"
             "- corrected_segments 只列出真正有修改的 segment，未改动的不出现；无需修正时输出空列表 []。\n"
             "- idx 是转录记录列表的下标（从 0 开始），对应 user message 中转录记录前的序号。"
@@ -147,9 +162,44 @@ TASK_CONFIG: dict[str, dict] = {
             '[["罗湘", "我们先聊聊。"], ["", "罗湘走到窗边。"]]'
         ),
     },
+    "script_parse_fc": {
+        # 单场原生 function calling（黑客松展示 + 照片增补/更新对话框的单场基础）：
+        # 强制调 report_parsed_lines 工具，输出结构由 forced tool_choice 的 JSON grammar 保证。
+        # 只用于单场（一次一调，grammar 成本可忍）；整本逐场热循环仍走 script_parse 快路径
+        # （无 grammar），避免每场都付 grammar 开销叠加。
+        "max_tokens": 4096,
+        "temperature": 0.1,
+        "priority": 3,
+        "system": (
+            "你是剧本解析器。把给定剧本逐行解析，调用 report_parsed_lines 工具报告结果。\n"
+            "- 对白行 → speaker 填角色名，text 填台词\n"
+            "- 非对白行（动作、场景描述、舞台指示，即使句子里出现人名）→ speaker 填空字符串，text 填原文\n"
+            "判断依据：有「角色：台词」形式、或明显是某人说出口的话，才算对白；"
+            "叙述某人动作/神态/场景的是描述。\n"
+            "逐行输出，顺序与原文一致。"
+        ),
+        "tools": [build_parse_lines_tool()],
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": "report_parsed_lines"},
+        },
+    },
     # note_struct：带 tools + 强制 tool_choice，文本（run_np_note/infer_tool）与语音
     # （run_np_voice/infer_voice_tool）NP 共用——两者都走 forced tool-call，无 content-mode 调用。
     "note_struct": _build_note_task_config(),
+    # 入口调度器：forced 二分类 route_memo(kind: note|query)。route.py import-neutral，
+    # eager 挂 build_route_memo_tool() 安全（无 np_note 依赖，无须 lazy）。
+    "memo_route": {
+        "max_tokens": 16,
+        "temperature": 0.1,
+        "priority": 1,
+        "system": "判断这条 memo 是记录备注还是查询信息。",
+        "tools": [build_route_memo_tool()],
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": ROUTE_TOOL_NAME},
+        },
+    },
     "agent_init": {
         "_reserved": True,
         "max_tokens": 1024,
@@ -158,5 +208,15 @@ TASK_CONFIG: dict[str, dict] = {
         # TODO(agent_init 落地时): 补充 5 轮循环 Agent 的 system prompt
         # TASK_CONFIG system 模板需 agent_init 落地时补，当前为占位符
         "system": "You are a helpful assistant.",
+    },
+    # hop A 纯生成：无 tools / tool_choice / grammar，让模型自发吐 function-call 文本。
+    # 工具声明通过 system content 以原生 <|tool>...<tool|> 格式注入（corrected-C3 实证）。
+    # max_tokens=256 对齐计划（function-call 输出 50-100 token，256 足够；对齐 Task A2 Step 3）。
+    "voice_dispatch_free": {
+        "max_tokens": 256,
+        "temperature": 0.1,
+        "priority": 1,
+        "system": "",
+        # 无 tools / tool_choice / grammar：纯生成，让模型自发吐 function-call 文本
     },
 }

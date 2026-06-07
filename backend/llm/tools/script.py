@@ -78,6 +78,56 @@ def build_l2_no_script_tool() -> dict:
     }
 
 
+PARSE_LINES_TOOL_NAME = "report_parsed_lines"
+
+
+def build_parse_lines_tool() -> dict:
+    """构造 report_parsed_lines OpenAI 风格 tool dict（3.x 单场剧本解析，原生 FC）。
+
+    模型逐行报告 [说话人, 内容]：对白填角色名，动作/描述/场景/舞台指示填空说话人。
+    结构由 forced tool_choice 的 JSON grammar 保证（speaker/text 必有），
+    pipeline 侧（sp_script._parse_fc_lines）把空 speaker 归一成 None=描述行。
+
+    Returns:
+        符合 OpenAI function calling spec 的 tool 字典，name="report_parsed_lines"。
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": PARSE_LINES_TOOL_NAME,
+            "description": (
+                "逐行报告剧本解析结果。每行给出说话人与内容："
+                "对白行 speaker 填角色名；非对白行（动作、场景描述、舞台指示，即使含人名）"
+                "speaker 填空字符串。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "lines": {
+                        "type": "array",
+                        "description": "逐行解析结果，顺序与原文一致",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "speaker": {
+                                    "type": "string",
+                                    "description": "对白角色名；非对白（动作/描述/场景）填空字符串",
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": "该行内容（对白台词或叙述原文）",
+                                },
+                            },
+                            "required": ["speaker", "text"],
+                        },
+                    },
+                },
+                "required": ["lines"],
+            },
+        },
+    }
+
+
 def build_l2_tool() -> dict:
     """构造 report_script_analysis OpenAI 风格 tool dict。
 
@@ -120,10 +170,18 @@ def build_l2_tool() -> dict:
                                     "type": "string",
                                     "description": "具体差异描述，substitution 时写出实际说的内容",
                                 },
+                                "seg_idx": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                    "description": (
+                                        "本行对应的转录记录下标（0-indexed，见转录记录前的序号），"
+                                        "可多段；演员漏说该行填 []；insertion 填实际多说内容的下标。"
+                                    ),
+                                },
                             },
-                            # detail 不入 required：match 行无差异可省略，避免 grammar
-                            # 逼模型给每行都生成填充文本。validator 用 .get("detail")
-                            # 容忍缺失（None）。
+                            # detail / seg_idx 不入 required：match 行无差异可省略 detail，
+                            # missing 行 seg_idx 为 []；不入 required 避免 grammar 逼模型给每行
+                            # 都填充。validator 用 .get(...) 容忍缺失（detail→None / seg_idx→[]）。
                             "required": ["line_no", "diff_type"],
                         },
                     },

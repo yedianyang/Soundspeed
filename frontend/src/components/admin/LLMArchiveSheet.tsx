@@ -58,6 +58,10 @@ export function LLMArchiveSheet({
     return () => window.removeEventListener("keydown", onKey)
   }, [open, onOpenChange])
 
+  // 关闭态（其常态）渲染恒为 null：提前 return，省掉下方纯派生计算在每次 store 更新时白跑。
+  // 必须落在最后一个 hook（上面的 useEffect）之后，确保不违反 rules-of-hooks。
+  if (!open) return null
+
   // L2：带 script_diff 的 take（按开拍时序）。start_ts/created_at 为 0 = 实时 L2 刚到、getTakes
   // 尚未回填真实时间 → 视为最新（排最底），refetch 后落到真实位置。
   const l2 = Array.from(takesMap.values())
@@ -68,8 +72,6 @@ export function LLMArchiveSheet({
     .filter((q) => q.status === "done")
     .map((q) => ({ kind: "QP" as const, sortTs: q.ts, q }))
   const items = [...l2, ...qa].sort((a, b) => a.sortTs - b.sortTs)
-
-  if (!open) return null
 
   return (
     <>

@@ -23,14 +23,24 @@ TakeDTO 有意省略 performer_issues / audio_quality（codex P2）：
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.api.auth import require_admin
+from backend.api.routes.query import schedule_qp_broadcast
+from backend.core.export import (
+    FileNameFormat,
+    SegFormat,
+    build_export_rows,
+    rows_to_csv,
+)
 from backend.core.events import (
     SCENE_CHANGED,
     TAKE_CHANGED,
@@ -43,9 +53,15 @@ from backend.core.events import (
     TakeEndPayload,
     TakeStartPayload,
 )
+from backend.pipelines.memo_route import classify_memo
 from backend.pipelines.note_parse import NoteParseError, parse_note
+from backend.pipelines.voice_dispatch import run_voice_dispatch
 
 logger = logging.getLogger(__name__)
+
+# voice dispatch fire-and-forget task 持有集：防 asyncio.create_task 结果被 GC（Python 文档建议）。
+# 对齐 query.py 的 _qp_tasks 模式。
+_voice_dispatch_tasks: set[asyncio.Task] = set()
 
 router = APIRouter(prefix="/api/v1", tags=["takes"])
 
@@ -181,6 +197,50 @@ async def list_takes(
     return {"takes": [TakeDTO.model_validate(t, from_attributes=True) for t in takes]}
 
 
+@router.get("/takes/export")
+async def export_takes_csv(
+    request: Request,
+    scene_prefix: str = "",
+    scene_pad: int = Query(2, ge=0, le=6),
+    shot_prefix: str = "S",
+    shot_pad: int = Query(0, ge=0, le=6),
+    take_prefix: str = "T",
+    take_pad: int = Query(3, ge=0, le=6),
+    sep: str = "_",
+    ts_from: float | None = None,
+    ts_to: float | None = None,
+    _: None = Depends(require_admin),
+) -> Response:
+    """导出 take 为 CSV（Sound Report）：text/csv + attachment 下载。
+
+    必须注册在 GET /takes/{take_id} 之前——否则 FastAPI 会把 "export" 当 take_id 解析（422）。
+    导出日期服务端生成（本地日期），首行写「导出日期：YYYY-MM-DD」，第二行表头。
+
+    FileName 列板式由 7 个 query 参数控制（前端从用户配置的命名格式传入，对齐 UI 显示）；
+    全缺省即 DEFAULT_FILENAME_FORMAT（01_S1_T001）。Content-Disposition 经 CORS expose 暴露，
+    供前端跨域读取文件名。
+
+    ts_from/ts_to（Unix 秒，半开区间）：导出范围。前端「导出今天」传本地零点起 24h；
+    「导出全部」不传，导全部 take。
+    """
+    dal = request.app.state.orchestrator.dal
+    fmt = FileNameFormat(
+        scene=SegFormat(scene_prefix, scene_pad),
+        shot=SegFormat(shot_prefix, shot_pad),
+        take=SegFormat(take_prefix, take_pad),
+        sep=sep,
+    )
+    rows = build_export_rows(dal, fmt, ts_from=ts_from, ts_to=ts_to)
+    export_date = datetime.now().strftime("%Y-%m-%d")
+    body = rows_to_csv(rows, export_date)
+    filename = f"soundspeed_takes_{export_date}.csv"
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/takes/{take_id}")
 async def get_take(
     take_id: int,
@@ -248,6 +308,24 @@ async def list_scenes(
     return {"scenes": dal.list_scenes()}
 
 
+@router.get("/scenes/characters")
+async def list_all_characters(
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict[str, list[str]]:
+    """整部戏（全场次最新剧本）去重角色清单，供声纹注册"选角色"下拉用。
+
+    一个演员的角色横跨多场，故取全场次并集而非单场。无剧本时返回空列表。
+    路径放在 /scenes/{scene_id}/script 之前不冲突（characters 非数字段）。
+    归一角色名（剥（V.O.）等尾部注记）后再去重，覆盖解析归一上线前的历史数据。
+    """
+    from backend.pipelines.sp_script import normalize_character
+
+    dal = request.app.state.orchestrator.dal
+    norms = {normalize_character(raw) for raw in dal.list_all_characters()}
+    return {"characters": sorted(n for n in norms if n)}
+
+
 # ── 读剧本端点（scene heading 票加，2026-06-01）────────────────────────────────
 
 
@@ -265,6 +343,30 @@ class ScriptOut(BaseModel):
     script_id: int
     version: int
     lines: list[ScriptLineOut]
+
+
+class ScriptLineIn(BaseModel):
+    """提交单场剧本的单行（来自 parse-single 预览结果，character 可空=舞台指示）。"""
+
+    character: str | None = None
+    text: str
+
+
+class UpdateSceneScriptBody(BaseModel):
+    """POST /scenes/{scene_id}/script 请求体：把选中场更新成一个新版本。"""
+
+    raw_text: str  # 本次来源原文（OCR/粘贴），存版本 + 幂等比对用
+    lines: list[ScriptLineIn]  # parse-single 预览确认后的逐行结果
+
+
+class ScriptCommitOut(BaseModel):
+    """选中场更新结果。skipped=True 表示内容与最新版相同、未新建版本。"""
+
+    scene_id: int
+    script_id: int
+    version: int
+    line_count: int
+    skipped: bool
 
 
 @router.get("/scenes/{scene_id}/script")
@@ -289,6 +391,53 @@ async def get_scene_script(
     return {"script": ScriptOut(script_id=script_id, version=version, lines=lines)}
 
 
+@router.post("/scenes/{scene_id}/script")
+async def update_scene_script(
+    scene_id: int,
+    body: UpdateSceneScriptBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> ScriptCommitOut:
+    """把【选中场】的剧本更新成一个新版本（照片/文本增补的落库口）。
+
+    版本追加语义（见 soundspeed_script_reupload_design）：永不删旧版/旧行，只 insert
+    新版本（version 自增），读侧自动切到新版。幂等：raw_text 与该场最新版相同 →
+    skipped=True、不新建版本（防重复点击刷版本）。scene 不存在 → 404；lines 空 → 422。
+    """
+    dal = request.app.state.orchestrator.dal
+    if dal.get_scene_info(scene_id) is None:
+        raise HTTPException(status_code=404, detail="场次不存在")
+    if not body.lines:
+        raise HTTPException(status_code=422, detail="lines 为空，无可更新内容")
+
+    latest = dal.get_latest_script(scene_id)
+    if latest is not None and latest.get("raw_text") == body.raw_text:
+        # 内容无变化：不刷版本，回报最新版现状
+        existing = dal.list_script_lines(latest["script_id"])
+        return ScriptCommitOut(
+            scene_id=scene_id,
+            script_id=latest["script_id"],
+            version=latest["version"],
+            line_count=len(existing),
+            skipped=True,
+        )
+
+    from backend.pipelines.sp_script import normalize_character
+
+    # insert_script 取 MAX(version)+1，故新版本即 latest.version+1（无旧版则首版=1）。
+    new_version = latest["version"] + 1 if latest is not None else 1
+    script_id = dal.insert_script(scene_id, body.raw_text)
+    for line_no, ln in enumerate(body.lines, start=1):
+        dal.insert_script_line(script_id, line_no, normalize_character(ln.character), ln.text)
+    return ScriptCommitOut(
+        scene_id=scene_id,
+        script_id=script_id,
+        version=new_version,
+        line_count=len(body.lines),
+        skipped=False,
+    )
+
+
 # ── Note 端点（4.C）────────────────────────────────────────────────────────────
 
 
@@ -299,6 +448,8 @@ class NoteCreateBody(BaseModel):
     ts: float | None = None
     # 前端生成的乐观 pending 去重键（crypto.randomUUID），原样回传到 note.processed。
     client_id: str | None = None
+    # WS 连接标识：query 分支据此把答案广播到 qp.answer.{conn_id}（前端按前缀认领）。
+    conn_id: str | None = None
 
 
 class NoteOut(BaseModel):
@@ -340,6 +491,26 @@ async def create_note(
         note = parse_note(body.text, ts)
     except NoteParseError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # 入口调度器（块③）：query → QP fire-and-forget 广播；note/任何失败 → 现有 NP。
+    # 仅当有 conn_id（query 答案要广播到 qp.answer.{conn_id}）且 LLM 就绪、且非 @显式类别时分类。
+    # classify 有意留在 202 关键路径（route 须在 202 时知道 kind 才能告诉前端 query/note，
+    # 决定要不要撤掉乐观 pending）；其延迟由前端乐观 pending 提前到 await 前藏掉，故后端保持简单。
+    service = getattr(request.app.state, "llm_service", None)
+    if service is not None and body.conn_id and not body.text.lstrip().startswith("@"):
+        kind = await classify_memo(note.raw_text, service)
+        if kind == "query":
+            # client_id 透传进 qp.answer payload：前端队列据此把答案落到对应那条 qaItem
+            #（乐观插的 note pending 同样按 client_id 在 postNote.then(kind==="query") 撤掉）。
+            schedule_qp_broadcast(
+                note.raw_text,
+                body.conn_id,
+                dal=orchestrator.dal,
+                service=service,
+                cm=request.app.state.connection_manager,
+                client_id=body.client_id,
+            )
+            return {"status": "processing", "kind": "query"}
 
     # 2. fire-and-forget NP Pipeline
     try:
@@ -392,12 +563,15 @@ async def create_voice_note(
     file: UploadFile = File(...),
     client_id: str = Form(...),
     ts: float | None = Form(None),
+    conn_id: str | None = Form(None),
     _: None = Depends(require_admin),
 ) -> dict:
-    """提交语音 note（4.K）：浏览器麦 WAV 直传 → fire-and-forget 语音 NP → 返回 202。
+    """提交语音 note（4.K / C1）：浏览器麦 WAV 直传 → fire-and-forget → 返回 202。
 
-    与 POST /notes（文本）对称：均 202，归置走后台异步 NP，结果经 WS（note.processed /
-    note.failed）回灌。差异：multipart + 音频字节；类别/编号由 Gemma 从语音里听+判（无 parse_note）。
+    有 conn_id → 走 voice dispatch（hop A/B 两步走判 note/query，query 广播 qp.answer.{conn_id}）。
+    无 conn_id → 原有 run_np_voice_async 路径（只归置 NP，不判 query）。
+
+    与 POST /notes（文本）对称：均 202，结果经 WS（note.processed / note.failed）回灌。
     音频来源是前端浏览器麦（getUserMedia，#19），非后端现场录音。
     """
     audio = await file.read()
@@ -408,6 +582,47 @@ async def create_voice_note(
 
     orchestrator = request.app.state.orchestrator
     resolved_ts = ts if ts is not None else time.time()
+    service = getattr(request.app.state, "llm_service", None)
+
+    # 有 conn_id → 走 voice dispatch（判 note/query）
+    if conn_id is not None and service is not None:
+        # 构建 NPInput（含 current_take_id/take_context）供 note 分支委托 run_np_voice
+        np_input = orchestrator._build_np_input("", "note", resolved_ts)
+        # voice_runner 来自 orchestrator._deps（须有 llm_service 才绑定）
+        voice_runner = getattr(orchestrator._deps, "voice_runner", None)
+        cm = request.app.state.connection_manager
+
+        # 问题 1：wrapper 协程先发 LLM_STATUS busy，再跑 dispatch
+        # preamble 在协程内部执行（可能 await ensure_model_ready），不阻塞 202
+        # done callback 统一发 idle（成功/失败/取消三条路径）
+        async def _dispatch_with_status() -> dict:
+            await orchestrator._emit_np_status_preamble(service)
+            return await run_voice_dispatch(
+                audio,
+                conn_id=conn_id,
+                ts=resolved_ts,
+                client_id=client_id,
+                dal=orchestrator.dal,
+                service=service,
+                cm=cm,
+                scene_context="",  # 简化：不预取场次文本，hop A 系统内联说明已足
+                np_input=np_input,
+                voice_runner=voice_runner,
+            )
+
+        # fire-and-forget：不 await，不阻塞 202，对齐块③ schedule_qp_broadcast 模式。
+        task = asyncio.create_task(_dispatch_with_status())
+        _voice_dispatch_tasks.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            _voice_dispatch_tasks.discard(t)
+            # 问题 1：无论成功/失败/取消，发 idle（对齐 _np_done_callback 形态）
+            orchestrator._np_done_callback(t, label="voice_dispatch")
+
+        task.add_done_callback(_done)
+        return {"status": "processing", "client_id": client_id, "kind": "dispatching"}
+
+    # 无 conn_id → 原有 run_np_voice_async 路径
     try:
         orchestrator.run_np_voice_async(
             audio=audio,

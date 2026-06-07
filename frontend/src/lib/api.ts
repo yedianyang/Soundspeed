@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { API_BASE } from "@/lib/config"
+import type { FileNameFormat } from "@/lib/filename-format"
+import { randomId } from "@/lib/uuid"
 import { useSessionStore } from "@/store/session"
 import type {
   ActivateSceneResult,
@@ -7,9 +9,11 @@ import type {
   CreateSceneResult,
   NoteCreateResponse,
   NoteListResponse,
+  ParseSingleResult,
   PatchTakeBody,
   QueryResponse,
   SceneDTO,
+  ScriptCommitResult,
   ScriptDTO,
   SpeakerDTO,
   TakeDTO,
@@ -86,6 +90,32 @@ export async function getSceneScript(sceneId: number): Promise<ScriptDTO | null>
     `/api/v1/scenes/${sceneId}/script`,
   )
   return data.script
+}
+
+// 整部戏跨场去重角色清单（GET /scenes/characters）。供声纹注册"选角色"下拉用。
+export async function listCharacters(): Promise<string[]> {
+  const data = await request<{ characters: string[] }>(`/api/v1/scenes/characters`)
+  return data.characters
+}
+
+// 单场解析预览（原生 FC，不入库）：一段剧本文本 → 结构化一场，供"选中场更新"对话框预览。
+export async function parseSingleScene(text: string): Promise<ParseSingleResult> {
+  return request<ParseSingleResult>(`/api/v1/scripts/parse-single`, {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  })
+}
+
+// 把选中场更新成新版本（版本追加；raw_text 与最新版相同 → skipped=true 不刷版本）。
+export async function updateSceneScript(
+  sceneId: number,
+  rawText: string,
+  lines: { character: string | null; text: string }[],
+): Promise<ScriptCommitResult> {
+  return request<ScriptCommitResult>(`/api/v1/scenes/${sceneId}/script`, {
+    method: "POST",
+    body: JSON.stringify({ raw_text: rawText, lines }),
+  })
 }
 
 export async function getTakes(sceneId?: number): Promise<TakeDTO[]> {
@@ -316,12 +346,15 @@ export async function uploadScript(file: File): Promise<UploadSavedResult> {
 
 // 阶段 2：启动后台解析（瞬时切场 → 后台逐场结构化）。立即返回 status=parsing。
 // 进度/结果通过轮询 listScriptUploads 的 status/detail 获取。
+// onConflict=version（multi_scene 更新全本）：命中已有场追加新版本（内容无变化则幂等跳过）。
+// 默认 skip：首次导入语义（命中已有场跳过不替换）。
 export function parseUpload(
   uploadId: number,
   target: "multi_scene" | "current_scene" = "multi_scene",
+  onConflict: "skip" | "version" = "skip",
 ): Promise<ScriptUploadInfo> {
   return request<ScriptUploadInfo>(
-    `/api/v1/scripts/uploads/${uploadId}/parse?target=${target}`,
+    `/api/v1/scripts/uploads/${uploadId}/parse?target=${target}&on_conflict=${onConflict}`,
     { method: "POST" },
   )
 }
@@ -463,10 +496,11 @@ export function postNote(
   text: string,
   ts?: number,
   clientId?: string,
+  connId?: string,
 ): Promise<NoteCreateResponse> {
   return request<NoteCreateResponse>(`/api/v1/notes`, {
     method: "POST",
-    body: JSON.stringify({ text, ts: ts ?? undefined, client_id: clientId }),
+    body: JSON.stringify({ text, ts: ts ?? undefined, client_id: clientId, conn_id: connId }),
   })
 }
 
@@ -474,13 +508,12 @@ export function getTakeNotes(takeId: number): Promise<NoteListResponse> {
   return request<NoteListResponse>(`/api/v1/takes/${takeId}/notes`)
 }
 
-// QP：自然语言查询（tool-loop 同步返回答案）。后端契约 {text, conn_id} → {status, answer}。
-// conn_id 后端用于把答案广播到 qp.answer.{conn_id}（spec §9 WS 认领），前端 v1 直接用同步返回的
-// answer 就地渲染，不订阅该 topic——故这里生成一个一次性占位 conn_id（广播到无人订阅的 topic 无害）。
-// dev 期由前端显式触发（route_memo 单入口落地后改由后端按 kind 分流）。
+// QP 同步直连：跑 tool-loop 并在 HTTP body 返回答案。仅用于「↩ 其实是提问」显式强制查询
+//（绕过 /notes 自动分类器）。一次性 conn_id：/api/v1/query 也广播到 qp.answer.{conn_id}，但前端
+// 只认领 qp.answer.{CONN_ID}，这条广播到无人订阅的 topic 故无害；答案靠同步返回就地 resolveQa。
+// 正常打字 memo 走 postNote(…,CONN_ID) 由后端自动判 note/query，不经此路。
 export function postQuery(text: string): Promise<QueryResponse> {
-  const connId =
-    crypto?.randomUUID?.() ?? `qp-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const connId = randomId("qp")
   return request<QueryResponse>(`/api/v1/query`, {
     method: "POST",
     body: JSON.stringify({ text, conn_id: connId }),
@@ -489,12 +522,22 @@ export function postQuery(text: string): Promise<QueryResponse> {
 
 // 语音 note（4.K/4.L）：浏览器麦 WAV 直传（multipart，POST /notes/voice）。后端 202
 // fire-and-forget，类别/正文由 Gemma 从音频听+判，不在响应里返回——故返回值无用（Promise<void>）：
-// 前端乐观 pending 占位，结果经 WS note.processed / note.failed 回灌。
-export function postVoiceNote(blob: Blob, clientId: string, ts?: number): Promise<void> {
+// 前端乐观 pending 占位，结果经 WS 回灌。
+//
+// connId（与文本 postNote 对称）：带上 → 后端走 voice dispatch 判 note/query；
+// note 分支照旧经 note.processed / note.failed 回灌，query 分支把答案广播到
+// qp.answer.{conn_id}（复用块③气泡），202 时不返回 kind，故 Promise<void> 不变。
+export function postVoiceNote(
+  blob: Blob,
+  clientId: string,
+  ts?: number,
+  connId?: string,
+): Promise<void> {
   const fd = new FormData()
   fd.append("file", blob, "note.wav")
   fd.append("client_id", clientId)
   if (ts !== undefined) fd.append("ts", String(ts))
+  if (connId) fd.append("conn_id", connId)
   return requestMultipart<void>(`/api/v1/notes/voice`, fd)
 }
 
@@ -534,6 +577,15 @@ export function useSpeakers() {
   return useQuery({
     queryKey: speakersQueryKey(),
     queryFn: listSpeakers,
+  })
+}
+
+export const charactersQueryKey = () => ["characters"] as const
+
+export function useCharacters() {
+  return useQuery({
+    queryKey: charactersQueryKey(),
+    queryFn: listCharacters,
   })
 }
 
@@ -673,10 +725,12 @@ export function useParseUpload() {
     mutationFn: ({
       uploadId,
       target,
+      onConflict,
     }: {
       uploadId: number
       target?: "multi_scene" | "current_scene"
-    }) => parseUpload(uploadId, target),
+      onConflict?: "skip" | "version"
+    }) => parseUpload(uploadId, target, onConflict),
   })
 }
 
@@ -694,4 +748,84 @@ export function useScriptUploads() {
       return data?.some((u) => u.status === "parsing") ? 1500 : false
     },
   })
+}
+
+// ── 导出场记单 CSV ──
+
+// 导出文件名由前端权威生成（纯 ASCII，恒带 .csv 后缀）。不依赖响应的 Content-Disposition——
+// 跨域代理可能 strip 或改写该头，浏览器读到的值不可信，曾导致下载名乱码 / 丢后缀。
+// scope 标出范围（today/all），日期用本地日期。
+export function buildExportFilename(scope: "today" | "all", now = new Date()): string {
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, "0")
+  const d = String(now.getDate()).padStart(2, "0")
+  return `soundspeed_takes_${scope}_${y}-${m}-${d}.csv`
+}
+
+// "今天" 的导出区间：本地零点起 24h（[from, to) Unix 秒）。收 now 参数便于测试。
+// 注：固定加 86400，DST 切换当天本地日严格说不是恒定 86400 秒，此处沿用现有行为不做日历修正。
+export function todayRange(now = new Date()): { from: number; to: number } {
+  const from = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000
+  return { from, to: from + 86400 }
+}
+
+// 装配导出请求：把 fmt 摊成 query（后端用同一算法生成 FileName 列），range 给定时附 ts_from/ts_to，
+// token 给定时带 Authorization。纯函数，便于直接测 URL/参数/鉴权头，不碰 fetch/DOM。
+export function buildExportRequest(
+  fmt: FileNameFormat,
+  range: { from: number; to: number } | undefined,
+  token: string | null,
+): { url: string; headers: Record<string, string> } {
+  const params = new URLSearchParams({
+    scene_prefix: fmt.scene.prefix,
+    scene_pad: String(fmt.scene.pad),
+    shot_prefix: fmt.shot.prefix,
+    shot_pad: String(fmt.shot.pad),
+    take_prefix: fmt.take.prefix,
+    take_pad: String(fmt.take.pad),
+    sep: fmt.sep,
+  })
+  if (range) {
+    params.set("ts_from", String(range.from))
+    params.set("ts_to", String(range.to))
+  }
+  return {
+    url: `${API_BASE}/api/v1/takes/export?${params.toString()}`,
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  }
+}
+
+// 导出 take 为 CSV 并触发浏览器下载。FileName 列按用户当前命名格式渲染（与 UI 一致）：
+// 把 fmt 摊成 query 传后端，后端用同一算法生成 FileName，CSV 装配/转义/BOM 全在后端。
+// range 给定时只导该 take 开录时间区间（[from, to) Unix 秒，"今天"=本地零点起 24h）；
+// 省略即导全部。不弹 modal——下拉选完直接下载（blob + 隐藏 a 标签）。
+export async function exportTakesCsv(
+  fmt: FileNameFormat,
+  scope: "today" | "all",
+  range?: { from: number; to: number },
+): Promise<void> {
+  const token = useSessionStore.getState().token
+  const { url, headers } = buildExportRequest(fmt, range, token)
+  const res = await fetch(url, { headers })
+  if (!res.ok) {
+    throw new ApiError(res.status, `GET /api/v1/takes/export → ${res.status}`)
+  }
+
+  const blob = await res.blob()
+  // 强制声明为 CSV 的 blob 类型；文件名前端权威生成，不读 Content-Disposition。
+  const csvBlob = blob.type ? blob : new Blob([blob], { type: "text/csv;charset=utf-8" })
+  const filename = buildExportFilename(scope)
+
+  const objectUrl = URL.createObjectURL(csvBlob)
+  try {
+    const a = document.createElement("a")
+    a.href = objectUrl
+    a.download = filename
+    a.rel = "noopener"
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
 }
