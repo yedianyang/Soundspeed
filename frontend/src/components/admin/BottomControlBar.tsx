@@ -5,6 +5,7 @@ import {
   Trash2,
   Undo2,
   ChevronDown,
+  MessageSquareText,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -332,8 +333,9 @@ export default function BottomControlBar({
             </Button>
           </div>
 
-          {/* Row 2: 本 take 在场演员 + Next take + Delete + Undo。Next Take 不自动开录（建空块）。录制中全禁。 */}
-          <div className="flex items-center gap-3">
+          {/* Row 2: 本 take 在场演员 + Next take + Delete + Undo + LLM 历史。Next Take 不自动开录（建空块）。录制中全禁。
+              窄屏 gap 收紧 + flex-wrap 兜底：放得下时一行，极窄塞不下时 LLM 历史掉到下一行，绝不被右下 REC 盖住。 */}
+          <div className="flex items-center gap-2 lg:gap-3 flex-wrap">
             <TakeSpeakerSelect
               value={speakerIds}
               onChange={onSpeakerIdsChange}
@@ -359,7 +361,7 @@ export default function BottomControlBar({
               onClick={() => setConfirmDelete(true)}
               disabled={deleteDisabled}
               className={cn(
-                "h-10 w-10 text-destructive hover:text-destructive active:scale-95 transition-transform rounded-full",
+                "h-9 w-9 lg:h-10 lg:w-10 text-destructive hover:text-destructive active:scale-95 transition-transform rounded-full",
                 disabledTone(true, deleteDisabled)
               )}
               title={
@@ -379,7 +381,7 @@ export default function BottomControlBar({
               onClick={onUndoDelete}
               disabled={undoDisabled}
               className={cn(
-                "h-10 w-10 text-muted-foreground hover:text-foreground active:scale-95 transition-transform rounded-full",
+                "h-9 w-9 lg:h-10 lg:w-10 text-muted-foreground hover:text-foreground active:scale-95 transition-transform rounded-full",
                 disabledTone(true, undoDisabled)
               )}
               title={
@@ -400,7 +402,7 @@ export default function BottomControlBar({
               variant="ghost"
               size="default"
               onClick={onOpenArchive}
-              className="flex-none gap-1.5 h-9 px-3 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform"
+              className="flex-none gap-1.5 h-9 px-2.5 lg:px-3 rounded-full bg-background border border-border/60 shadow-sm active:scale-95 transition-transform"
               title="LLM 反馈历史：QP 问答 + L2 推送全历史"
             >
               <span
@@ -413,7 +415,9 @@ export default function BottomControlBar({
                       : "bg-green-500",
                 )}
               />
-              <span className="text-sm font-medium text-foreground">LLM 历史</span>
+              {/* 窄屏只留状态点 + 图标省宽；宽屏（横屏 lg）恢复「LLM 历史」全文。 */}
+              <MessageSquareText className="size-4 text-foreground lg:hidden" />
+              <span className="hidden lg:inline text-sm font-medium text-foreground">LLM 历史</span>
             </Button>
           </div>
         </div>
