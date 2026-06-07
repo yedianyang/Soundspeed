@@ -20,6 +20,28 @@ import type {
 
 export type ConnectionState = "connecting" | "open" | "closed" | "no-token"
 
+// tool.call 全局 WS 事件：后端 agent 的工具调用轨迹（开发者 tab 实时日志框消费）。
+// 冻结契约 v2：topic === "tool.call"，payload 即此形状（ts 是 epoch 秒 float，
+// arguments 是原样 JSON 字符串、前端负责美化，nullable 字段后端可能给 null）。
+export interface ToolCallEntry {
+  task_type: string
+  tool_id: string | null
+  tool_type: string | null
+  tool_name: string
+  arguments: string
+  finish_reason: string | null
+  model: string | null
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  total_tokens: number | null
+  available_tools: string[]
+  tool_choice: string | null
+  ts: number
+}
+
+// tool-call 实时日志有界缓冲：只留最近 N 条，超出从头丢（避免长跑 session 无限堆积）。
+const TOOL_CALLS_MAX = 150
+
 // 当前录制 take 的实时转录条目（按声道维护）。
 export interface LiveSeg {
   text: string
@@ -104,6 +126,9 @@ interface SessionState {
   // 连接断开（onClose）归 0，避免显示陈旧值；重连后服务端首帧重填。
   viewerCount: number
 
+  // tool.call：后端 agent 工具调用轨迹（有界缓冲，最近 150 条）。设置页开发者 tab 日志框消费。
+  toolCalls: ToolCallEntry[]
+
   // ── actions ──
   setToken: (t: string | null) => void
   setConnection: (c: ConnectionState) => void
@@ -119,6 +144,8 @@ interface SessionState {
   setDeviceWarning: (message: string | null) => void
   setBackendLevel: (rms: number) => void
   setViewerCount: (count: number) => void
+  appendToolCall: (entry: ToolCallEntry) => void
+  clearToolCalls: () => void
   resetSegments: () => void
   addPendingNote: (n: PendingNote) => void
   removePending: (clientId: string) => void
@@ -154,6 +181,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   backendLevel: 0,
   backendLevelTs: 0,
   viewerCount: 0,
+  toolCalls: [],
 
   setToken: (t) =>
     set(() => ({
@@ -382,6 +410,15 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   // viewer.count：后端广播的在线观看数；onClose 调 setViewerCount(0) 清陈旧值。
   setViewerCount: (count) => set(() => ({ viewerCount: count })),
+
+  // tool.call：追加一条工具调用轨迹，有界保留最近 TOOL_CALLS_MAX 条（超出从头丢）。
+  appendToolCall: (entry) =>
+    set((s) => {
+      const next = [...s.toolCalls, entry]
+      return { toolCalls: next.length > TOOL_CALLS_MAX ? next.slice(-TOOL_CALLS_MAX) : next }
+    }),
+
+  clearToolCalls: () => set(() => ({ toolCalls: [] })),
 
   // 放弃失败 pending：用户主动关掉这条失败行，不再重试，直接移除。
   dismissPending: (clientId) =>

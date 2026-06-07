@@ -4,6 +4,7 @@ import { getTake, takeQueryKey } from "@/lib/api"
 import { CONN_ID } from "@/lib/connId"
 import { LiveSocket } from "@/lib/ws"
 import { useSessionStore } from "@/store/session"
+import type { ToolCallEntry } from "@/store/session"
 import type {
   AsrMsg,
   DeviceWarningMsg,
@@ -138,6 +139,12 @@ export function useLiveConnection(): void {
           // 后端实际采集那路音频的归一化 RMS，仅录制时 ~5Hz 推。存值 + 时间戳，电平条按新鲜度
           // 决定用后端 rms 还是浏览器常驻 micLevel。
           s.setBackendLevel((payload as { rms: number }).rms)
+          return
+        }
+        if (topic === "tool.call") {
+          // 后端 agent 工具调用轨迹（全局事件，不带 conn_id 后缀）。push 进有界缓冲，
+          // 设置页开发者 tab 的实时日志框消费。冻结契约见 ToolCallEntry。
+          s.appendToolCall(payload as ToolCallEntry)
           return
         }
         if (topic === "viewer.count") {
