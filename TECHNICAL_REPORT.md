@@ -158,6 +158,16 @@ QP（场记查询）是"模型自主多跳工具调用"，针对 4B 级小模型
 
 `LLMService` 暴露一个无侵入的 tool-call tap：每次函数调用成功后，把工具名、参数、可用工具、`finish_reason`、token 用量经 WebSocket 实时广播到管理面板的开发者日志。可以**实时看到模型在调哪个工具、用了多少 token**，便于调试与现场演示。
 
+**管理面板运行日志示例：**
+
+下图是 NP（备注结构化）管线中 `structure_note` 工具的 forced 调用——模型将语音备注「可以保」结构化归档到 take 57，category 判定为 `keep`，并显示本次调用的 token 消耗（prompt 954 / completion 22 / total 976）：
+
+![NP structure_note 工具调用日志](docs/images/tool-calling-01.jpg)
+
+下图是 QP（查询）管线中模型自主选择的 `get_scene_info` 工具调用——用户查询「第15场」信息，模型从 5 个可用工具中选出 `get_scene_info` 并填入参数 `scene_ref: "第15场"`：
+
+![QP get_scene_info 工具调用日志](docs/images/tool-calling-02.jpg)
+
 ---
 
 ## 五、工程化设计（节选）
