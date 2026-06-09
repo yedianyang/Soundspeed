@@ -1,13 +1,16 @@
 import { beforeEach, describe, expect, it } from "vitest"
 
-import { useSessionStore } from "@/store/session"
+import { useSessionStore, type ToolCallEntry } from "@/store/session"
 import type {
   AsrMsg,
+  NoteFailedMsg,
+  NoteProcessedMsg,
   PendingNote,
   QaItem,
   ScriptDiff,
   TakeChangedMsg,
   TakeDTO,
+  TranscriptSegmentDTO,
 } from "@/types/api"
 
 // 非 null 的 script_diff 哨兵：测试只关心 null vs 非 null 的身份，不关心内部形状。
@@ -53,6 +56,70 @@ function asr(over: Partial<AsrMsg>): AsrMsg {
     speaker: null,
     take_id: null,
     is_partial: false,
+    ...over,
+  }
+}
+
+function pendingNote(
+  over: Partial<PendingNote> & Pick<PendingNote, "client_id">,
+): PendingNote {
+  return {
+    kind: "text",
+    ts: 0,
+    category: "note",
+    content: "",
+    rawText: "",
+    ...over,
+  }
+}
+
+function noteProcessedMsg(
+  over: Partial<NoteProcessedMsg> & Pick<NoteProcessedMsg, "client_id">,
+): NoteProcessedMsg {
+  return {
+    event_id: 1,
+    take_id: 1,
+    category: "note",
+    content: "",
+    ts: 0,
+    ...over,
+  }
+}
+
+function noteFailedMsg(
+  over: Partial<NoteFailedMsg> & Pick<NoteFailedMsg, "client_id">,
+): NoteFailedMsg {
+  return { reason: "timeout", ts: 0, ...over }
+}
+
+function transcriptSeg(
+  over: Partial<TranscriptSegmentDTO> & Pick<TranscriptSegmentDTO, "ch">,
+): TranscriptSegmentDTO {
+  return {
+    segment_id: 1,
+    speaker: null,
+    text: "",
+    start_frame: 0,
+    end_frame: 0,
+    ...over,
+  }
+}
+
+function toolCall(over: Partial<ToolCallEntry>): ToolCallEntry {
+  return {
+    task_type: "np",
+    tool_id: null,
+    tool_type: null,
+    tool_name: "mark",
+    arguments: "{}",
+    finish_reason: null,
+    model: null,
+    prompt_tokens: null,
+    completion_tokens: null,
+    total_tokens: null,
+    available_tools: [],
+    tool_choice: null,
+    ts: 0,
     ...over,
   }
 }
@@ -285,5 +352,216 @@ describe("seedTakes", () => {
   it("seedTakes 不 bump archiveUnread（非新事件）", () => {
     useSessionStore.getState().seedTakes([takeDTO({ take_id: 1, script_diff: DIFF })])
     expect(useSessionStore.getState().archiveUnread).toBe(0)
+  })
+})
+
+// ─────────────── 第二批：store 迁移特征化测试 ───────────────
+
+// removeTake：删除 + 解绑 currentTakeId 的四个分支。seedTakes 只增不删，删除必须走这条。
+describe("removeTake", () => {
+  beforeEach(() => {
+    useSessionStore.setState({ takes: new Map(), currentTakeId: null })
+  })
+
+  it("删存在的 take、非 current → 从 Map 移除，currentTakeId 不动", () => {
+    useSessionStore.setState({
+      takes: new Map([[1, takeDTO({ take_id: 1 })]]),
+      currentTakeId: 2,
+    })
+    useSessionStore.getState().removeTake(1)
+    expect(useSessionStore.getState().takes.has(1)).toBe(false)
+    expect(useSessionStore.getState().currentTakeId).toBe(2)
+  })
+
+  it("删的恰是 currentTakeId → 移除 + 解绑成 null", () => {
+    useSessionStore.setState({
+      takes: new Map([[1, takeDTO({ take_id: 1 })]]),
+      currentTakeId: 1,
+    })
+    useSessionStore.getState().removeTake(1)
+    expect(useSessionStore.getState().takes.has(1)).toBe(false)
+    expect(useSessionStore.getState().currentTakeId).toBeNull()
+  })
+
+  it("删一个不在 Map 里、但等于 currentTakeId 的 id → 仍解绑", () => {
+    useSessionStore.setState({ takes: new Map(), currentTakeId: 5 })
+    useSessionStore.getState().removeTake(5)
+    expect(useSessionStore.getState().currentTakeId).toBeNull()
+  })
+
+  it("删不存在、非 current → no-op", () => {
+    useSessionStore.setState({
+      takes: new Map([[1, takeDTO({ take_id: 1 })]]),
+      currentTakeId: 1,
+    })
+    useSessionStore.getState().removeTake(99)
+    expect(useSessionStore.getState().takes.has(1)).toBe(true)
+    expect(useSessionStore.getState().currentTakeId).toBe(1)
+  })
+})
+
+// applyBackfilledSegments：diarization 回填用权威 segments 替换 Live 框；守卫不覆盖新 take 的实时转录。
+describe("applyBackfilledSegments", () => {
+  beforeEach(() => {
+    useSessionStore.setState({
+      segments: { ch1: [], ch2: [] },
+      currentTakeId: null,
+      isRecording: false,
+    })
+  })
+
+  it("按 ch 分组替换，isPartial 全置 false", () => {
+    useSessionStore.setState({ currentTakeId: 1 })
+    useSessionStore.getState().applyBackfilledSegments(1, [
+      transcriptSeg({ ch: 1, text: "甲", speaker: "A" }),
+      transcriptSeg({ ch: 2, text: "乙", speaker: "B" }),
+      transcriptSeg({ ch: 1, text: "甲2", speaker: "A" }),
+    ])
+    const { ch1, ch2 } = useSessionStore.getState().segments
+    expect(ch1.map((s) => s.text)).toEqual(["甲", "甲2"])
+    expect(ch2.map((s) => s.text)).toEqual(["乙"])
+    expect(ch1.every((s) => s.isPartial === false)).toBe(true)
+    expect(ch1[0].speaker).toBe("A")
+  })
+
+  it("守卫：已开新 take 且在录（cur != takeId && isRecording）→ 跳过，不覆盖", () => {
+    useSessionStore.setState({
+      currentTakeId: 2,
+      isRecording: true,
+      segments: { ch1: [{ text: "新take转录", speaker: null, start_frame: 0, end_frame: 1, isPartial: true }], ch2: [] },
+    })
+    useSessionStore.getState().applyBackfilledSegments(1, [transcriptSeg({ ch: 1, text: "旧回填" })])
+    // 未被覆盖
+    expect(useSessionStore.getState().segments.ch1[0].text).toBe("新take转录")
+  })
+
+  it("不在录（isRecording=false）即使 take 不同也替换", () => {
+    useSessionStore.setState({ currentTakeId: 2, isRecording: false })
+    useSessionStore.getState().applyBackfilledSegments(1, [transcriptSeg({ ch: 1, text: "回填" })])
+    expect(useSessionStore.getState().segments.ch1[0].text).toBe("回填")
+  })
+
+  it("cur == takeId → 替换（同一 take 的回填）", () => {
+    useSessionStore.setState({ currentTakeId: 1, isRecording: true })
+    useSessionStore.getState().applyBackfilledSegments(1, [transcriptSeg({ ch: 2, text: "同take回填" })])
+    expect(useSessionStore.getState().segments.ch2[0].text).toBe("同take回填")
+  })
+})
+
+// noteProcessed：client_id 精确移除 pending + notesVersion 递增 + 推 feedReceipt（rawText 兜底）。
+describe("noteProcessed", () => {
+  beforeEach(() => {
+    useSessionStore.setState({ pendingNotes: [], feedReceipts: [], notesVersion: 0 })
+  })
+
+  it("命中 pending：移除该 pending + notesVersion+1 + 推回执（rawText 取 pending 原文）", () => {
+    useSessionStore.setState({
+      pendingNotes: [pendingNote({ client_id: "c1", rawText: "原始口述", content: "改写后" })],
+    })
+    useSessionStore.getState().noteProcessed(
+      noteProcessedMsg({ client_id: "c1", category: "keep", content: "LLM改写文案" }),
+    )
+    const s = useSessionStore.getState()
+    expect(s.pendingNotes.find((p) => p.client_id === "c1")).toBeUndefined()
+    expect(s.notesVersion).toBe(1)
+    expect(s.feedReceipts).toHaveLength(1)
+    expect(s.feedReceipts[0]).toMatchObject({
+      client_id: "c1",
+      category: "keep",
+      content: "LLM改写文案",
+      rawText: "原始口述", // 取 pending 的 rawText，非 m.content
+    })
+  })
+
+  it("有 client_id 但无匹配 pending：rawText 回退 m.content，仍推回执 + bump", () => {
+    useSessionStore.getState().noteProcessed(
+      noteProcessedMsg({ client_id: "c-none", content: "兜底文案" }),
+    )
+    const s = useSessionStore.getState()
+    expect(s.notesVersion).toBe(1)
+    expect(s.feedReceipts[0].rawText).toBe("兜底文案")
+  })
+
+  it("client_id=null（异常/旧链路）：不删 pending、不推回执，仅 notesVersion+1", () => {
+    useSessionStore.setState({ pendingNotes: [pendingNote({ client_id: "keep-me" })] })
+    useSessionStore.getState().noteProcessed(noteProcessedMsg({ client_id: null }))
+    const s = useSessionStore.getState()
+    expect(s.pendingNotes).toHaveLength(1) // 未误删
+    expect(s.feedReceipts).toHaveLength(0)
+    expect(s.notesVersion).toBe(1)
+  })
+})
+
+// pending 生命周期：noteFailed / retryPending / dismissPending / removePending。
+describe("pending 生命周期", () => {
+  beforeEach(() => {
+    useSessionStore.setState({ pendingNotes: [] })
+  })
+
+  it("noteFailed：按 client_id 标 failedReason", () => {
+    useSessionStore.setState({ pendingNotes: [pendingNote({ client_id: "c1" })] })
+    useSessionStore.getState().noteFailed(noteFailedMsg({ client_id: "c1", reason: "take_not_found" }))
+    expect(useSessionStore.getState().pendingNotes[0].failedReason).toBe("take_not_found")
+  })
+
+  it("noteFailed client_id=null：不误标任何 pending", () => {
+    useSessionStore.setState({ pendingNotes: [pendingNote({ client_id: "c1" })] })
+    useSessionStore.getState().noteFailed(noteFailedMsg({ client_id: null }))
+    expect(useSessionStore.getState().pendingNotes[0].failedReason).toBeUndefined()
+  })
+
+  it("retryPending：清 failedReason，打回处理中", () => {
+    useSessionStore.setState({
+      pendingNotes: [pendingNote({ client_id: "c1", failedReason: "timeout" })],
+    })
+    useSessionStore.getState().retryPending("c1")
+    expect(useSessionStore.getState().pendingNotes[0].failedReason).toBeUndefined()
+  })
+
+  it("dismissPending：按 client_id 移除", () => {
+    useSessionStore.setState({
+      pendingNotes: [pendingNote({ client_id: "c1" }), pendingNote({ client_id: "c2" })],
+    })
+    useSessionStore.getState().dismissPending("c1")
+    const ids = useSessionStore.getState().pendingNotes.map((p) => p.client_id)
+    expect(ids).toEqual(["c2"])
+  })
+
+  it("removePending：按 client_id 移除（query 改判撤乐观 note）", () => {
+    useSessionStore.setState({
+      pendingNotes: [pendingNote({ client_id: "c1" }), pendingNote({ client_id: "c2" })],
+    })
+    useSessionStore.getState().removePending("c2")
+    const ids = useSessionStore.getState().pendingNotes.map((p) => p.client_id)
+    expect(ids).toEqual(["c1"])
+  })
+})
+
+// appendToolCall：有界缓冲，最近 TOOL_CALLS_MAX(150) 条，超出从头丢。
+describe("appendToolCall", () => {
+  beforeEach(() => {
+    useSessionStore.setState({ toolCalls: [] })
+  })
+
+  it("追加一条", () => {
+    useSessionStore.getState().appendToolCall(toolCall({ tool_name: "mark", ts: 1 }))
+    expect(useSessionStore.getState().toolCalls).toHaveLength(1)
+    expect(useSessionStore.getState().toolCalls[0].tool_name).toBe("mark")
+  })
+
+  it("正好 150 条不丢", () => {
+    const s = useSessionStore.getState()
+    for (let i = 0; i < 150; i++) s.appendToolCall(toolCall({ ts: i }))
+    expect(useSessionStore.getState().toolCalls).toHaveLength(150)
+    expect(useSessionStore.getState().toolCalls[0].ts).toBe(0)
+  })
+
+  it("第 151 条进来 → 丢最老一条，长度保持 150", () => {
+    const s = useSessionStore.getState()
+    for (let i = 0; i < 151; i++) s.appendToolCall(toolCall({ ts: i }))
+    const tc = useSessionStore.getState().toolCalls
+    expect(tc).toHaveLength(150)
+    expect(tc[0].ts).toBe(1) // ts=0 那条被丢
+    expect(tc[tc.length - 1].ts).toBe(150)
   })
 })
