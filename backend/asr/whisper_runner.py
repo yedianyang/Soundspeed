@@ -32,15 +32,36 @@ def validate_param_keys(params: dict[str, Any]) -> dict[str, Any]:
     return params
 
 
-def build_transcribe_params(config: ASRConfig) -> dict[str, Any]:
-    """把 ASRConfig 的解码调参拼成 pywhispercpp transcribe(**params) 的 kwargs。
+def build_model_init_kwargs(config: ASRConfig) -> dict[str, Any]:
+    """构造 pywhispercpp Model(...) 的 init kwargs（不含模型名）。
 
-    beam_search 在 pywhispercpp 1.5.0 是嵌套 dict（不是裸 int）；beam_size<=1 时
-    whisper.cpp 自动退化贪心。initial_prompt 为 None 时不传，避免无谓偏置解码。
-    whisper 内置 vad 刻意不传——上游已切段，开它会双重 VAD 咬字。
+    采样策略枚举在 Model() 构造时就钉死（whisper_full_default_params(strategy)），之后经
+    transcribe 传 beam_search 只写字段、不切策略 = 空操作（CV 200 条实测：贪心/beam5/beam8
+    CER 逐条相同已证实）。所以 beam search 必须在这里启用：beam_size>1 → params_sampling_strategy=1
+    并在构造时给 beam_search。默认 beam_size<=1 → 贪心（不传 strategy，Model 默认 greedy），
+    与当前生产一致。
+    """
+    kwargs: dict[str, Any] = {
+        "models_dir": config.models_dir,
+        "n_threads": config.n_threads,
+        "print_realtime": False,
+        "print_progress": False,
+    }
+    if config.beam_size > 1:
+        kwargs["params_sampling_strategy"] = 1  # WHISPER_SAMPLING_BEAM_SEARCH
+        kwargs["beam_search"] = {"beam_size": config.beam_size, "patience": -1.0}
+    return kwargs
+
+
+def build_transcribe_params(config: ASRConfig) -> dict[str, Any]:
+    """把 ASRConfig 的 per-call 解码调参拼成 pywhispercpp transcribe(**params) 的 kwargs。
+
+    这些是逐次 transcribe 生效的参数（实测 temperature/initial_prompt 确实改变输出）。
+    beam_search 不在此——它经 transcribe 传是空操作，改由 build_model_init_kwargs 在构造时启用。
+    initial_prompt 为 None 时不传，避免无谓偏置解码。whisper 内置 vad 刻意不传——上游已切段，
+    开它会双重 VAD 咬字。
     """
     params: dict[str, Any] = {
-        "beam_search": {"beam_size": config.beam_size, "patience": -1.0},
         "temperature": config.temperature,
         "temperature_inc": config.temperature_inc,
         "entropy_thold": config.entropy_thold,
@@ -84,10 +105,7 @@ class WhisperRunner:
             )
             self._model = Model(
                 self._config.model_size,
-                models_dir=self._config.models_dir,
-                n_threads=self._config.n_threads,
-                print_realtime=False,
-                print_progress=False,
+                **build_model_init_kwargs(self._config),
             )
         return self._model
 

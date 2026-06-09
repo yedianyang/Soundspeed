@@ -88,20 +88,44 @@ def test_injected_model_reused_not_rebuilt():
     assert len(model.calls) == 2  # 同一注入实例被复用
 
 
-# --- 调参透传（whisper 调参第一期：参数可配 + 精度优先默认） ---
+# --- 调参透传（whisper 调参第一期：参数可配，默认 = 当前生产贪心） ---
 
 
-def test_default_config_uses_beam_search_not_greedy():
-    # 当前 runner 不传任何参数 → pywhispercpp 库默认 beam_size=-1（贪心）。
-    # 场记工具精度优先，默认应回到 whisper.cpp CLI 标准 beam_size=5（束搜索）。
-    cfg = ASRConfig()
-    assert cfg.beam_size == 5
+def test_default_config_is_greedy():
+    # 默认 beam_size=0 → 贪心（与当前生产一致）。beam5 经 transcribe 传是空操作
+    # （strategy 枚举构造时钉死，CV 200 条实测贪心/beam5 CER 逐条相同），故默认不开。
+    assert ASRConfig().beam_size == 0
+
+
+def test_model_init_greedy_by_default():
+    from backend.asr.whisper_runner import build_model_init_kwargs
+
+    kw = build_model_init_kwargs(ASRConfig())
+    # 默认不切策略：不传 params_sampling_strategy（Model 默认 greedy）、不带 beam_search
+    assert "params_sampling_strategy" not in kw
+    assert "beam_search" not in kw
+
+
+def test_model_init_enables_beam_when_beam_size_gt_1():
+    from backend.asr.whisper_runner import build_model_init_kwargs
+
+    kw = build_model_init_kwargs(ASRConfig(beam_size=5))
+    # beam search 必须在构造时启用（切 strategy），否则经 transcribe 传 beam_search 是空操作
+    assert kw["params_sampling_strategy"] == 1  # WHISPER_SAMPLING_BEAM_SEARCH
+    assert kw["beam_search"] == {"beam_size": 5, "patience": -1.0}
+
+
+def test_transcribe_params_exclude_beam_search():
+    # beam_search 不走 per-call transcribe（空操作），只剩真正逐次生效的参数
+    from backend.asr.whisper_runner import build_transcribe_params
+
+    params = build_transcribe_params(ASRConfig(beam_size=8))
+    assert "beam_search" not in params
 
 
 def test_tuning_params_passed_to_model():
     model = _FakeModel()
     cfg = ASRConfig(
-        beam_size=8,
         temperature=0.0,
         temperature_inc=0.2,
         entropy_thold=2.4,
@@ -111,8 +135,7 @@ def test_tuning_params_passed_to_model():
     runner = WhisperRunner(cfg, model=model)
     runner.transcribe_pcm(_pcm())
     kw = model.kwargs[0]
-    # beam_search 是嵌套 dict（pywhispercpp 1.5.0 形状），不是裸 int
-    assert kw["beam_search"] == {"beam_size": 8, "patience": -1.0}
+    assert "beam_search" not in kw  # beam 不经 transcribe 传
     assert kw["temperature"] == 0.0
     assert kw["temperature_inc"] == 0.2  # 保留 temperature 回退序列
     assert kw["entropy_thold"] == 2.4

@@ -20,9 +20,12 @@ class ASRConfig:
     n_threads: whisper.cpp CPU 线程数（GPU 推理时影响较小）。
     models_dir: 模型文件存放目录；None 时用 pywhispercpp 默认缓存路径。
 
-    --- whisper 解码调参（精度优先默认；最优值需真实录音量 CER 后再定）---
-    beam_size: 束搜索宽度。pywhispercpp 库默认 -1（退化贪心），这里回到 whisper.cpp CLI
-      标准 5（束搜索，精度更高、略慢）。设 1 等同贪心走速度。
+    --- whisper 解码调参（默认 = 库默认 = 当前生产行为，不擅自改；调优需真实录音量 CER）---
+    beam_size: 束搜索宽度。默认 0/1 = 贪心（与当前生产一致）。>1 才启用 beam search。
+      注意：pywhispercpp 的采样策略枚举在 Model() 构造时钉死，只设 beam_size 经 transcribe
+      传是空操作；故 beam_size>1 时由 _ensure_model 用 params_sampling_strategy=1 构造模型。
+      实测（CV zh-CN 200 条）turbo 上 beam5 相对贪心 CER 仅降 ~1%，且 L2 下游已对剧本纠错，
+      默认不开；留作 opt-in，等真实同期录音再量值决定。
     temperature: 初始解码温度。0.0 = 确定性起点，配合 temperature_inc 失败时递增回退。
     temperature_inc: 解码失败（触发下方阈值）时的温度递增步长。0 关闭回退；保留默认 0.2
       让卡住的段落有退路。注意 entropy/logprob 阈值是回退触发器，三者耦合，别只调一个。
@@ -39,7 +42,7 @@ class ASRConfig:
     language: str = "zh"
     n_threads: int = 4
     models_dir: str | None = None
-    beam_size: int = 5
+    beam_size: int = 0
     temperature: float = 0.0
     temperature_inc: float = 0.2
     entropy_thold: float = 2.4
