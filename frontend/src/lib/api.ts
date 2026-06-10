@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { API_BASE } from "@/lib/config"
 import type { FileNameFormat } from "@/lib/filename-format"
+import type { AsrEngineInfo } from "@/lib/asr-settings"
 import { randomId } from "@/lib/uuid"
 import { useSessionStore } from "@/store/session"
 import type {
@@ -432,7 +433,7 @@ export interface AsrConfigResponse {
   engine: string | null
   language: string | null
   model: string | null
-  engines: { id: string; label: string; languages: string[]; installed: boolean }[]
+  engines: AsrEngineInfo[]
   /** legacy:旧组件用的顶层语言列表,新 UI 用 engines[].languages */
   languages: string[]
 }

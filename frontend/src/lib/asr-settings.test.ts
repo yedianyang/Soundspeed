@@ -35,4 +35,9 @@ describe("asrSelectModel", () => {
     expect(m.engineOptions).toEqual([])
     expect(m.languageOptions).toEqual(["zh", "en", "auto"])
   })
+
+  it("engine 指向不存在的 id → 语言回退 zh/en/auto", () => {
+    const m = asrSelectModel({ engines: [ENGINES[0]], engine: "funasr", isRecording: false })
+    expect(m.languageOptions).toEqual(["zh", "en", "auto"])
+  })
 })
