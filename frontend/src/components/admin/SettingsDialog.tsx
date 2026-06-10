@@ -157,22 +157,28 @@ function AsrEngineLanguageSelect() {
   const qc = useQueryClient()
   const isRecording = useSessionStore((s) => s.isRecording)
   const [err, setErr] = useState<string | null>(null)
+  // 引擎切换 in-flight：首切 funasr 含 ~1GB 模型下载（可能数分钟），期间禁用双下拉防重复点击（409）。
+  const [switching, setSwitching] = useState(false)
 
   const model = asrSelectModel({
     engines: data?.engines ?? [],
     engine: data?.engine ?? null,
     isRecording,
   })
+  const engineDisabled = model.engineDisabled || switching
   const engineValue = data?.engine ?? "whisper"
   const langValue = data?.language ?? "zh"
 
   const onEngineChange = async (v: string) => {
     setErr(null)
+    setSwitching(true)
     try {
       await setAsrEngine(v)
       qc.invalidateQueries({ queryKey: asrConfigQueryKey() })
     } catch (e) {
       setErr(e instanceof Error ? e.message : "切换引擎失败")
+    } finally {
+      setSwitching(false)
     }
   }
 
@@ -192,7 +198,7 @@ function AsrEngineLanguageSelect() {
   return (
     <div className="grid gap-1.5">
       <div className="flex gap-2">
-        <Select value={engineValue} onValueChange={onEngineChange} disabled={model.engineDisabled}>
+        <Select value={engineValue} onValueChange={onEngineChange} disabled={engineDisabled}>
           <SelectTrigger
             className="w-1/2"
             title={model.engineDisabled ? "录制中不可切换引擎" : undefined}
@@ -207,7 +213,7 @@ function AsrEngineLanguageSelect() {
             ))}
           </SelectContent>
         </Select>
-        <Select value={langValue} onValueChange={onLangChange}>
+        <Select value={langValue} onValueChange={onLangChange} disabled={switching}>
           <SelectTrigger className="w-1/2">
             <SelectValue placeholder="选择转录语言" />
           </SelectTrigger>
@@ -221,10 +227,16 @@ function AsrEngineLanguageSelect() {
         </Select>
       </div>
       {err && <span className="text-xs text-destructive">{err}</span>}
-      <span className="text-[11px] text-muted-foreground">
-        当前模型：{data?.model ?? "—"}
-        {data && !data.enabled ? "（实时 ASR 未启用）" : ""}
-      </span>
+      {switching ? (
+        <span className="text-[11px] text-muted-foreground">
+          切换引擎中…（首次切换需下载模型，可能数分钟）
+        </span>
+      ) : (
+        <span className="text-[11px] text-muted-foreground">
+          当前模型：{data?.model ?? "—"}
+          {data && !data.enabled ? "（实时 ASR 未启用）" : ""}
+        </span>
+      )}
     </div>
   )
 }
