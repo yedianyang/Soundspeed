@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+from backend.tests.qp_eval_seed import CHARACTERS_16, seed_qp_eval_db
+
 FIXTURE = Path(__file__).parent / "fixtures" / "qp_eval.jsonl"
 VALID_CATEGORIES = {"multi_hop", "aggregate", "single_tool", "negative"}
 
@@ -31,3 +33,30 @@ def test_fixture_schema() -> None:
 def test_fixture_category_coverage() -> None:
     cats = {c["category"] for c in _load_cases()}
     assert cats == VALID_CATEGORIES, f"四类配比缺: {VALID_CATEGORIES - cats}"
+
+
+def test_seed_db_invariants(tmp_dal) -> None:
+    seed_qp_eval_db(tmp_dal)
+    scenes = tmp_dal.list_scenes_readonly()
+    jiangcheng = [s for s in scenes if (s["location"] or "") == "江城家"]
+    assert len(jiangcheng) == 12
+    assert sum(1 for s in jiangcheng if s["time_of_day"] == "日") == 4
+    assert sum(1 for s in jiangcheng if s["time_of_day"] == "夜") == 4
+    assert sum(1 for s in jiangcheng if s["time_of_day"] is None) == 4
+
+    no_slug = [s for s in scenes if s["scene_code"] in ("1", "2")]
+    assert len(no_slug) == 2 and all(s["location"] is None for s in no_slug), "场1/2不应有 location"
+
+    sid15 = tmp_dal.resolve_scene_id("15")
+    assert tmp_dal.count_takes(sid15) == 3  # 4 - 1 软删
+
+    sid16 = tmp_dal.resolve_scene_id("16")
+    assert sorted(tmp_dal.list_characters(sid16)) == sorted(CHARACTERS_16)
+    info = tmp_dal.get_scene_info(sid16)
+    assert info is not None, "场16 get_scene_info 返回 None"
+    assert info["character_count"] == 4 and info["int_ext"] == "内"
+
+    # 种子台词存在性用 LIKE 验证,不走 FTS:trigram 分词 2 字查询(如「合同」)
+    # 现为 0 命中,是已知生产 bug,修复归 Task 8(search_script_lines 短查询回退)。
+    res = tmp_dal.query_readonly("SELECT text FROM script_lines WHERE text LIKE '%合同%'")
+    assert res["row_count"] == 1 and "合同" in res["rows"][0]["text"]
