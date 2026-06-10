@@ -66,7 +66,6 @@ def build_transcribe_params(config: ASRConfig) -> dict[str, Any]:
         "temperature_inc": config.temperature_inc,
         "entropy_thold": config.entropy_thold,
         "logprob_thold": config.logprob_thold,
-        "no_speech_thold": config.no_speech_thold,
     }
     if config.initial_prompt is not None:
         params["initial_prompt"] = config.initial_prompt

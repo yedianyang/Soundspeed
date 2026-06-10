@@ -32,7 +32,6 @@ class ASRConfig:
     entropy_thold: 压缩比/熵阈值（≈OpenAI compression_ratio_threshold）。超阈视为重复/退化，
       触发温度回退。默认 2.4；降到 1.8-2.0 更敏感抓重复，但会更频繁触发回退。
     logprob_thold: 平均对数概率阈值。低于此视为低置信，触发回退。默认 -1.0。
-    no_speech_thold: 无语音概率阈值，超过则判定该段为静音。默认 0.6。
     initial_prompt: 解码前置提示词，偏置输出风格/用词。默认 None（不偏置）。中文可设
       "以下是普通话的句子，使用简体中文输出。" 强制简体、压繁体；也可塞场记术语热词。
     注：whisper.cpp 内置 vad 不在此暴露——上游 backend/vad/ 已切段，开内置 vad 会双重咬字。
@@ -47,5 +46,4 @@ class ASRConfig:
     temperature_inc: float = 0.2
     entropy_thold: float = 2.4
     logprob_thold: float = -1.0
-    no_speech_thold: float = 0.6
     initial_prompt: str | None = None

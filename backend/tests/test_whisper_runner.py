@@ -130,7 +130,6 @@ def test_tuning_params_passed_to_model():
         temperature_inc=0.2,
         entropy_thold=2.4,
         logprob_thold=-1.0,
-        no_speech_thold=0.6,
     )
     runner = WhisperRunner(cfg, model=model)
     runner.transcribe_pcm(_pcm())
@@ -140,7 +139,7 @@ def test_tuning_params_passed_to_model():
     assert kw["temperature_inc"] == 0.2  # 保留 temperature 回退序列
     assert kw["entropy_thold"] == 2.4
     assert kw["logprob_thold"] == -1.0
-    assert kw["no_speech_thold"] == 0.6
+    assert "no_speech_thold" not in kw  # pywhispercpp 标 not implemented，已移除
 
 
 def test_initial_prompt_passed_when_set():
