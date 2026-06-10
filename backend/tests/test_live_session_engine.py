@@ -89,3 +89,17 @@ def test_set_engine_rejected_while_running(monkeypatch):
     monkeypatch.setattr(type(s), "running", property(lambda self: True))
     with pytest.raises(RuntimeError):
         s.set_engine("funasr")
+
+
+def test_set_engine_funasr_warmup_failure_leaves_engine_unchanged():
+    class _FailingRunner(_FakeRunner):
+        def warmup(self):
+            raise RuntimeError("FunASR 未安装")
+
+    fail = _FailingRunner(model_size="paraformer-zh")
+    runners = iter([fail])
+    s = _session(funasr_factory=lambda: next(runners))
+    with pytest.raises(RuntimeError):
+        s.set_engine("funasr")
+    assert s.engine == "whisper"
+    assert s.model_size == "fake-whisper"

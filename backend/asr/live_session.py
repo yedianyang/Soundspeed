@@ -97,7 +97,7 @@ class LiveAsrSession:
         首次含 modelscope 下载)。重启后归位 whisper(不持久化,见设计文档)。"""
         if engine not in ("whisper", "funasr"):
             raise ValueError(f"未知 ASR 引擎: {engine}")
-        if self.running:
+        if self.running:  # 快速失败;锁内还会复检
             raise RuntimeError("录制中不可切换引擎")
         if engine == self._engine:
             return
@@ -109,6 +109,10 @@ class LiveAsrSession:
         else:
             new_runner = self._whisper_runner
         with self._lock:
+            # 复检:warmup 阻塞期间(首次 ~1GB 下载)可能有 take.start 抢先起线程,
+            # 锁内直接读 _thread(不经 running property,语义更明确)。
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("录制中不可切换引擎")
             self._runner = new_runner
             self._engine = engine
 
