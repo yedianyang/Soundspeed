@@ -297,3 +297,19 @@ def test_query_readonly_timeout(dal: DAL) -> None:
         timeout_s=0.1,
     )
     assert "error" in res
+
+
+# ---------------------------------------------------------------------------
+# Task 12: get_script_lines DAL 新方法（B6 get_scene_script 工具下层）
+# ---------------------------------------------------------------------------
+
+
+def test_get_script_lines_latest_version_ordered(tmp_dal) -> None:
+    from backend.tests.qp_eval_seed import seed_qp_eval_db
+    seed_qp_eval_db(tmp_dal)
+    sid16 = tmp_dal.resolve_scene_id("16")
+    lines = tmp_dal.get_script_lines(sid16, limit=3)
+    assert len(lines) == 3
+    assert lines[0]["character"] is None  # 舞台指示行在前
+    assert lines[0]["line_no"] == 1
+    assert tmp_dal.get_script_lines(tmp_dal.resolve_scene_id("15"), limit=3) == []  # 无剧本

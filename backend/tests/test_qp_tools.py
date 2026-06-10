@@ -7,6 +7,7 @@ from backend.db.dal import DAL
 from backend.llm.tools.transcript import (
     build_count_takes_tool,
     build_get_scene_info_tool,
+    build_get_scene_script_tool,
     build_list_characters_tool,
     build_list_scenes_tool,
     build_qp_tools,
@@ -14,6 +15,7 @@ from backend.llm.tools.transcript import (
     build_search_script_lines_tool,
     count_takes_executor,
     get_scene_info_executor,
+    get_scene_script_executor,
     list_characters_executor,
     list_scenes_executor,
     query_database_executor,
@@ -26,6 +28,7 @@ _BUILDERS = [
     build_list_characters_tool,
     build_search_script_lines_tool,
     build_list_scenes_tool,
+    build_get_scene_script_tool,
     build_query_database_tool,
 ]
 
@@ -53,7 +56,7 @@ def test_tool_params_all_flat_scalar(builder) -> None:
         assert _is_flat_scalar(prop), f"参数 {name} 非扁平标量: {prop}"
 
 
-def test_build_qp_tools_returns_six_named() -> None:
+def test_build_qp_tools_returns_seven_named() -> None:
     tools = build_qp_tools()
     names = [t["function"]["name"] for t in tools]
     assert names == [
@@ -62,6 +65,7 @@ def test_build_qp_tools_returns_six_named() -> None:
         "list_characters",
         "search_script_lines",
         "list_scenes",
+        "get_scene_script",
         "query_database",
     ]
 
@@ -237,3 +241,22 @@ def test_list_scenes_executor_filter_and_aggregate(tmp_dal) -> None:
     assert out2["总场数"] == 4
     out3 = list_scenes_executor({}, tmp_dal)
     assert out3["总场数"] == 16  # 空参数=全剧路径
+
+
+# ---------------------------------------------------------------------------
+# Task 12: B6 get_scene_script executor 测试
+# ---------------------------------------------------------------------------
+
+
+def test_get_scene_script_executor(tmp_dal) -> None:
+    from backend.tests.qp_eval_seed import seed_qp_eval_db
+    seed_qp_eval_db(tmp_dal)
+    out = get_scene_script_executor({"scene_ref": "16"}, tmp_dal)
+    assert out["场次"] == "16" and out["行数"] == 8
+    assert out["剧本"][0]["角色"] == "(舞台指示)"
+    assert "咖啡馆" in out["剧本"][0]["内容"]
+    assert "提示" not in out  # 8 行未截断
+    out99 = get_scene_script_executor({"scene_ref": "99"}, tmp_dal)
+    assert "error" in out99
+    out15 = get_scene_script_executor({"scene_ref": "15"}, tmp_dal)
+    assert "error" in out15  # 有场无剧本

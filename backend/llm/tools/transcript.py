@@ -1,4 +1,4 @@
-"""QP 工具家（FC spec §3.3 预留）：5 个 build_*_tool() schema + build_qp_tools()。
+"""QP 工具家（FC spec §3.3 预留）：7 个 build_*_tool() schema + build_qp_tools()。
 
 executor（Task 5）也住本模块，与 schema 共置。本模块只 import 中性叶子，
 DAL 仅 TYPE_CHECKING——避开 config→tools→pipeline→config 循环（D-QP-09）。
@@ -156,6 +156,24 @@ def build_query_database_tool() -> dict:
     }
 
 
+_SCENE_SCRIPT_LIMIT = 40  # 40 行≈1200-1900 token(JSON 后),8192 n_ctx 下留足 system+历史+输出余量
+
+
+def build_get_scene_script_tool() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_scene_script",
+            "description": "返回某场次的剧本内容(舞台指示+台词)。问「第N场拍什么内容/讲什么」用它。",
+            "parameters": {
+                "type": "object",
+                "properties": {"scene_ref": {"type": "string", "description": _SCENE_REF_DESC}},
+                "required": ["scene_ref"],
+            },
+        },
+    }
+
+
 def build_list_scenes_tool() -> dict:
     """构造 list_scenes OpenAI 风格 tool dict。
 
@@ -181,13 +199,14 @@ def build_list_scenes_tool() -> dict:
 
 
 def build_qp_tools() -> list[dict]:
-    """返回 QP 全部 6 个工具 schema（顺序固定，供 config.query_session 与测试用）。"""
+    """返回 QP 全部 7 个工具 schema（顺序固定，供 config.query_session 与测试用）。"""
     return [
         build_count_takes_tool(),
         build_get_scene_info_tool(),
         build_list_characters_tool(),
         build_search_script_lines_tool(),
         build_list_scenes_tool(),
+        build_get_scene_script_tool(),
         build_query_database_tool(),
     ]
 
@@ -202,6 +221,8 @@ def build_qp_tools() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 _SCENE_NOT_FOUND = "找不到场次 {ref!r}，数据库里没有这一场（不要用相近场次顶替）。"
+
+_SCRIPT_NOT_FOUND = "场次 {ref!r} 存在，但还没有录入剧本。"
 
 # take status 枚举码 → 中文（schema CHECK pass/ng/keep/tbd；enum 之外的值原样回显）
 _STATUS_ZH = {"pass": "过", "ng": "NG", "keep": "保留", "tbd": "待定"}  # ng 保留英文:片场通用词,对 4B 模型比「不过/废」更无歧义
@@ -284,6 +305,28 @@ def query_database_executor(args: dict, dal: "DAL") -> dict:
         return res
     # rows 已是 dict 列表（dal.query_readonly），裸 "columns" 键不回喂
     return {"行数": res["row_count"], "结果": res["rows"], "截断": res["truncated"]}
+
+
+def get_scene_script_executor(args: dict, dal: "DAL") -> dict:
+    ref = str(args.get("scene_ref") or "")
+    scene_id = dal.resolve_scene_id(ref)
+    if scene_id is None:
+        return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
+    lines = dal.get_script_lines(scene_id, limit=_SCENE_SCRIPT_LIMIT + 1)  # +1 探测截断
+    if not lines:
+        return {"error": _SCRIPT_NOT_FOUND.format(ref=ref)}
+    truncated = len(lines) > _SCENE_SCRIPT_LIMIT
+    lines = lines[:_SCENE_SCRIPT_LIMIT]
+    out = {
+        "场次": ref,
+        "行数": len(lines),
+        "剧本": [
+            {"角色": ln["character"] or "(舞台指示)", "内容": ln["text"]} for ln in lines
+        ],
+    }
+    if truncated:
+        out["提示"] = f"(已截断,仅前{_SCENE_SCRIPT_LIMIT}行)"
+    return out
 
 
 def list_scenes_executor(args: dict, dal: "DAL") -> dict:

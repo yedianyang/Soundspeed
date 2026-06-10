@@ -435,6 +435,18 @@ class DAL:
             ).fetchall()
         return [r["c"] for r in rows]
 
+    def get_script_lines(self, scene_id: int, limit: int = 40) -> list[dict]:
+        """最新版剧本行(含舞台指示 character=NULL),line_no 升序,limit 截断(只读连接)。"""
+        with self._readonly_conn() as conn:
+            rows = conn.execute(
+                "SELECT line_no, character, text FROM script_lines "
+                "WHERE script_id = (SELECT script_id FROM scripts WHERE scene_id = ? "
+                "ORDER BY version DESC LIMIT 1) "
+                "ORDER BY line_no LIMIT ?;",
+                (scene_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def search_script_lines(self, query: str, scene_id: int | None = None) -> list[dict]:
         """检索台词（只读连接）。返回 line_no/character/text/scene_code dict 列表。
 
