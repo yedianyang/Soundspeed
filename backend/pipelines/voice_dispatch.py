@@ -94,7 +94,7 @@ async def run_voice_dispatch(
         dal:          DAL 实例。
         service:      LLMService 实例（须支持 infer_voice + infer_voice_tool）。
         cm:           ConnectionManager，广播用。
-        scene_context: 场次目录文本（_build_scene_catalog 输出），注入 system。
+        scene_context: 场次目录文本（build_scene_catalog 输出），注入 system。
         np_input:     NPInput 实例（含 current_take_id/take_context），由 orchestrator 构建传入。
                       note 分支用此确保 take 上下文正确，不靠模型猜 take_id（修 FK 失败）。
         voice_runner: 语音 NP runner，签名 (NPInput, bytes, LLMService) -> Awaitable[NPOutput]。

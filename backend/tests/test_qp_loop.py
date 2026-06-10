@@ -12,7 +12,7 @@ import pytest
 
 from backend.pipelines.qp_query import (
     _FALLBACK_TEXT,
-    _build_scene_catalog,
+    build_scene_catalog,
     _run_executor,
     _scrape_tool_name,
     run_tool_loop,
@@ -166,7 +166,7 @@ def test_run_executor_unknown_tool() -> None:
 
 def test_build_scene_catalog_empty() -> None:
     # list_scenes_readonly 返空 → 含「还没有任何场次」
-    catalog = _build_scene_catalog(_StubDAL())
+    catalog = build_scene_catalog(_StubDAL())
     assert "还没有任何场次" in catalog
 
 
@@ -178,7 +178,7 @@ def test_build_scene_catalog_with_scenes() -> None:
                 {"scene_code": "Scene_2", "int_ext": None, "location": "天台", "time_of_day": "夜"},
             ]
 
-    catalog = _build_scene_catalog(_DALWithScenes())
+    catalog = build_scene_catalog(_DALWithScenes())
     assert "Scene_1" in catalog
     assert "Scene_2" in catalog
     assert "客厅" in catalog

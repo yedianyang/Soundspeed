@@ -10,6 +10,7 @@
 公共 API：
   run_qp_query(text, dal, service) -> str   QP 入口：拼场次目录 + system → 跑循环
   run_tool_loop(messages, *, service, dal)  纯循环（可注入 service/dal，便于测试）
+  build_scene_catalog(dal) -> str           场次目录文本（QP 文本/语音共用）
 """
 from __future__ import annotations
 
@@ -148,7 +149,7 @@ async def run_tool_loop(
     return stripped or _FALLBACK_TEXT
 
 
-def _build_scene_catalog(dal: "DAL") -> str:
+def build_scene_catalog(dal: "DAL") -> str:
     """场次目录注入（spec §7.1）：编号 + scene_code + slugline + 顺序号，注入 user/context。"""
     scenes = dal.list_scenes_readonly()
     if not scenes:
@@ -177,7 +178,7 @@ async def run_qp_query(
            透传给 run_tool_loop，默认 None 不收集。
     """
     # 场次目录是同步 SQLite I/O，包 to_thread 不阻塞事件循环（与 step C executor 的 to_thread 一致）。
-    catalog = await asyncio.to_thread(_build_scene_catalog, dal)
+    catalog = await asyncio.to_thread(build_scene_catalog, dal)
     messages = [
         {"role": "system", "content": _QP_SYSTEM},
         {"role": "user", "content": f"{catalog}\n\n用户提问：{text}"},

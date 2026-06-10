@@ -85,7 +85,7 @@ def extract_tool_declarations_text() -> str:
 def build_hop_a_system(scene_context: str = "") -> str:
     """组装 hop A 的 system prompt：任务说明 + 工具声明（原生格式）+ 场次目录。
 
-    scene_context: 场次目录文本（从 _build_scene_catalog(dal) 取，如
+    scene_context: 场次目录文本（从 build_scene_catalog(dal) 取，如
     "Scene 1: 大堂 / Scene 2: 走廊"），注入后模型可用具体场次 ID 填参数。
     对齐 probe_qp_voice_e2e.py system_content 组装格式。
     """

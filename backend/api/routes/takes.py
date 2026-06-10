@@ -56,6 +56,7 @@ from backend.core.events import (
 )
 from backend.pipelines.memo_route import classify_memo
 from backend.pipelines.note_parse import NoteParseError, parse_note
+from backend.pipelines.qp_query import build_scene_catalog  # D4：与 run_qp_query 同源
 from backend.pipelines.voice_dispatch import run_voice_dispatch
 
 logger = logging.getLogger(__name__)
@@ -724,6 +725,8 @@ async def create_voice_note(
         # done callback 统一发 idle（成功/失败/取消三条路径）
         async def _dispatch_with_status() -> dict:
             await orchestrator._emit_np_status_preamble(service)
+            # D4：语音与文本 QP 同源注入场次目录
+            scene_context = await asyncio.to_thread(build_scene_catalog, orchestrator.dal)
             return await run_voice_dispatch(
                 audio,
                 conn_id=conn_id,
@@ -732,7 +735,7 @@ async def create_voice_note(
                 dal=orchestrator.dal,
                 service=service,
                 cm=cm,
-                scene_context="",  # 简化：不预取场次文本，hop A 系统内联说明已足
+                scene_context=scene_context,
                 np_input=np_input,
                 voice_runner=voice_runner,
             )
