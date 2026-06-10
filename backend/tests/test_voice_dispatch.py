@@ -552,6 +552,64 @@ def test_query_hop_b_failure_broadcasts_friendly_error(monkeypatch):
     )
 
 
+def test_query_branch_user_frame_injects_hop_a_paraphrase(monkeypatch):
+    """续跳 user 占位帧注入 hop A 复述（Task 16）。
+
+    hop_a_text 设计成含 <|tool_call> 块 + 可读后缀「我帮你查第一场」。
+    断言：
+      - 「我帮你查第一场」在第 2 帧 content 里（复述注入）
+      - 「<|tool_call」不在第 2 帧 content 里（特殊 token 已清洗）
+      - 「请根据工具返回结果回答。」仍在第 2 帧 content 里（占位保留）
+    """
+    _patch_build_hop_a_system(monkeypatch)
+    from backend.pipelines.voice_dispatch import run_voice_dispatch
+
+    captured: dict = {}
+
+    async def _fake_loop(messages_arg, *, service, dal, **kw):
+        captured["messages"] = messages_arg
+        return "7 条"
+
+    monkeypatch.setattr("backend.pipelines.voice_dispatch.run_tool_loop", _fake_loop)
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch._run_executor",
+        MagicMock(return_value={"count": 7}),
+    )
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch._schedule_qp_broadcast",
+        AsyncMock(),
+    )
+
+    # hop_a_text：带 <|tool_call> 块 + 可读后缀
+    class _HopAWithText(_StubService):
+        def __init__(self):
+            super().__init__("count_takes", {"scene_id": 1}, {"scene_id": 1})
+            # 重写 hop A 输出：在工具调用块后追加人类可读的复述
+            self._hop_a_output = (
+                '<|tool_call>call:count_takes{"scene_id":1}<tool_call|>我帮你查第一场'
+            )
+
+    svc = _HopAWithText()
+    asyncio.run(run_voice_dispatch(
+        WAV_BYTES, conn_id="c-paraphrase", ts=1000.0, client_id="cid-para",
+        dal=_StubDAL(), service=svc, cm=_StubCM(), scene_context="Scene 1",
+    ))
+
+    msgs = captured.get("messages", [])
+    assert msgs, "run_tool_loop 未被调用"
+    # 第 2 帧（index 1）是 user 占位帧
+    user_frame_content = msgs[1]["content"]
+    assert "我帮你查第一场" in user_frame_content, (
+        f"hop A 复述未注入 user 帧: {user_frame_content!r}"
+    )
+    assert "<|tool_call" not in user_frame_content, (
+        f"特殊 token 未被清洗，仍在 user 帧: {user_frame_content!r}"
+    )
+    assert "请根据工具返回结果回答。" in user_frame_content, (
+        f"占位文案丢失: {user_frame_content!r}"
+    )
+
+
 def test_query_executor_failure_broadcasts_friendly_error(monkeypatch):
     """query 分支 _run_executor 抛异常 → 仍广播带 client_id 的友好错误答案。
 

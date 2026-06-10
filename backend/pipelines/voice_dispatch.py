@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from backend.pipelines.qp_query import (
     _QP_SYSTEM,
+    _TOOL_CALL_BLOCK_RE,  # 与 qp_query 收尾跳同源，用于清洗 hop A 输出中的 <|tool_call>…块
     _run_executor,
     _scrape_tool_name,
     run_tool_loop,
@@ -284,8 +285,9 @@ async def _handle_query_branch(
       system(_QP_SYSTEM + catalog) → user(占位) → assistant(hop_a_text) → user(工具返回)
     不复用 hop A/B 的音频 messages，避免 build_hop_a_system 的工具声明文本带入续跳。
 
-    已知限制：probe 续跳 user 帧用真实转写 phrase，生产无转写改用静态占位。
-    此形态 probe 未覆盖，模型收尾稳定性待真机验证。
+    续跳 user 帧：清洗 hop A 输出中的 <|tool_call>…块后注入可读复述，
+    让模型收尾时知道用户问了什么（Task 16）。cleaned 为空时退化为静态占位。
+    复述来自 hop A 模型转述（非真转写），截 200 字防上下文溢出。
 
     回喂模式：文本 QP 主线已默认 native 回喂（B2，Task 14 定位 bug 在 Llava15 路径、
     带 tools 走 GGUF 模板安全）；语音续跳因混合序列（纯文本 assistant 帧 + native 帧）
@@ -300,11 +302,21 @@ async def _handle_query_branch(
         result = await asyncio.to_thread(_run_executor, tool_name, args, dal)
 
         # 纯文本续跳 messages：全新拼，不含 AUDIO_SENTINEL
-        # user 占位：生产无转写，probe 里是真实 phrase；此差异已在 docstring 标注
+        # user 占位：注入 hop A 复述（清洗 <|tool_call>…块后的可读部分），
+        # 让模型收尾时知道用户问了什么，不再只靠工具返回盲猜。
+        # cleaned 为空（hop A 纯工具调用无文本）时退化为原静态占位。
+        # 复述来自 hop A 模型转述（非真转写），截 200 字防上下文溢出。
+        # 200 字上限:hop A 自由生成通常 <80 字,极少触发;截断不标注,有意接受
+        cleaned_hop_a = _TOOL_CALL_BLOCK_RE.sub("", hop_a_text).strip()
+        user_frame = (
+            f"用户的语音问题（模型转述）：{cleaned_hop_a[:200]}\n请根据工具返回结果回答。"
+            if cleaned_hop_a
+            else "请根据工具返回结果回答。"
+        )
         system_content = _QP_SYSTEM + ("\n\n" + scene_context if scene_context else "")
         tool_messages: list[dict] = [
             {"role": "system", "content": system_content},
-            {"role": "user", "content": "请根据工具返回结果回答。"},
+            {"role": "user", "content": user_frame},
             {"role": "assistant", "content": hop_a_text},
             {
                 "role": "user",
