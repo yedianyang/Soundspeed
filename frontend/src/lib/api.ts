@@ -44,7 +44,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers })
   if (!res.ok) {
-    throw new ApiError(res.status, `${init?.method ?? "GET"} ${path} → ${res.status}`)
+    // 错误透出后端 detail（如 409 的「FunASR 未安装」/「正在录制…」），同 requestMultipart 先例。
+    let detail = `${init?.method ?? "GET"} ${path} → ${res.status}`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = String(j.detail)
+    } catch {
+      /* 忽略非 JSON 错误体 */
+    }
+    throw new ApiError(res.status, detail)
   }
   if (res.status === 204) return undefined as T
   const text = await res.text()
