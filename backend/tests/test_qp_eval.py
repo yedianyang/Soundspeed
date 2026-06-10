@@ -13,8 +13,9 @@ FIXTURE = Path(__file__).parent / "fixtures" / "qp_eval.jsonl"
 RUNS_PER_CASE = 3
 # 基线 2026-06-11:0.567 → D5 0.667 → 描述重审 0.767 → catalog 瘦身 0.833(两轮一致,commit 891de21)。
 # 终态已知失败:mic-advice 0/3(prompt 禁令,实验否决记 design doc)+ agg-time 2/3 抖动(候选 B2)。
-# FLOOR = 0.833 - 0.10 向下取一位。
-ACCURACY_FLOOR = 0.73
+# native 回喂默认开启(B2,两轮 0.900);FLOOR=0.900-0.10。
+# A/B:native 0.900×2 vs text 0.833×2,agg-time 抖动被 native 接地修平,唯余 mic-advice 0/3。
+ACCURACY_FLOOR = 0.80
 
 
 def _load_cases() -> list[dict]:
@@ -76,6 +77,10 @@ def seeded_dal(tmp_path_factory):
 async def test_qp_accuracy_floor(qp_service, seeded_dal) -> None:
     from backend.pipelines.qp_query import run_qp_query
 
+    # B2 A/B 回归开关：默认 native（生产默认）；QP_EVAL_TEXT=1 切纯文本回退模式。
+    text_mode = os.environ.get("QP_EVAL_TEXT") == "1"
+    mode = "text" if text_mode else "native"
+
     cases = _load_cases()
     total = passed = 0
     print()
@@ -89,7 +94,7 @@ async def test_qp_accuracy_floor(qp_service, seeded_dal) -> None:
             try:
                 answer = await run_qp_query(
                     text=c["question"], dal=seeded_dal, service=qp_service,
-                    timeout=120.0, trace=trace,
+                    timeout=120.0, trace=trace, native_toolfeed=not text_mode,
                 )
             except Exception as exc:  # noqa: BLE001
                 last_reason, last_trace = f"调用异常: {exc}", trace
@@ -105,5 +110,5 @@ async def test_qp_accuracy_floor(qp_service, seeded_dal) -> None:
         tools_used = "→".join(t["tool"] for t in last_trace) or "(无工具)"
         print(f"{flag}{case_pass}/{RUNS_PER_CASE}  [{c['id']}] {tools_used}  {last_reason or '(pass)'}", flush=True)
     acc = passed / total if total else 0.0
-    print(f"\n总计 {passed}/{total} = {acc:.3f}  (FLOOR {ACCURACY_FLOOR})", flush=True)
+    print(f"\n总计 {passed}/{total} = {acc:.3f}  mode={mode}  (FLOOR {ACCURACY_FLOOR})", flush=True)
     assert acc >= ACCURACY_FLOOR, f"QP 准确率 {acc:.3f} 跌破门控 {ACCURACY_FLOOR}"

@@ -78,11 +78,22 @@ async def run_tool_loop(
     max_hops: int = _MAX_HOPS,
     timeout: float = 30.0,
     trace: list[dict] | None = None,
+    native_toolfeed: bool = True,
 ) -> str:
     """两步走循环：≤max_hops 跳，返回最终自然语言文本。messages 原地追加每跳的 tool 往返。
 
     trace：评测诊断用，传入非 None 的列表则每跳 append {"tool", "args", "result"}，
            默认 None 不收集（不影响任何现有调用方行为）。
+
+    native_toolfeed：控制工具结果回喂格式（B2，A/B 裁决后默认 True）。
+    A/B 评测：native 两轮一致 0.900 vs text 两轮 0.833，agg-time 抖动被 native 接地修平。
+    - True（默认，生产）：OpenAI 风格 native 回喂——assistant{tool_calls}+role=tool 两帧。
+      Task 14 probe 结论：client.py:249 路由下带 tools kwarg 的调用走 GGUF 原生
+      Jinja2ChatFormatter，该模板原生支持 role=tool，渲染成 <|tool_call>/<|tool_response>
+      block（Gemma 原生期待格式）。
+    - False（兼容回退）：纯文本回喂——assistant 喂 auto 步原始 content（含
+      <|tool_call> 特殊 token），工具结果用 user 消息「工具 NAME 返回：...」。
+      历史背景：路由守卫建立前的 workaround，彼时 role=tool 会撞 Jinja raise_exception。
 
     异常契约：
     - asyncio.TimeoutError / asyncio.CancelledError 放行给 caller（route 兜底返回友好错误）。
@@ -94,7 +105,7 @@ async def run_tool_loop(
       收尾跳返回自然语言 → 直接作答；收尾跳仍含 tool_call 标记 → strip 后有文本则返回，
       strip 后为空 → 落 _FALLBACK_TEXT（双兜底）。
     """
-    for _ in range(max_hops):
+    for hop_idx in range(max_hops):
         # step A — auto 跳：抠工具名。
         # ✅ Task 7.5 probe 已实证「假设 7」成立：service.infer 在 auto 跳返回 FunctionGemma
         #   content 串（finish_reason=stop，不撞 service 护栏），happy path 即此分支。
@@ -130,15 +141,27 @@ async def run_tool_loop(
         if trace is not None:
             trace.append({"tool": name, "args": args, "result": result})
 
-        # 回喂（单点，纯文本，Task 7.5 probe 实证定案）：
-        # **不**用 OpenAI 风格 assistant{tool_calls}+role=tool——
-        # 那会撞这个 GGUF 的 Jinja 模板 `UndefinedError: 'raise_exception' is undefined`（状态相关、不稳）。
-        # 改纯文本：assistant 喂 auto 步原始 content（模型自吐的 <|tool_call>...，特殊 token 模型认得），
-        # tool 结果用纯文本 user 消息。实测 3 次确定性稳定渲染 + 自然语言收尾、不再无脑调工具。
-        messages.append({"role": "assistant", "content": text})
-        messages.append(
-            {"role": "user", "content": f"工具 {name} 返回：{json.dumps(result, ensure_ascii=False)}"}
-        )
+        # 回喂（单点）：native/text 取舍与 A/B 数字见函数 docstring。
+        if native_toolfeed:
+            call_id = f"call_{hop_idx}"
+            messages.append({
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
+                }],
+            })
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": json.dumps(result, ensure_ascii=False),
+            })
+        else:
+            messages.append({"role": "assistant", "content": text})
+            messages.append(
+                {"role": "user", "content": f"工具 {name} 返回：{json.dumps(result, ensure_ascii=False)}"}
+            )
 
     # D1：跑满不丢已查数据——追加无工具收尾跳，已回喂的工具结果都在 messages 里。
     messages.append({"role": "user", "content": _CLOSING_PROMPT})
@@ -166,11 +189,15 @@ async def run_qp_query(
     service: "LLMService",
     timeout: float = 30.0,
     trace: list[dict] | None = None,
+    native_toolfeed: bool = True,
 ) -> str:
     """QP 入口：拼场次目录 + 极简 system → 跑两步走循环 → 返回自然语言答案。
 
     trace：评测诊断用，传入非 None 的列表则每跳 append {"tool", "args", "result"}，
            透传给 run_tool_loop，默认 None 不收集。
+
+    native_toolfeed：透传给 run_tool_loop；默认 True（native role=tool 回喂，
+    A/B 裁决 native 0.900×2 vs text 0.833×2），False 为兼容回退（纯文本回喂）。
     """
     # 场次目录是同步 SQLite I/O，包 to_thread 不阻塞事件循环（与 step C executor 的 to_thread 一致）。
     catalog = await asyncio.to_thread(build_scene_catalog, dal)
@@ -178,4 +205,7 @@ async def run_qp_query(
         {"role": "system", "content": _QP_SYSTEM},
         {"role": "user", "content": f"{catalog}\n\n用户提问：{text}"},
     ]
-    return await run_tool_loop(messages, service=service, dal=dal, timeout=timeout, trace=trace)
+    return await run_tool_loop(
+        messages, service=service, dal=dal, timeout=timeout, trace=trace,
+        native_toolfeed=native_toolfeed,
+    )

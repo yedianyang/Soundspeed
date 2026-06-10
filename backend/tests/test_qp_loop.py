@@ -86,8 +86,8 @@ async def test_loop_single_hop_then_answer() -> None:
     answer = await run_tool_loop(messages, service=svc, dal=_StubDAL())
     assert answer == "第一场一共拍了 3 条。"
     assert svc.infer_tool_calls == 1
-    # 工具结果被回喂进 messages（纯文本格式，Task 7.5 实证：assistant 原始 content + user「工具…返回…」）
-    assert any(m["role"] == "user" and m["content"].startswith("工具 ") for m in messages)
+    # 工具结果被回喂进 messages（默认 native 格式：assistant{tool_calls} + role=tool）
+    assert any(m["role"] == "tool" for m in messages)
 
 
 @pytest.mark.asyncio
@@ -120,8 +120,8 @@ async def test_loop_feeds_executor_error_back() -> None:
     messages = [{"role": "user", "content": "第999场拍了多少"}]
     answer = await run_tool_loop(messages, service=svc, dal=_StubDAL())
     assert "999" in answer
-    # error 串被回喂（纯文本 user 消息「工具 count_takes 返回：{...error...}」）
-    fed = [m for m in messages if m["role"] == "user" and m["content"].startswith("工具 ")][0]
+    # error 串被回喂（默认 native 格式：role=tool 帧 content 含 error）
+    fed = [m for m in messages if m["role"] == "tool"][0]
     assert "error" in fed["content"]
 
 
@@ -139,8 +139,8 @@ async def test_loop_forced_parse_failure_feeds_error() -> None:
     answer = await run_tool_loop(messages, service=svc, dal=_StubDAL())
     # 循环不崩，模型能收尾
     assert isinstance(answer, str) and answer
-    # error 被回喂为 role=user「工具…返回…」消息
-    fed = [m for m in messages if m["role"] == "user" and m["content"].startswith("工具 ")]
+    # error 被回喂为 role=tool 帧（默认 native 格式）
+    fed = [m for m in messages if m["role"] == "tool"]
     assert fed, "取参失败的 error 应该被回喂进 messages"
     assert "error" in fed[0]["content"]
 
@@ -274,3 +274,39 @@ async def test_loop_exhausted_closing_prefix_plus_tool_call_returns_prefix() -> 
     )
     assert answer == "已查到第一场共 3 条。"
     assert svc.infer_calls == 6
+
+
+# ── B2 native role=tool 回喂测试（A/B 裁决后 native 转正为默认） ──────────────
+
+@pytest.mark.asyncio
+async def test_loop_native_toolfeed_message_shape() -> None:
+    # 默认（不传 flag）= native 回喂:assistant{tool_calls} + role=tool 两帧
+    svc = _ScriptedService(
+        auto_replies=[_TC, "第一场一共拍了 3 条。"],
+        forced_args=[{"scene_ref": "1"}],
+    )
+    messages = [{"role": "user", "content": "第一场拍了多少条"}]
+    answer = await run_tool_loop(messages, service=svc, dal=_StubDAL())
+    assert answer == "第一场一共拍了 3 条。"
+    # 回喂两帧:assistant{tool_calls} + role=tool,不是纯文本
+    assistant_frame = messages[1]
+    tool_frame = messages[2]
+    assert assistant_frame["role"] == "assistant"
+    assert assistant_frame["tool_calls"][0]["function"]["name"] == "count_takes"
+    assert json.loads(assistant_frame["tool_calls"][0]["function"]["arguments"]) == {"scene_ref": "1"}
+    assert tool_frame["role"] == "tool"
+    assert tool_frame["tool_call_id"] == assistant_frame["tool_calls"][0]["id"]
+    assert "条数" in tool_frame["content"]
+
+
+@pytest.mark.asyncio
+async def test_loop_text_toolfeed_fallback_shape() -> None:
+    # 兼容回退模式（native_toolfeed=False）:assistant 纯 content + user「工具…返回…」
+    svc = _ScriptedService(
+        auto_replies=[_TC, "第一场一共拍了 3 条。"],
+        forced_args=[{"scene_ref": "1"}],
+    )
+    messages = [{"role": "user", "content": "第一场拍了多少条"}]
+    await run_tool_loop(messages, service=svc, dal=_StubDAL(), native_toolfeed=False)
+    assert messages[1]["role"] == "assistant" and "tool_calls" not in messages[1]
+    assert messages[2]["role"] == "user" and messages[2]["content"].startswith("工具 count_takes 返回：")
