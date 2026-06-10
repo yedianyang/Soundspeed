@@ -48,7 +48,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let detail = `${init?.method ?? "GET"} ${path} → ${res.status}`
     try {
       const j = await res.json()
-      if (j?.detail) detail = String(j.detail)
+      if (typeof j?.detail === "string") detail = j.detail
     } catch {
       /* 忽略非 JSON 错误体 */
     }
@@ -72,7 +72,7 @@ async function requestMultipart<T>(path: string, fd: FormData): Promise<T> {
     let detail = `POST ${path} → ${res.status}`
     try {
       const j = await res.json()
-      if (j?.detail) detail = String(j.detail)
+      if (typeof j?.detail === "string") detail = j.detail
     } catch {
       /* 忽略非 JSON 错误体 */
     }
@@ -218,7 +218,7 @@ async function postNoBody<T>(path: string): Promise<T> {
     let detail = `POST ${path} → ${res.status}`
     try {
       const j = await res.json()
-      if (j?.detail) detail = String(j.detail)
+      if (typeof j?.detail === "string") detail = j.detail
     } catch {
       /* 忽略非 JSON 错误体 */
     }
@@ -372,7 +372,7 @@ export async function uploadScript(file: File): Promise<UploadSavedResult> {
     let detail = `upload → ${res.status}`
     try {
       const j = await res.json()
-      if (j?.detail) detail = String(j.detail)
+      if (typeof j?.detail === "string") detail = j.detail
     } catch { /* 忽略非 JSON 错误体 */ }
     throw new ApiError(res.status, detail)
   }

@@ -91,7 +91,7 @@ async def set_engine(
     if engine not in _ENGINE_LANGUAGES:
         raise HTTPException(status_code=422, detail=f"未知 ASR 引擎: {engine}")
     if session.running:
-        raise HTTPException(status_code=409, detail="正在录制(take),无法切换引擎")
+        raise HTTPException(status_code=409, detail="录制中不可切换引擎")
     try:
         # warmup 可能分钟级(首次 modelscope 下载 ~1GB),移出事件循环避免冻死全部请求
         await asyncio.to_thread(session.set_engine, engine)
