@@ -8,12 +8,14 @@ from backend.llm.tools.transcript import (
     build_count_takes_tool,
     build_get_scene_info_tool,
     build_list_characters_tool,
+    build_list_scenes_tool,
     build_qp_tools,
     build_query_database_tool,
     build_search_script_lines_tool,
     count_takes_executor,
     get_scene_info_executor,
     list_characters_executor,
+    list_scenes_executor,
     query_database_executor,
     search_script_lines_executor,
 )
@@ -23,6 +25,7 @@ _BUILDERS = [
     build_get_scene_info_tool,
     build_list_characters_tool,
     build_search_script_lines_tool,
+    build_list_scenes_tool,
     build_query_database_tool,
 ]
 
@@ -50,7 +53,7 @@ def test_tool_params_all_flat_scalar(builder) -> None:
         assert _is_flat_scalar(prop), f"参数 {name} 非扁平标量: {prop}"
 
 
-def test_build_qp_tools_returns_five_named() -> None:
+def test_build_qp_tools_returns_six_named() -> None:
     tools = build_qp_tools()
     names = [t["function"]["name"] for t in tools]
     assert names == [
@@ -58,6 +61,7 @@ def test_build_qp_tools_returns_five_named() -> None:
         "get_scene_info",
         "list_characters",
         "search_script_lines",
+        "list_scenes",
         "query_database",
     ]
 
@@ -205,3 +209,31 @@ def test_scene_ref_accepts_int(seeded_dal: DAL) -> None:
     # 要么正常解析到场次，要么返 error；无论哪种都不能抛异常
     assert isinstance(res, dict)
     assert "条数" in res or "error" in res
+
+
+# ---------------------------------------------------------------------------
+# B6 list_scenes 新工具测试（Task 11）
+# ---------------------------------------------------------------------------
+
+
+def test_list_scenes_tool_schema() -> None:
+    from backend.llm.tools.transcript import build_list_scenes_tool
+    t = build_list_scenes_tool()
+    assert t["function"]["name"] == "list_scenes"
+    props = t["function"]["parameters"]["properties"]
+    assert set(props) == {"location", "time_of_day", "int_ext"}
+    assert t["function"]["parameters"]["required"] == []
+
+
+def test_list_scenes_executor_filter_and_aggregate(tmp_dal) -> None:
+    from backend.llm.tools.transcript import list_scenes_executor
+    from backend.tests.qp_eval_seed import seed_qp_eval_db
+    seed_qp_eval_db(tmp_dal)
+    out = list_scenes_executor({"location": "江城家"}, tmp_dal)
+    assert out["总场数"] == 12
+    assert out["按时间"] == {"日": 4, "夜": 4, "未注明": 4}
+    assert len(out["场次"]) == 12
+    out2 = list_scenes_executor({"location": "江城家", "time_of_day": "夜"}, tmp_dal)
+    assert out2["总场数"] == 4
+    out3 = list_scenes_executor({}, tmp_dal)
+    assert out3["总场数"] == 16  # 空参数=全剧路径

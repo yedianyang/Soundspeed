@@ -81,8 +81,8 @@ def list_tools(domain: str | None = None) -> list[str]:
 
 # ---------------------------------------------------------------------------
 # 模块级注册：Tier 1（L2 report_script_analysis + note structure_note，executor=None）
-#             + Tier 2 QP 5 工具（count_takes/get_scene_info/list_characters/
-#               search_script_lines/query_database，真实 executor）
+#             + Tier 2 QP 6 工具（count_takes/get_scene_info/list_characters/
+#               search_script_lines/list_scenes/query_database，真实 executor）
 # ---------------------------------------------------------------------------
 
 def _bootstrap() -> None:
@@ -98,15 +98,18 @@ def _bootstrap() -> None:
     register(ROUTE_TOOL_NAME, build_route_memo_tool(), executor=None)  # 入口调度器 forced 工具
 
     # QP 工具家（Tier 2，executor!=None 首个真实消费者；note/script 仍是 None）
+    # 6 工具：count_takes/get_scene_info/list_characters/search_script_lines/list_scenes/query_database
     from backend.llm.tools.transcript import (  # noqa: PLC0415
         build_count_takes_tool,
         build_get_scene_info_tool,
         build_list_characters_tool,
+        build_list_scenes_tool,
         build_query_database_tool,
         build_search_script_lines_tool,
         count_takes_executor,
         get_scene_info_executor,
         list_characters_executor,
+        list_scenes_executor,
         query_database_executor,
         search_script_lines_executor,
     )
@@ -115,6 +118,7 @@ def _bootstrap() -> None:
     register("get_scene_info", build_get_scene_info_tool(), executor=get_scene_info_executor)
     register("list_characters", build_list_characters_tool(), executor=list_characters_executor)
     register("search_script_lines", build_search_script_lines_tool(), executor=search_script_lines_executor)
+    register("list_scenes", build_list_scenes_tool(), executor=list_scenes_executor)
     register("query_database", build_query_database_tool(), executor=query_database_executor)
 
 

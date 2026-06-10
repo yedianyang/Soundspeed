@@ -136,7 +136,7 @@ def build_query_database_tool() -> dict:
         "function": {
             "name": "query_database",
             "description": (
-                "万能笔：当上面四个工具都覆盖不了时，写一条只读 SQL 直接查数据库。"
+                "万能笔：当上面这些工具都覆盖不了时，写一条只读 SQL 直接查数据库。"
                 "只允许 SELECT。主要表：scenes(scene_id,scene_code,location,int_ext,time_of_day,shoot_date)、"
                 "takes(take_id,scene_id,shot,take_number,status,deleted_at)、"
                 "script_lines(line_no,character,text,script_id)、scripts(script_id,scene_id)。"
@@ -156,13 +156,38 @@ def build_query_database_tool() -> dict:
     }
 
 
+def build_list_scenes_tool() -> dict:
+    """构造 list_scenes OpenAI 风格 tool dict。
+
+    Returns:
+        type="function"，name="list_scenes" 的工具字典。
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "list_scenes",
+            "description": "按地点/时间/内外景筛选场次并统计数量。问「某地点有几场戏/几场日戏夜戏/哪些场在哪拍」用它;不填条件=全剧统计。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "可选地点关键词，如 '江城家'；不填则不限"},
+                    "time_of_day": {"type": "string", "enum": ["日", "夜", "晨", "黄昏"], "description": "可选时间过滤；不填则不限"},
+                    "int_ext": {"type": "string", "enum": ["内", "外"], "description": "可选内外景过滤；不填则不限"},
+                },
+                "required": [],
+            },
+        },
+    }
+
+
 def build_qp_tools() -> list[dict]:
-    """返回 QP 全部 5 个工具 schema（顺序固定，供 config.query_session 与测试用）。"""
+    """返回 QP 全部 6 个工具 schema（顺序固定，供 config.query_session 与测试用）。"""
     return [
         build_count_takes_tool(),
         build_get_scene_info_tool(),
         build_list_characters_tool(),
         build_search_script_lines_tool(),
+        build_list_scenes_tool(),
         build_query_database_tool(),
     ]
 
@@ -259,3 +284,35 @@ def query_database_executor(args: dict, dal: "DAL") -> dict:
         return res
     # rows 已是 dict 列表（dal.query_readonly），裸 "columns" 键不回喂
     return {"行数": res["row_count"], "结果": res["rows"], "截断": res["truncated"]}
+
+
+def list_scenes_executor(args: dict, dal: "DAL") -> dict:
+    """过滤用子串匹配（「内」命中「室内」），聚合算在这里——模型只转述不计算。"""
+    loc = str(args.get("location") or "").strip()
+    tod = str(args.get("time_of_day") or "").strip()
+    int_ext = str(args.get("int_ext") or "").strip()
+
+    def _hit(s: dict) -> bool:
+        if loc and loc not in (s["location"] or ""):
+            return False
+        if tod and tod not in (s["time_of_day"] or ""):
+            return False
+        if int_ext and int_ext not in (s["int_ext"] or ""):
+            return False
+        return True
+
+    hits = [s for s in dal.list_scenes_readonly() if _hit(s)]
+    # by_tod 键序=场次创建序首现顺序(list_scenes_readonly ORDER BY 稳定);enum 由 grammar 约束,executor 不重复校验
+    by_tod: dict[str, int] = {}
+    for s in hits:
+        key = s["time_of_day"] or "未注明"
+        by_tod[key] = by_tod.get(key, 0) + 1
+    cond = "、".join(v for v in (loc, tod, int_ext) if v) or "全剧"
+    parts = "、".join(f"{k}{v}场" for k, v in by_tod.items())
+    return {
+        "筛选": cond,
+        "总场数": len(hits),
+        "按时间": by_tod,
+        "场次": [s["scene_code"] for s in hits],
+        "摘要": f"{cond}共{len(hits)}场" + (f"({parts})" if parts else ""),
+    }
