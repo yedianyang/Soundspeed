@@ -29,10 +29,10 @@ QP_TOOL_NAMES: tuple[str, ...] = tuple(
 
 @functools.lru_cache(maxsize=1)
 def extract_tool_declarations_text() -> str:
-    """从 GGUF chat_template 提取 6 工具的原生 <|tool>...<tool|> 声明块。
+    """从 GGUF chat_template 提取 8 工具(7 QP + note) 的原生 <|tool>...<tool|> 声明块。
 
     vocab_only=True 加载（不上 Metal，秒级），仅读 tokenizer/metadata。
-    渲染 6 工具声明到 dummy messages，正则提取所有 <|tool>...<tool|> 块拼接返回。
+    渲染 8 工具声明(7 QP + note) 到 dummy messages，正则提取所有 <|tool>...<tool|> 块拼接返回。
     详见 probe_c3_text_decl.py extract_tool_declarations_text()。
 
     lru_cache(maxsize=1)：GGUF chat_template 运行时不变，结果安全缓存。

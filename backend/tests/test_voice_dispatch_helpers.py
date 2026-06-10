@@ -8,7 +8,7 @@ from backend.pipelines.qp_query import _scrape_tool_name
 
 
 def test_build_hop_a_system_contains_tool_names():
-    """build_hop_a_system 返回的 system content 包含 6 工具名（从 GGUF 提取的原生声明）。
+    """build_hop_a_system 返回的 system content 包含 8 工具名(7 QP + note)（从 GGUF 提取的原生声明）。
     因 GGUF 提取需要模型文件，此测试用 patch 替换提取函数，只验 build_hop_a_system 组装逻辑。
     """
     import backend.pipelines.voice_dispatch_helpers as vdh
@@ -27,7 +27,8 @@ def test_build_hop_a_system_contains_tool_names():
 def test_note_qp_tool_names_disjoint():
     assert set(NOTE_TOOL_NAMES).isdisjoint(set(QP_TOOL_NAMES))
     assert len(NOTE_TOOL_NAMES) >= 1   # 至少 structure_note
-    assert len(QP_TOOL_NAMES) >= 5    # 5 QP 工具
+    assert len(QP_TOOL_NAMES) == 7  # 7 QP 工具(含 list_scenes/get_scene_script),误删即红
+    assert "list_scenes" in QP_TOOL_NAMES and "get_scene_script" in QP_TOOL_NAMES
 
 
 def test_scrape_tool_name_from_hop_a_output():

@@ -1,7 +1,7 @@
 """语音调度器管线（块④ 形态 A，2026-06-06 spike 坐实）。
 
 两步走 hop A/B：
-  hop A: infer_voice（文本注入 6 工具声明，voice_dispatch_free 纯生成）
+  hop A: infer_voice（文本注入 8 工具声明(7 QP + note)，voice_dispatch_free 纯生成）
          + _scrape_tool_name 抠工具名
   按工具名分流：
     structure_note → note 分支（hop B forced note_struct 取参 → _persist_np_output_callable）
@@ -119,7 +119,7 @@ async def run_voice_dispatch(
         },
     ]
 
-    # ── hop A：infer_voice（纯生成，文本注入 6 工具声明，无 tools/tool_choice） ──
+    # ── hop A：infer_voice（纯生成，文本注入 8 工具声明(7 QP + note)，无 tools/tool_choice） ──
     # audio 是 infer_voice 的位置参数（service.py:289）
     tool_name: str | None = None
     hop_a_text: str = ""

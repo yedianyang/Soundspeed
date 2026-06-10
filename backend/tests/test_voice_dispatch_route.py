@@ -42,7 +42,7 @@ def _make_client(dal: DAL, monkeypatch) -> TestClient:
     # patch 使用方命名空间 takes.*（from-import 绑定）。
     monkeypatch.setattr(
         "backend.api.routes.takes.build_scene_catalog",
-        lambda dal: "当前项目场次目录（顺序号. 编号 ｜ 内外景 地点 时间）：\n1. SC001 ｜ 内景 摄影棚\n（共 1 场）",
+        lambda dal: "当前项目已有场次（编号）：Scene_1（共 1 场）。地点/时间/角色等信息用工具查询。",
     )
     orch = create_orchestrator(dal)
     app = create_app(orch, llm_service=_StubService())
@@ -321,7 +321,7 @@ def test_voice_dispatch_receives_scene_context(dal: DAL, monkeypatch) -> None:
     monkeypatch.setattr("backend.api.routes.takes.run_voice_dispatch", _fake_dispatch)
     monkeypatch.setattr(
         "backend.api.routes.takes.build_scene_catalog",
-        lambda dal: "当前项目场次目录（顺序号. 编号 ｜ 内外景 地点 时间）：\n1. SC001 ｜ 内景 摄影棚\n（共 1 场）",
+        lambda dal: "当前项目已有场次（编号）：Scene_1（共 1 场）。地点/时间/角色等信息用工具查询。",
     )
 
     r = client.post(
@@ -333,8 +333,8 @@ def test_voice_dispatch_receives_scene_context(dal: DAL, monkeypatch) -> None:
     assert r.status_code == 202, r.text
     sc = received_kw.get("scene_context", "")
     assert sc != "", "scene_context 不应为空串（D4：必须注入场次目录）"
-    # mock 的 catalog 含「场次目录」开头行
-    assert "场次目录" in sc, f"scene_context 应含场次目录，实际：{sc!r}"
+    # mock 的 catalog 含「已有场次」
+    assert "已有场次" in sc, f"scene_context 应含已有场次，实际：{sc!r}"
 
 
 def test_voice_dispatch_emits_idle_on_error(dal: DAL, monkeypatch) -> None:

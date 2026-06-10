@@ -11,11 +11,12 @@ import pytest
 
 FIXTURE = Path(__file__).parent / "fixtures" / "qp_eval.jsonl"
 RUNS_PER_CASE = 3
-# 基线 2026-06-11:0.567 → D5 0.667 → 描述重审 0.767 → catalog 瘦身 0.833(两轮一致,commit 891de21)。
+# 基线 2026-06-11:0.567 → D5 0.667 → 描述重审 0.767 → catalog 瘦身 0.833(两轮一致,描述重审+catalog 瘦身 commit)。
 # 终态已知失败:mic-advice 0/3(prompt 禁令,实验否决记 design doc)+ agg-time 2/3 抖动(候选 B2)。
 # native 回喂默认开启(B2,两轮 0.900);FLOOR=0.900-0.10。
 # A/B:native 0.900×2 vs text 0.833×2,agg-time 抖动被 native 接地修平,唯余 mic-advice 0/3。
 ACCURACY_FLOOR = 0.80
+# 注意:QP_EVAL_TEXT=1 回退模式仅 0.833,高出 FLOOR 一个 case,翻 1 即触底——它是语音续跳回喂格式的唯一回归网,贴线属预期。
 
 
 def _load_cases() -> list[dict]:
