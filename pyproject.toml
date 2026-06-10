@@ -36,6 +36,7 @@ pythonpath = ["."]
 markers = [
     "smoke: 需要真实模型文件，默认 skip（用 --smoke flag 激活）",
     "np_eval: NP 提取评测 harness，需真 E4B，GEMMA_MODEL_PATH 未设则 skip",
+    "qp_eval: QP 查询评测 harness,需真 E4B,GEMMA_MODEL_PATH 未设则 skip",
 ]
 
 [tool.ruff]
