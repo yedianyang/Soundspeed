@@ -96,3 +96,13 @@ session-*.zip
 
 # 设备探测结果 —— 每台机不同，是本机环境快照，不入库（scripts/detect_device.py 生成）
 device-detected.json
+Demo_Soundspeed.mp4
+
+# 内部开发过程文档 —— 本地保留，不进公开仓库（git rm --cached 收拢，详见 README 项目结构）
+docs/specs/
+docs/plans/
+docs/reviews/
+docs/superpowers/
+docs/frontend-admin-ui-handoff.md
+docs/orchestrator-handoff.md
+docs/development-process.md

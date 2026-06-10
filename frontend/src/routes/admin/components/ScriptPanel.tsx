@@ -28,16 +28,15 @@ import {
 import {
   ChevronLeft,
   ChevronRight,
-  Upload,
+  FileText,
   Camera,
-  Pencil,
   RotateCcw,
   Check,
   Loader2,
   X,
 } from "lucide-react"
 
-// ---- OCR 本地 mock（决策点 2：上传/拍照不接后端，仍走本地预览）----
+// ---- OCR 本地 mock（决策点 2：不接后端，仍走本地预览）----
 
 type OcrLine =
   | { type: "action"; text: string }
@@ -80,7 +79,6 @@ export function ScriptPanel() {
   const [ocrScene, setOcrScene] = useState<OcrScene | null>(null)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const cameraInputRef = useRef<HTMLInputElement>(null)
   const [updateOpen, setUpdateOpen] = useState(false) // 选中场更新对话框
   const [confirmUpdateAll, setConfirmUpdateAll] = useState(false) // 整本重传「更新全本」确认
 
@@ -158,7 +156,6 @@ export function ScriptPanel() {
 
   // ---- 阶段 1：上传（只入库，不碰 Gemma，秒回）----
   const triggerUpload = () => fileInputRef.current?.click()
-  const triggerCamera = () => cameraInputRef.current?.click()
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -200,14 +197,6 @@ export function ScriptPanel() {
       return
     }
     void doParse("skip")
-  }
-
-  // 相机仍走本地 mock（拍照 OCR 属后续 ticket，暂不接后端）。
-  const handleCameraChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    e.target.value = ""
-    if (!file) return
-    setOcrScene(MOCK_OCR)
   }
 
   // 解析进行中/刚完成 → 刷新场次/剧本，让已入库的场「逐个冒出来」（updated_at 每场变一次）。
@@ -264,16 +253,8 @@ export function ScriptPanel() {
             {upload.isPending ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (
-              <Upload className="size-4" />
+              <FileText className="size-4" />
             )}
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            title="拍照识别"
-            onClick={triggerCamera}
-          >
-            <Camera className="size-4" />
           </Button>
         </div>
       </div>
@@ -319,14 +300,6 @@ export function ScriptPanel() {
         accept=".txt,.md,.markdown,.docx,.pdf"
         className="hidden"
         onChange={handleFileUpload}
-      />
-      <input
-        ref={cameraInputRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        className="hidden"
-        onChange={handleCameraChange}
       />
 
       {/* 阶段 1：上传中（秒回）*/}
@@ -483,7 +456,7 @@ export function ScriptPanel() {
                 title={`更新本场（SCENE ${viewScene.scene_code ?? "—"}）`}
                 onClick={() => setUpdateOpen(true)}
               >
-                <Pencil className="size-3.5" />
+                <Camera className="size-3.5" />
               </Button>
             )}
           </div>
