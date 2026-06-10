@@ -98,6 +98,17 @@ class ChannelVADSegmenter:
         self._reset_segment()
         return [seg] if seg is not None else []
 
+    @property
+    def in_speech(self) -> bool:
+        """是否处于语音段中(纯只读,供 StreamDriver partial 喂料判定)。"""
+        return self._state == _SPEECH
+
+    @property
+    def segment_start_frame(self) -> int | None:
+        """在制语音段的起始绝对帧(== 未来 final 的 seg.start_frame,partial 的 turn 键);
+        非语音态返回 None。纯只读,不动状态机。"""
+        return self._seg_start_abs if self._state == _SPEECH else None
+
     # ---- 内部 ----
 
     def _process_frame(self, frame: np.ndarray, abs_start: int) -> SpeechSegment | None:
