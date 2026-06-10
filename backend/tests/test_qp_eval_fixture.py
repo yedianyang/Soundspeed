@@ -56,7 +56,5 @@ def test_seed_db_invariants(tmp_dal) -> None:
     assert info is not None, "场16 get_scene_info 返回 None"
     assert info["character_count"] == 4 and info["int_ext"] == "内"
 
-    # 种子台词存在性用 LIKE 验证,不走 FTS:trigram 分词 2 字查询(如「合同」)
-    # 现为 0 命中,是已知生产 bug,修复归 Task 8(search_script_lines 短查询回退)。
-    res = tmp_dal.query_readonly("SELECT text FROM script_lines WHERE text LIKE '%合同%'")
-    assert res["row_count"] == 1 and "合同" in res["rows"][0]["text"]
+    hits = tmp_dal.search_script_lines("合同")
+    assert len(hits) == 1 and "合同" in hits[0]["text"]

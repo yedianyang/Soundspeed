@@ -169,9 +169,17 @@ def build_qp_tools() -> list[dict]:
 
 # ---------------------------------------------------------------------------
 # executor（spec §5.3：executor(args, dal) -> dict；DAL 读全走只读连接，D-QP-12）
+#
+# D5 回喂本地化：4B 模型读不懂裸 DB 列名/英文枚举码，会答「说没有」。executor
+# 把回喂结果译成中文键 + 中文值（status 码→中文、NULL→「未注明」、
+# character=NULL→「(舞台指示)」），模型只转述，不翻译不计算。
+# error 形状（{"error": ...}）全部不变。
 # ---------------------------------------------------------------------------
 
 _SCENE_NOT_FOUND = "找不到场次 {ref!r}，数据库里没有这一场（不要用相近场次顶替）。"
+
+# take status 枚举码 → 中文（schema CHECK pass/ng/keep/tbd；enum 之外的值原样回显）
+_STATUS_ZH = {"pass": "过", "ng": "NG", "keep": "保留", "tbd": "待定"}  # ng 保留英文:片场通用词,对 4B 模型比「不过/废」更无歧义
 
 
 def count_takes_executor(args: dict, dal: "DAL") -> dict:
@@ -180,9 +188,9 @@ def count_takes_executor(args: dict, dal: "DAL") -> dict:
     scene_id = dal.resolve_scene_id(ref)
     if scene_id is None:
         return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
-    result: dict = {"scene_ref": ref, "count": dal.count_takes(scene_id, status=status)}
+    result: dict = {"场次": ref, "条数": dal.count_takes(scene_id, status=status)}
     if status is not None:
-        result["status"] = status
+        result["状态"] = _STATUS_ZH.get(status, status)
     return result
 
 
@@ -194,7 +202,14 @@ def get_scene_info_executor(args: dict, dal: "DAL") -> dict:
     info = dal.get_scene_info(scene_id)
     if info is None:
         return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
-    return info
+    return {
+        "场次": info["scene_code"],
+        "地点": info["location"] or "未注明",
+        "内外景": info["int_ext"] or "未注明",
+        "时间": info["time_of_day"] or "未注明",
+        "拍摄日期": info["shoot_date"] or "未注明",
+        "角色数": info["character_count"],
+    }
 
 
 def list_characters_executor(args: dict, dal: "DAL") -> dict:
@@ -203,7 +218,7 @@ def list_characters_executor(args: dict, dal: "DAL") -> dict:
     if scene_id is None:
         return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
     chars = dal.list_characters(scene_id)
-    return {"scene_ref": ref, "characters": chars, "count": len(chars)}
+    return {"场次": ref, "角色": chars, "人数": len(chars)}
 
 
 def search_script_lines_executor(args: dict, dal: "DAL") -> dict:
@@ -220,11 +235,27 @@ def search_script_lines_executor(args: dict, dal: "DAL") -> dict:
         matches = dal.search_script_lines(query, scene_id=scene_id)
     except Exception as exc:  # FTS 语法错误等，包成 error 让模型自纠
         return {"error": f"检索失败：{exc}"}
-    return {"query": query, "matches": matches, "count": len(matches)}
+    return {
+        "关键词": query,
+        "匹配数": len(matches),
+        "匹配": [
+            {
+                "场次": m["scene_code"],
+                "行号": m["line_no"],
+                "角色": m["character"] or "(舞台指示)",
+                "台词": m["text"],
+            }
+            for m in matches
+        ],
+    }
 
 
 def query_database_executor(args: dict, dal: "DAL") -> dict:
     sql = str(args.get("sql") or "")
     if not sql.strip():
         return {"error": "sql 为空"}
-    return dal.query_readonly(sql)
+    res = dal.query_readonly(sql)
+    if "error" in res:
+        return res
+    # rows 已是 dict 列表（dal.query_readonly），裸 "columns" 键不回喂
+    return {"行数": res["row_count"], "结果": res["rows"], "截断": res["truncated"]}

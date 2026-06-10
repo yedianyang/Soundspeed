@@ -104,7 +104,15 @@ def seeded_dal(tmp_path) -> DAL:
 
 def test_count_takes_executor(seeded_dal: DAL) -> None:
     res = count_takes_executor({"scene_ref": "7"}, seeded_dal)
-    assert res["count"] == 2
+    assert res["条数"] == 2
+    assert res["场次"] == "7"
+
+
+def test_count_takes_executor_status_localized(seeded_dal: DAL) -> None:
+    # D5：status 枚举码回喂前译成中文（模型只转述，不翻译）
+    res = count_takes_executor({"scene_ref": "7", "status": "tbd"}, seeded_dal)
+    assert res["条数"] == 2
+    assert res["状态"] == "待定"
 
 
 def test_count_takes_executor_missing_scene(seeded_dal: DAL) -> None:
@@ -114,24 +122,53 @@ def test_count_takes_executor_missing_scene(seeded_dal: DAL) -> None:
 
 def test_get_scene_info_executor(seeded_dal: DAL) -> None:
     res = get_scene_info_executor({"scene_ref": "Scene_7"}, seeded_dal)
-    assert res["location"] == "天台"
-    assert res["character_count"] == 2
+    assert res["场次"] == "Scene_7"
+    assert res["地点"] == "天台"
+    assert res["内外景"] == "室外"
+    assert res["时间"] == "夜"
+    assert res["角色数"] == 2
+    assert "scene_id" not in res  # 裸 DB 主键不回喂
+
+
+def test_get_scene_info_executor_none_fields_localized(seeded_dal: DAL) -> None:
+    # D5：NULL 字段译成「未注明」，不回喂 null 让模型瞎猜
+    seeded_dal.create_scene("8")
+    res = get_scene_info_executor({"scene_ref": "8"}, seeded_dal)
+    assert res["地点"] == "未注明"
+    assert res["内外景"] == "未注明"
+    assert res["时间"] == "未注明"
+    assert res["拍摄日期"] == "未注明"
 
 
 def test_list_characters_executor(seeded_dal: DAL) -> None:
     res = list_characters_executor({"scene_ref": "7"}, seeded_dal)
-    assert sorted(res["characters"]) == ["小美", "阿强"]
+    assert sorted(res["角色"]) == ["小美", "阿强"]
+    assert res["人数"] == 2
 
 
 def test_search_script_lines_executor(seeded_dal: DAL) -> None:
     res = search_script_lines_executor({"query": "我们走吧"}, seeded_dal)
-    assert res["count"] >= 1
-    assert any("走吧" in m["text"] for m in res["matches"])
+    assert res["匹配数"] >= 1
+    assert any("走吧" in m["台词"] for m in res["匹配"])
+    assert all(m["场次"] == "Scene_7" for m in res["匹配"])  # 全剧检索带场次
+
+
+def test_search_script_lines_executor_stage_direction(seeded_dal: DAL) -> None:
+    # 舞台指示行 character=NULL → 回喂「(舞台指示)」而非 null
+    sid = seeded_dal.resolve_scene_id("7")
+    script_id = seeded_dal.insert_script(sid, "v2 raw")
+    seeded_dal.insert_script_line(script_id, 1, None, "（两人对视良久）")
+    res = search_script_lines_executor({"query": "两人对视良久"}, seeded_dal)
+    assert res["匹配数"] >= 1
+    assert res["匹配"][0]["角色"] == "(舞台指示)"
 
 
 def test_query_database_executor(seeded_dal: DAL) -> None:
     res = query_database_executor({"sql": "SELECT COUNT(*) AS n FROM scenes;"}, seeded_dal)
-    assert res["rows"][0]["n"] == 1
+    assert res["结果"][0]["n"] == 1
+    assert res["行数"] == 1
+    assert res["截断"] is False
+    assert "columns" not in res  # 裸列名清单不回喂
 
 
 def test_query_database_executor_blocks_write(seeded_dal: DAL) -> None:
@@ -167,4 +204,4 @@ def test_scene_ref_accepts_int(seeded_dal: DAL) -> None:
     res = count_takes_executor({"scene_ref": 7}, seeded_dal)
     # 要么正常解析到场次，要么返 error；无论哪种都不能抛异常
     assert isinstance(res, dict)
-    assert "count" in res or "error" in res
+    assert "条数" in res or "error" in res

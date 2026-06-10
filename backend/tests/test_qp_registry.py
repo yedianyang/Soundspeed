@@ -23,7 +23,7 @@ def test_qp_executor_callable_end_to_end(tmp_path) -> None:
     dal.create_scene("Scene_1")
     executor = registry.get_executor("count_takes")
     res = executor({"scene_ref": "1"}, dal)
-    assert res["count"] == 0
+    assert res["条数"] == 0
     dal.close()
 
 

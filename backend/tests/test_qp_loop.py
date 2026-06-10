@@ -202,7 +202,7 @@ async def test_loop_trace_collects_tool_hops() -> None:
     assert len(trace) == 1
     assert trace[0]["tool"] == "count_takes"
     assert trace[0]["args"] == {"scene_ref": "1"}
-    assert trace[0]["result"]["count"] == 3
+    assert trace[0]["result"]["条数"] == 3
 
 
 @pytest.mark.asyncio

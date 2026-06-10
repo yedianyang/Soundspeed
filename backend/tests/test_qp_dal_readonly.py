@@ -186,6 +186,30 @@ def test_get_scene_info_latest_script_version(dal: DAL) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Task 8: search_script_lines 带场次 + 短查询 LIKE 回退（trigram 2 字盲区）
+# ---------------------------------------------------------------------------
+
+
+def test_search_script_lines_carries_scene_code(tmp_dal) -> None:
+    sid = tmp_dal.create_scene("21")
+    script_id = tmp_dal.insert_script(sid, "raw")
+    tmp_dal.insert_script_line(script_id, 1, "甲", "这句话提到了螺丝刀")
+    hits = tmp_dal.search_script_lines("螺丝刀")
+    assert hits and hits[0]["scene_code"] == "21"
+
+
+def test_search_script_lines_short_query_like_fallback(tmp_dal) -> None:
+    # trigram FTS 对 2 字查询 0 命中（实证），须 LIKE 回退
+    sid = tmp_dal.create_scene("22")
+    script_id = tmp_dal.insert_script(sid, "raw")
+    tmp_dal.insert_script_line(script_id, 1, "乙", "这份合同必须签。")
+    hits = tmp_dal.search_script_lines("合同")
+    assert len(hits) == 1 and hits[0]["scene_code"] == "22"
+    tmp_dal.insert_script_line(script_id, 2, "乙", "这价格是100元整。")
+    assert tmp_dal.search_script_lines("0%") == []  # 2字含通配符:走 LIKE 且 % 被转义 → 0 命中
+
+
+# ---------------------------------------------------------------------------
 # Task 3: query_readonly 万能笔安全墙（D-QP-04）
 # ---------------------------------------------------------------------------
 
