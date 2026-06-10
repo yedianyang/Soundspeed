@@ -9,6 +9,7 @@ GET 返回 enabled=False,POST 返回 409。引擎选择不持久化,重启归位
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -92,7 +93,8 @@ async def set_engine(
     if session.running:
         raise HTTPException(status_code=409, detail="正在录制(take),无法切换引擎")
     try:
-        session.set_engine(engine)
+        # warmup 可能分钟级(首次 modelscope 下载 ~1GB),移出事件循环避免冻死全部请求
+        await asyncio.to_thread(session.set_engine, engine)
     except FunAsrNotInstalled as e:
         raise HTTPException(status_code=409, detail=str(e)) from None
     except RuntimeError as e:  # set_engine 内部的录制中守卫(双保险)
@@ -117,7 +119,7 @@ async def set_language(
     lang = body.language.strip()
     if not lang:
         raise HTTPException(status_code=422, detail="language required")
-    supported = _ENGINE_LANGUAGES.get(getattr(session, "engine", "whisper"), [])
+    supported = _ENGINE_LANGUAGES.get(session.engine, [])
     if lang not in supported:
         raise HTTPException(status_code=422, detail=f"当前引擎不支持语言: {lang}")
     session.set_language(lang)

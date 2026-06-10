@@ -52,6 +52,7 @@ class LiveAsrSession:
         self._driver: StreamDriver | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._switch_lock = threading.Lock()  # 串行化 set_engine(warmup 可能分钟级,禁止并发切换)
         self.audio_buffer = TakeAudioBuffer()  # ch1 PCM 累积，供 diarization 使用
 
     @property
@@ -97,24 +98,29 @@ class LiveAsrSession:
         首次含 modelscope 下载)。重启后归位 whisper(不持久化,见设计文档)。"""
         if engine not in ("whisper", "funasr"):
             raise ValueError(f"未知 ASR 引擎: {engine}")
-        if self.running:  # 快速失败;锁内还会复检
-            raise RuntimeError("录制中不可切换引擎")
-        if engine == self._engine:
-            return
-        if engine == "funasr":
-            if self._funasr_runner is None:
-                self._funasr_runner = self._funasr_runner_factory()
-            self._funasr_runner.warmup()  # FunAsrNotInstalled 在此抛出,引擎状态不变
-            new_runner = self._funasr_runner
-        else:
-            new_runner = self._whisper_runner
-        with self._lock:
-            # 复检:warmup 阻塞期间(首次 ~1GB 下载)可能有 take.start 抢先起线程,
-            # 锁内直接读 _thread(不经 running property,语义更明确)。
-            if self._thread is not None and self._thread.is_alive():
+        if not self._switch_lock.acquire(blocking=False):
+            raise RuntimeError("引擎切换进行中,稍后重试")
+        try:
+            if self.running:  # 快速失败;锁内还会复检
                 raise RuntimeError("录制中不可切换引擎")
-            self._runner = new_runner
-            self._engine = engine
+            if engine == self._engine:
+                return
+            if engine == "funasr":
+                if self._funasr_runner is None:
+                    self._funasr_runner = self._funasr_runner_factory()
+                self._funasr_runner.warmup()  # FunAsrNotInstalled 在此抛出,引擎状态不变
+                new_runner = self._funasr_runner
+            else:
+                new_runner = self._whisper_runner
+            with self._lock:
+                # 复检:warmup 阻塞期间(首次 ~1GB 下载)可能有 take.start 抢先起线程,
+                # 锁内直接读 _thread(不经 running property,语义更明确)。
+                if self._thread is not None and self._thread.is_alive():
+                    raise RuntimeError("录制中不可切换引擎")
+                self._runner = new_runner
+                self._engine = engine
+        finally:
+            self._switch_lock.release()
 
     def start(self) -> None:
         """起后台线程。已在运行则忽略（幂等）。"""

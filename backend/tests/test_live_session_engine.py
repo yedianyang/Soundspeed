@@ -103,3 +103,15 @@ def test_set_engine_funasr_warmup_failure_leaves_engine_unchanged():
         s.set_engine("funasr")
     assert s.engine == "whisper"
     assert s.model_size == "fake-whisper"
+
+
+def test_set_engine_rejected_while_switch_in_progress():
+    s = _session(funasr_factory=lambda: _FakeRunner(model_size="paraformer-zh"))
+    assert s._switch_lock.acquire(blocking=False)
+    try:
+        with pytest.raises(RuntimeError):
+            s.set_engine("funasr")
+    finally:
+        s._switch_lock.release()
+    s.set_engine("funasr")  # 释放后可正常切换
+    assert s.engine == "funasr"

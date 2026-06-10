@@ -144,3 +144,11 @@ def test_set_language_422_when_not_supported_by_engine():
     session = _FakeSession(engine="funasr")
     r = _client(session).post("/api/v1/asr/language", json={"language": "en"}, headers=_HDR)
     assert r.status_code == 422
+
+
+def test_set_engine_409_when_switch_in_progress():
+    session = _FakeSession()
+    session.engine_errors["funasr"] = RuntimeError("引擎切换进行中,稍后重试")
+    r = _client(session).post("/api/v1/asr/engine", json={"engine": "funasr"}, headers=_HDR)
+    assert r.status_code == 409
+    assert "切换" in r.json()["detail"]
