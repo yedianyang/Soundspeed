@@ -28,12 +28,10 @@ from backend.core.events import (
     AudioLevelPayload,
 )
 from backend.vad.detector import VadDetector
-from backend.vad.models import SpeechSegment, VadConfig
+from backend.vad.models import SpeechSegment, VadConfig, frames_to_ms
 from backend.vad.segmenter import ChannelVADSegmenter
 
 logger = logging.getLogger(__name__)
-
-_FRAMES_PER_MS = 16  # 16kHz → 每毫秒 16 帧
 
 
 class StreamDriver:
@@ -116,8 +114,8 @@ class StreamDriver:
         topic = ASR_FINAL_CH1 if seg.ch == 0 else ASR_FINAL_CH2
         payload = AsrFinalPayload(
             text=text,
-            start_frame=round(seg.start_frame / _FRAMES_PER_MS),  # 16k 帧 → 毫秒（contract C1）
-            end_frame=round(seg.end_frame / _FRAMES_PER_MS),
+            start_frame=frames_to_ms(seg.start_frame),  # 16k 帧 → 毫秒（contract C1）
+            end_frame=frames_to_ms(seg.end_frame),
             speaker=None,            # Phase 1 不出 speaker；take.end 后回填
             take_id=None,            # orchestrator 由 session.take_id 回退
             is_partial=False,
