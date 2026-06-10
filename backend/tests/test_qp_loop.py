@@ -10,7 +10,13 @@ import json
 
 import pytest
 
-from backend.pipelines.qp_query import _build_scene_catalog, _run_executor, _scrape_tool_name, run_tool_loop
+from backend.pipelines.qp_query import (
+    _FALLBACK_TEXT,
+    _build_scene_catalog,
+    _run_executor,
+    _scrape_tool_name,
+    run_tool_loop,
+)
 
 
 def test_scrape_tool_name_functiongemma() -> None:
@@ -86,18 +92,19 @@ async def test_loop_single_hop_then_answer() -> None:
 
 @pytest.mark.asyncio
 async def test_loop_terminates_at_max_hops() -> None:
-    # 每跳都调工具、永不收尾 → 走到 5 跳兜底
+    # 每跳都调工具、永不收尾 → 跑满 5 跳后追加收尾跳，收尾跳仍返回工具调用 → 落 _FALLBACK_TEXT
+    # （更新自旧契约：D1 修复后，跑满不再直接返回兜底，而是多一次无工具收尾 infer）
     looping = "<|tool_call>call:count_takes{scene_ref:<|\"|>1<|\"|>}<tool_call|>"
     svc = _ScriptedService(
-        auto_replies=[looping] * 5,
+        auto_replies=[looping] * 5 + [looping],  # 收尾跳也返工具调用 → strip 后 fallback
         forced_args=[{"scene_ref": "1"}] * 5,
     )
     answer = await run_tool_loop(
         [{"role": "user", "content": "x"}], service=svc, dal=_StubDAL()
     )
-    assert "超过上限" in answer or "轮数" in answer
-    assert svc.infer_tool_calls == 5  # 恰好 5 跳
-    assert svc.infer_calls == 5       # off-by-one 护栏：infer 调用次数也是 5
+    assert answer == _FALLBACK_TEXT
+    assert svc.infer_tool_calls == 5   # 恰好 5 跳（收尾跳不走 forced）
+    assert svc.infer_calls == 6        # 5 跳 + 1 收尾跳
 
 
 @pytest.mark.asyncio
@@ -215,3 +222,50 @@ async def test_loop_trace_accumulates_multi_hop() -> None:
     )
     assert answer == "查完了。"
     assert [t["tool"] for t in trace] == ["count_takes", "get_scene_info"]
+
+
+# ── D1 收尾跳测试 ──────────────────────────────────────────────────────────────
+
+_TC = "<|tool_call>call:count_takes{scene_ref:<|\"|>1<|\"|>}<tool_call|>"
+
+
+@pytest.mark.asyncio
+async def test_loop_exhausted_forces_closing_answer() -> None:
+    # 5 跳全是工具调用 → 第 6 次 infer 是无工具收尾跳，其文本作为最终答案
+    svc = _ScriptedService(
+        auto_replies=[_TC] * 5 + ["已查到第一场共 3 条。"],
+        forced_args=[{"scene_ref": "1"}] * 5,
+    )
+    answer = await run_tool_loop(
+        [{"role": "user", "content": "第一场拍了多少条"}], service=svc, dal=_StubDAL(),
+    )
+    assert answer == "已查到第一场共 3 条。"
+    assert svc.infer_calls == 6  # 5 跳 + 1 收尾
+
+
+@pytest.mark.asyncio
+async def test_loop_exhausted_closing_still_tool_call_falls_back() -> None:
+    # 收尾跳还想调工具且 strip 后为空 → 才落 _FALLBACK_TEXT
+    svc = _ScriptedService(
+        auto_replies=[_TC] * 5 + [_TC],
+        forced_args=[{"scene_ref": "1"}] * 5,
+    )
+    answer = await run_tool_loop(
+        [{"role": "user", "content": "第一场拍了多少条"}], service=svc, dal=_StubDAL(),
+    )
+    assert answer == _FALLBACK_TEXT
+
+
+@pytest.mark.asyncio
+async def test_loop_exhausted_closing_prefix_plus_tool_call_returns_prefix() -> None:
+    # 收尾跳返回「前缀文本 + tool_call 块」→ strip 后返回前缀，不走 fallback
+    prefix_tc = "已查到第一场共 3 条。" + _TC
+    svc = _ScriptedService(
+        auto_replies=[_TC] * 5 + [prefix_tc],
+        forced_args=[{"scene_ref": "1"}] * 5,
+    )
+    answer = await run_tool_loop(
+        [{"role": "user", "content": "第一场拍了多少条"}], service=svc, dal=_StubDAL(),
+    )
+    assert answer == "已查到第一场共 3 条。"
+    assert svc.infer_calls == 6

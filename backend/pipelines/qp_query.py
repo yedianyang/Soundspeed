@@ -30,6 +30,11 @@ _MAX_HOPS = 5
 _FALLBACK_TEXT = "抱歉，这个问题查询轮数超过上限，没能得出结论。"
 # FunctionGemma auto content：<|tool_call>call:NAME{...}（FC spec §3.2）。名字 \w+ 在第一个 { 前。
 _TOOL_NAME_RE = re.compile(r"<\|tool_call>call:(\w+)")
+_TOOL_CALL_BLOCK_RE = re.compile(r"<\|tool_call>.*?(?:<tool_call\|>|$)", re.S)
+_CLOSING_PROMPT = (
+    "查询轮数已到上限。请只用以上工具返回的信息直接回答用户最初的问题；"
+    "如果信息确实不足，就说明目前已查到的内容。不要再调用工具。"
+)
 
 # 极简 system prompt（spec §5.5 预算纪律：先按极简跑，不稳才加且每加必量化）。
 _QP_SYSTEM = (
@@ -80,9 +85,13 @@ async def run_tool_loop(
 
     异常契约：
     - asyncio.TimeoutError / asyncio.CancelledError 放行给 caller（route 兜底返回友好错误）。
+      收尾跳的 infer 超时同样放行（与主循环跳对齐）。
     - step B 取参失败（LookupError/KeyError/JSONDecodeError/TypeError）→ 包成 error 回喂，
       模型下一跳自纠；不抛穿，循环继续。
     - step C executor 错误（_run_executor 内已包）→ 同样回喂，不抛穿。
+    - 跑满 max_hops 后追加无工具收尾跳（D1 修复）：已回喂的工具结果全在 messages 里，
+      收尾跳返回自然语言 → 直接作答；收尾跳仍含 tool_call 标记 → strip 后有文本则返回，
+      strip 后为空 → 落 _FALLBACK_TEXT（双兜底）。
     """
     for _ in range(max_hops):
         # step A — auto 跳：抠工具名。
@@ -130,7 +139,13 @@ async def run_tool_loop(
             {"role": "user", "content": f"工具 {name} 返回：{json.dumps(result, ensure_ascii=False)}"}
         )
 
-    return _FALLBACK_TEXT  # 兜底：正常 1~2 跳收尾，靠 system 防 run-on（spec §5.2）
+    # D1：跑满不丢已查数据——追加无工具收尾跳，已回喂的工具结果都在 messages 里。
+    messages.append({"role": "user", "content": _CLOSING_PROMPT})
+    text = await service.infer(messages, task_type=_QP_TASK, priority=1, timeout=timeout)
+    if _scrape_tool_name(text) is None and text.strip():
+        return text
+    stripped = _TOOL_CALL_BLOCK_RE.sub("", text).strip()
+    return stripped or _FALLBACK_TEXT
 
 
 def _build_scene_catalog(dal: "DAL") -> str:
