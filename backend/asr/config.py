@@ -24,3 +24,6 @@ class ASRConfig:
     language: str = "zh"
     n_threads: int = 4
     models_dir: str | None = None
+    # 流式 partial（spec §3.4）：partial 重转传给 whisper 的 audio_ctx（砍 encoder 墙钟，换边界
+    # 精度）。None=满窗（与 final 同）。落地前须验证 pywhispercpp Model.transcribe 接受该参数。
+    partial_audio_ctx: int | None = None

@@ -31,3 +31,12 @@ class VadConfig:
     pre_roll_ms: int = 150          # 段首回补，防吃掉起音
     post_roll_ms: int = 150         # 段尾延伸，防切掉收音
     max_segment_ms: int = 30000     # 超长强切
+    # 流式 partial（spec §3）：
+    # dataclass 默认关（0）= 安全兜底，与项目惯例一致（生产由 entrypoint 显式传，见 §4）。
+    # 生产开关走 SOUNDSPEED_PARTIAL_CHUNKS（默认 4，~800ms@chunk_ms=200），跑 large-turbo 时开。
+    partial_every_chunks: int = 0       # partial 节流周期（chunk 数）。<=0 关闭 partial
+    partial_max_window_ms: int = 12000  # 在制语音超此长度冻结 partial（封顶单次重转解码量）
+    # 安全阀去抖（spec §3.5）：吞掉 take 起始的 PortAudio 启动毛刺溢出 + 平稳后重新启用 partial，
+    # 避免「首次溢出即永久焊死」。
+    partial_grace_chunks: int = 8       # take 起始这些 chunk 内的溢出忽略（启动毛刺宽限）
+    partial_rearm_chunks: int = 15      # 跳闸后连续这些 chunk 无新溢出则重新启用 partial

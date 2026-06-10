@@ -59,6 +59,39 @@ def test_empty_segments_returns_empty_string():
     assert runner.transcribe_pcm(_pcm()) == ""
 
 
+class _CtxModel:
+    """记录 transcribe 收到的 kwargs（验证 audio_ctx 透传）。"""
+
+    def __init__(self) -> None:
+        self.kw: dict = {}
+
+    def transcribe(self, audio: np.ndarray, language: str = "", **kw: object) -> list[_FakeSeg]:
+        self.kw = dict(kw)
+        return [_FakeSeg("x")]
+
+
+def test_audio_ctx_forwarded_when_set():
+    """transcribe_pcm(audio_ctx=N) → 透传给 model.transcribe（partial 砍 encoder 墙钟）。"""
+    model = _CtxModel()
+    runner = WhisperRunner(ASRConfig(), model=model)
+    runner.transcribe_pcm(_pcm(), audio_ctx=64)
+    assert model.kw.get("audio_ctx") == 64
+
+
+def test_audio_ctx_omitted_when_none():
+    """默认不传 audio_ctx（final 路径满窗，行为不变）。"""
+    model = _CtxModel()
+    runner = WhisperRunner(ASRConfig(), model=model)
+    runner.transcribe_pcm(_pcm())
+    assert "audio_ctx" not in model.kw
+
+
+def test_partial_audio_ctx_property_reads_config():
+    """WhisperRunner.partial_audio_ctx 暴露 ASRConfig.partial_audio_ctx，供 StreamDriver 取值。"""
+    runner = WhisperRunner(ASRConfig(partial_audio_ctx=96), model=_FakeModel())
+    assert runner.partial_audio_ctx == 96
+
+
 def test_outer_whitespace_stripped():
     runner = WhisperRunner(ASRConfig(), model=_FakeModel([" 你好世界 "]))
     assert runner.transcribe_pcm(_pcm()) == "你好世界"

@@ -98,6 +98,27 @@ class ChannelVADSegmenter:
         self._reset_segment()
         return [seg] if seg is not None else []
 
+    @property
+    def in_speech(self) -> bool:
+        """当前是否处于 SPEECH 态（供 StreamDriver 区分 turn 结束 vs partial 冻结）。只读。"""
+        return self._state == _SPEECH
+
+    def peek_pending(self) -> tuple[np.ndarray, int] | None:
+        """只读快照当前在制语音段，供 partial 重转（流式 partial spec §3.1）。
+
+        SPEECH 态且在制语音跨度未超 partial_max_window_ms 时返回
+        (np.concatenate(_seg_frames), _seg_start_abs)，否则 None（SILENCE 或超封顶冻结）。
+        纯只读：concatenate 出新数组、不消费 leftover、不改状态机——保证反复 peek
+        绝不扰动 final 段的切分时间轴（用户硬约束 C2）。
+        """
+        if self._state != _SPEECH or not self._seg_frames:
+            return None
+        # 窗口封顶：在制语音跨度超上限即冻结（封顶单次 partial 解码量，见 §3.4）。
+        span = self._last_speech_end - self._first_speech_abs
+        if span > self._cfg.partial_max_window_ms * 16:
+            return None
+        return np.concatenate(self._seg_frames), self._seg_start_abs
+
     # ---- 内部 ----
 
     def _process_frame(self, frame: np.ndarray, abs_start: int) -> SpeechSegment | None:

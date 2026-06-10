@@ -185,6 +185,10 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
       SOUNDSPEED_AUDIO_DEVICE    设备名或索引（首次引导用；UI 选过后持久化优先）
       SOUNDSPEED_VAD=energy      VAD 探测器：energy（默认，零依赖）| silero（需 torch venv）
       SOUNDSPEED_MODELS_DIR      Whisper 模型存放目录（默认 ./models/whisper/）
+      SOUNDSPEED_PARTIAL_CHUNKS  流式 partial 节流周期 chunk 数（默认 4，~800ms；0=关）。
+                                 跑 large-turbo 时开；medium-q8 上溢出风险高，建议设 0
+      SOUNDSPEED_PARTIAL_AUDIO_CTX  partial 重转的 whisper audio_ctx（默认满窗；设小砍墙钟换边界精度）
+      SOUNDSPEED_AUDIO_READER    设备读是否走 reader 线程消除转录阻塞溢出（issue #17，默认 1 开；=0 直读）
 
     启动时设备解析优先级：
       持久化名字（DB app_settings）> env > 系统默认 > 第一个可用
@@ -212,8 +216,19 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
     models_dir_env = os.environ.get("SOUNDSPEED_MODELS_DIR")
     models_dir = models_dir_env or str(Path("./models/whisper").resolve())
 
+    # 流式 partial（spec §3）：生产开关在此显式设（dataclass 默认 0=关，是安全兜底）。
+    # 默认 4（~800ms 一刷）；跑 large-turbo 时开启。SOUNDSPEED_PARTIAL_CHUNKS=0 可关。
+    partial_chunks = int(os.environ.get("SOUNDSPEED_PARTIAL_CHUNKS", "4"))
+    _pac = os.environ.get("SOUNDSPEED_PARTIAL_AUDIO_CTX")
+    partial_audio_ctx = int(_pac) if _pac else None
+
     runner = WhisperRunner(
-        ASRConfig(model_size=model_size, language=language, models_dir=models_dir)
+        ASRConfig(
+            model_size=model_size,
+            language=language,
+            models_dir=models_dir,
+            partial_audio_ctx=partial_audio_ctx,
+        )
     )
 
     def _source_factory(device: object):
@@ -251,7 +266,14 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
             # 全部失败（零设备或全部幽灵）→ 退到让 sounddevice 自选（传 None）
             logger.warning("所有候选设备均无法打开，退至 sounddevice 自选")
             winning = None  # type: ignore[assignment]
-        return DeviceSource(winning, AudioConfig())  # type: ignore[arg-type]
+        src = DeviceSource(winning, AudioConfig())  # type: ignore[arg-type]
+        # 把设备 read 挪到 reader 线程，消除转录阻塞致的采集溢出（issue #17）。
+        # SOUNDSPEED_AUDIO_READER=0 退回直读（A/B 对比用）。
+        if os.environ.get("SOUNDSPEED_AUDIO_READER", "1") != "0":
+            from backend.audio.buffered_source import BufferedAudioSource  # noqa: PLC0415
+
+            return BufferedAudioSource(src)
+        return src
 
     def _detector_factory():
         if vad_kind == "silero":
@@ -284,7 +306,7 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
         runner=runner,
         publish=orchestrator.publish,
         source_factory=_source_factory,
-        vad_config=VadConfig(),
+        vad_config=VadConfig(partial_every_chunks=partial_chunks),
         detector_factory=_detector_factory,
         default_device=initial_device_name,  # 存名字
     )

@@ -6,7 +6,14 @@
 import numpy as np
 
 from backend.audio.source import AudioChunk
-from backend.core.events import ASR_FINAL_CH1, ASR_FINAL_CH2, AsrFinalPayload
+from backend.core.events import (
+    ASR_FINAL_CH1,
+    ASR_FINAL_CH2,
+    ASR_PARTIAL_CH1,
+    ASR_PARTIAL_CH2,
+    AsrFinalPayload,
+    AsrPartialPayload,
+)
 from backend.vad.models import VadConfig
 from backend.asr.stream_driver import StreamDriver
 
@@ -45,9 +52,11 @@ class _FakeRunner:
     def __init__(self, text: str = "转录文本") -> None:
         self._text = text
         self.seen: list[np.ndarray] = []
+        self.audio_ctx_seen: list[int | None] = []
 
-    def transcribe_pcm(self, pcm: np.ndarray) -> str:
+    def transcribe_pcm(self, pcm: np.ndarray, audio_ctx: int | None = None) -> str:
         self.seen.append(pcm)
+        self.audio_ctx_seen.append(audio_ctx)
         return self._text
 
 
@@ -299,3 +308,345 @@ def test_normalize_filters_trad_hallucination():
     runner = _FakeRunner(text="謝謝觀看")
     published, _ = _drive([_chunk(0, 0, [audio])], runner=runner)
     assert _asr_events(published) == []
+
+
+# ── 流式 partial 测试（spec §3） ────────────────────────────────────────────────
+
+
+def _partials(published, topic=ASR_PARTIAL_CH1):
+    return [(t, p) for t, p in published if t == topic]
+
+
+def test_throttle_emits_partial_while_speaking():
+    """SPEECH 态每 partial_every_chunks 个 chunk 发一条 asr.partial（is_partial=True）。"""
+    cfg = _vad_cfg(partial_every_chunks=1)
+    # 三个纯语音 chunk：持续说话不收尾 → 期间应有 partial
+    chunks = [_chunk(i, i * 8000, [_speech(8000)]) for i in range(3)]
+    published, _ = _drive(chunks, vad_config=cfg)
+    partials = _partials(published)
+    assert len(partials) >= 1
+    for _, p in partials:
+        assert isinstance(p, AsrPartialPayload)
+        assert p.is_partial is True
+        assert p.text == "转录文本"
+        assert p.speaker is None
+        assert p.take_id is None
+
+
+def test_partials_disabled_when_every_chunks_non_positive():
+    """partial_every_chunks <= 0 → 关闭 partial，全程只出 final。"""
+    cfg = _vad_cfg(partial_every_chunks=0)
+    chunks = [_chunk(i, i * 8000, [_speech(8000)]) for i in range(3)]
+    published, _ = _drive(chunks, vad_config=cfg)
+    assert _partials(published) == []
+    assert _partials(published, ASR_PARTIAL_CH2) == []
+
+
+def test_dangling_partial_cleared_when_turn_dropped():
+    """turn 低于 min_speech 被丢（无 final），但已发过 partial → 发空 partial 清除悬挂行。"""
+    cfg = _vad_cfg(partial_every_chunks=1, min_speech_ms=250)  # 250ms = 4000 样本
+    # 语音 2000 样本（< min_speech）→ 进入 speech 发 partial；随后静音收尾被丢，无 final
+    chunks = [
+        _chunk(0, 0, [_speech(2000)]),
+        _chunk(1, 2000, [_silence(8000)]),
+    ]
+    published, _ = _drive(chunks, vad_config=cfg)
+    # 段被 min_speech 丢 → 无 final
+    assert [t for t, _ in published if t == ASR_FINAL_CH1] == []
+    partials = _partials(published)
+    assert any(p.text != "" for _, p in partials)   # 收尾前的内容 partial
+    assert any(p.text == "" for _, p in partials)   # turn 结束的清除信号（空文本）
+
+
+class _OverflowSource:
+    """从第 overflow_after 个 chunk 起 overflow_count 上涨，模拟采集溢出（安全阀触发）。"""
+
+    def __init__(self, chunks: list, overflow_after: int) -> None:
+        self._chunks = chunks
+        self._overflow_after = overflow_after
+        self.overflow_count = 0
+
+    def __enter__(self) -> "_OverflowSource":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
+
+    def __iter__(self):
+        for idx, c in enumerate(self._chunks):
+            if idx >= self._overflow_after:
+                self.overflow_count = 1
+            yield c
+
+
+def test_overflow_disables_partials_finals_unaffected():
+    """采集溢出（overflow_count 上涨）→ 本 take 停发 partial，回退 final-only；final 不受影响。"""
+    # grace=0 直测跳闸；rearm 调高避免测试期内重启，隔离「跳闸」行为。
+    cfg = _vad_cfg(partial_every_chunks=1, partial_grace_chunks=0, partial_rearm_chunks=999)
+    chunks = [_chunk(i, i * 8000, [_speech(8000)]) for i in range(5)]
+    published: list[tuple[str, object]] = []
+    driver = StreamDriver(
+        runner=_FakeRunner(),
+        publish=lambda t, p: published.append((t, p)),
+        vad_config=cfg,
+        detector_factory=lambda: _AmplitudeVad(),
+    )
+    driver.run(_OverflowSource(chunks, overflow_after=2))
+    # 溢出前 chunk 0/1 各发一条 partial，chunk 2 起停 → 恰 2 条
+    assert len(_partials(published)) == 2
+    # final 链路不受安全阀影响：flush 仍出最终段
+    assert any(t == ASR_FINAL_CH1 for t, _ in published)
+
+
+def test_startup_overflow_within_grace_keeps_partials():
+    """开录第一下的启动毛刺溢出（PortAudio stream.start）落在宽限期内 → 不焊死 partial。"""
+    cfg = _vad_cfg(partial_every_chunks=1, partial_grace_chunks=8)
+    chunks = [_chunk(i, i * 8000, [_speech(8000)]) for i in range(6)]
+    published: list[tuple[str, object]] = []
+    driver = StreamDriver(
+        runner=_FakeRunner(),
+        publish=lambda t, p: published.append((t, p)),
+        vad_config=cfg,
+        detector_factory=lambda: _AmplitudeVad(),
+    )
+    driver.run(_OverflowSource(chunks, overflow_after=0))  # 第一下就溢出（启动毛刺）
+    assert driver._partials_enabled is True        # 宽限吞掉毛刺，没被永久关
+    assert len(_partials(published)) >= 1           # partial 照常发
+
+
+def test_partials_rearm_after_stable_period():
+    """跳闸后采集平稳够久 → 重新启用 partial（不再单次溢出永久焊死）。"""
+    cfg = _vad_cfg(partial_every_chunks=1, partial_grace_chunks=0, partial_rearm_chunks=3)
+    chunks = [_chunk(i, i * 8000, [_speech(8000)]) for i in range(8)]
+    published: list[tuple[str, object]] = []
+    driver = StreamDriver(
+        runner=_FakeRunner(),
+        publish=lambda t, p: published.append((t, p)),
+        vad_config=cfg,
+        detector_factory=lambda: _AmplitudeVad(),
+    )
+    # chunk1 溢出一次后不再涨；grace=0 当场跳闸，之后 3 个无溢出 chunk 应重启
+    driver.run(_OverflowSource(chunks, overflow_after=1))
+    assert driver._partials_enabled is True         # 已重启
+    assert len(_partials(published)) >= 2            # 跳闸前 + 重启后都发过
+
+
+def _chunkify(audio: np.ndarray, size: int) -> list:
+    chunks, pos, seq = [], 0, 0
+    while pos < len(audio):
+        block = audio[pos : pos + size]
+        chunks.append(_chunk(seq, pos, [block]))
+        pos += len(block)
+        seq += 1
+    return chunks
+
+
+def test_partials_do_not_perturb_authoritative_path():
+    """C1/C2 数据分离：partial 开/关，audio_sink 的 PCM 序列 + 落库 final 段逐字节一致。
+
+    注意：假源不丢帧，本测只证『partial 逻辑不碰权威逻辑』，不证实时饿死路径
+    （那条由 overflow 安全阀 + 设备 overflow_count + 真机 [手动测试] 覆盖）。
+    """
+    audio = np.concatenate([
+        _silence(4000), _speech(8000), _silence(8000),  # turn 1
+        _speech(8000), _silence(8000),                  # turn 2
+    ])
+
+    def _run(partial_every: int):
+        sink_calls: list[tuple[bytes, int]] = []
+        published: list[tuple[str, object]] = []
+        driver = StreamDriver(
+            runner=_FakeRunner(),
+            publish=lambda t, p: published.append((t, p)),
+            vad_config=_vad_cfg(partial_every_chunks=partial_every),
+            detector_factory=lambda: _AmplitudeVad(),
+            audio_sink=lambda pcm, sf: sink_calls.append((pcm.tobytes(), sf)),
+        )
+        driver.run(_FakeSource(_chunkify(audio, 800)))
+        finals = [
+            (t, p.text, p.start_frame, p.end_frame)
+            for t, p in published
+            if t in (ASR_FINAL_CH1, ASR_FINAL_CH2)
+        ]
+        return sink_calls, finals
+
+    sink_on, finals_on = _run(partial_every=1)   # partial 开
+    sink_off, finals_off = _run(partial_every=0)  # partial 关
+
+    assert sink_on == sink_off        # 喂 buffer 的 PCM 逐字节一致 → pyannote 输入不变（C1）
+    assert finals_on == finals_off    # 落库 final 段不变 → 切分时间轴不变（C2）
+    assert len(finals_off) == 2       # 两个 turn 都出 final（基线完整）
+
+
+class _SlowMeterRunner:
+    """转录每调一次按 cost 推进共享时钟，模拟转录占用采集线程的“墙钟”。"""
+
+    def __init__(self, meter: dict, cost: int, text: str = "转录文本") -> None:
+        self._meter = meter
+        self._cost = cost
+        self._text = text
+
+    def transcribe_pcm(self, pcm: np.ndarray, **kw: object) -> str:
+        self._meter["n"] += self._cost
+        return self._text
+
+
+class _PacedLossySource:
+    """忠实建模 DeviceSource 阻塞读 + 有限缓冲：消费者越慢，缓冲越易溢出丢帧。
+
+    每拉一个 chunk，看上个 chunk 处理期间共享时钟推进了多少（= 期间“产生”的 chunk 数），
+    超过 buffer_depth 即丢帧，overflow_count += 1（与 PortAudio overflowed 同义）。
+    """
+
+    def __init__(self, chunks: list, meter: dict, buffer_depth: int) -> None:
+        self._chunks = chunks
+        self._meter = meter
+        self._depth = buffer_depth
+        self.overflow_count = 0
+
+    def __enter__(self) -> "_PacedLossySource":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
+
+    def __iter__(self):
+        last = self._meter["n"]
+        for c in self._chunks:
+            now = self._meter["n"]
+            produced = now - last  # 上个 chunk 处理期间产生的 chunk 数
+            last = now
+            if produced > self._depth:
+                self.overflow_count += 1
+            yield c
+
+
+def test_starvation_slow_partial_trips_safety_valve():
+    """实时饿死路径：partial 重转过慢撑爆采集缓冲 → 溢出 → 安全阀跳闸停 partial（降级安全）。"""
+    meter = {"n": 0}
+    chunks = [_chunk(i, i * 8000, [_speech(8000)]) for i in range(6)]
+    published: list[tuple[str, object]] = []
+    driver = StreamDriver(
+        runner=_SlowMeterRunner(meter, cost=5),  # 慢转录：一次 partial 即撑爆 depth=2 缓冲
+        publish=lambda t, p: published.append((t, p)),
+        vad_config=_vad_cfg(partial_every_chunks=1, partial_grace_chunks=0, partial_rearm_chunks=999),
+        detector_factory=lambda: _AmplitudeVad(),
+    )
+    src = _PacedLossySource(chunks, meter, buffer_depth=2)
+    driver.run(src)
+    assert src.overflow_count >= 1                # 慢转录撑爆缓冲，确有丢帧
+    assert driver._partials_enabled is False       # 安全阀跳闸
+    assert any(t == ASR_FINAL_CH1 for t, _ in published)  # final 链路仍活（降级 final-only）
+
+
+def test_fast_partial_no_overflow_valve_stays_open():
+    """快 runner：不撑爆缓冲，无溢出，partial 全程不被安全阀关掉。"""
+    meter = {"n": 0}
+    chunks = [_chunk(i, i * 8000, [_speech(8000)]) for i in range(6)]
+    published: list[tuple[str, object]] = []
+    driver = StreamDriver(
+        runner=_SlowMeterRunner(meter, cost=0),  # 快转录：时钟不推进，缓冲不溢出
+        publish=lambda t, p: published.append((t, p)),
+        vad_config=_vad_cfg(partial_every_chunks=1),
+        detector_factory=lambda: _AmplitudeVad(),
+    )
+    src = _PacedLossySource(chunks, meter, buffer_depth=2)
+    driver.run(src)
+    assert src.overflow_count == 0
+    assert driver._partials_enabled is True
+    assert len(_partials(published)) >= 1
+
+
+# ── 短词漏检修复（final 幻觉门放宽：剥标点 + 只丢单字 + 指令白名单） ──────────────
+
+
+def test_short_command_words_not_dropped_as_hallucination():
+    """片场高频单字指令（停/走/好/过/卡/开）不再被 len 门当幻觉丢。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    for w in ("停", "走", "好", "过", "卡", "开"):
+        assert _is_hallucination(w) is False, f"指令词 {w!r} 不该被丢"
+
+
+def test_short_command_with_trailing_punct_not_dropped():
+    """带句末标点的短指令（停。 / 走！）先剥标点再判，不被丢。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    assert _is_hallucination("停。") is False
+    assert _is_hallucination("走！") is False
+
+
+def test_two_char_real_word_not_dropped():
+    """双字真词（过来/快走）不再被 len<=2 一刀切丢。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    assert _is_hallucination("过来") is False
+    assert _is_hallucination("快走") is False
+
+
+def test_unknown_single_char_still_dropped():
+    """非指令的孤立单字（噪声幻觉）仍丢。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    assert _is_hallucination("嗯") is True
+    assert _is_hallucination("x") is True
+
+
+def test_hallucination_patterns_still_filtered():
+    """整句幻觉模式（谢谢观看 等）仍被拦。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    assert _is_hallucination("谢谢观看") is True
+    assert _is_hallucination("thanks for watching") is True
+    assert _is_hallucination("这是一句正常的台词") is False
+
+
+def test_take_end_drains_buffered_tail():
+    """take.end：stop 后 source 里已缓冲的 chunk 仍被排空处理（不丢尾巴）。"""
+    published: list[tuple[str, object]] = []
+    sink: list[int] = []
+    driver = StreamDriver(
+        runner=_FakeRunner(),
+        publish=lambda t, p: published.append((t, p)),
+        vad_config=_vad_cfg(),
+        detector_factory=lambda: _AmplitudeVad(),
+        audio_sink=lambda pcm, sf: sink.append(sf),
+    )
+    speech = np.concatenate([_silence(2000), _speech(12000), _silence(8000)])
+    chunks = _chunkify(speech, 4000)
+    drain_called = {"v": False}
+
+    class _Src:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def begin_drain(self):
+            drain_called["v"] = True
+
+        def __iter__(self):
+            yield chunks[0]
+            driver.stop()  # 第一块后 take.end
+            yield from chunks[1:]  # 已缓冲的尾巴，不该被丢
+
+    driver.run(_Src())
+    assert drain_called["v"] is True   # begin_drain 被调（停读新 + 排空）
+    assert len(sink) == len(chunks)    # 所有 chunk 的 ch1 都进 audio_sink，尾巴没丢
+
+
+def test_partial_uses_configured_audio_ctx_final_does_not():
+    """partial 重转用配置的 partial_audio_ctx（砍墙钟）；final 仍满窗（audio_ctx=None）。"""
+    runner = _FakeRunner()
+    chunks = [_chunk(i, i * 8000, [_speech(8000)]) for i in range(2)]
+    driver = StreamDriver(
+        runner=runner,
+        publish=lambda t, p: None,
+        vad_config=_vad_cfg(partial_every_chunks=1),
+        detector_factory=lambda: _AmplitudeVad(),
+        partial_audio_ctx=64,
+    )
+    driver.run(_FakeSource(chunks))
+    assert 64 in runner.audio_ctx_seen     # 至少一次 partial 用了配置的 audio_ctx
+    assert None in runner.audio_ctx_seen   # final（flush）不传 audio_ctx，满窗

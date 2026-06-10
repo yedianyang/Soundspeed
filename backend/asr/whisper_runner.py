@@ -33,6 +33,11 @@ class WhisperRunner:
     def model_size(self) -> str:
         return self._config.model_size
 
+    @property
+    def partial_audio_ctx(self) -> int | None:
+        """流式 partial 重转用的 audio_ctx（来自 ASRConfig）；StreamDriver 据此调用。"""
+        return self._config.partial_audio_ctx
+
     def set_language(self, language: str) -> None:
         """运行时切换转录语言（zh/en/auto/…）。下一段转录生效，无需重载模型。"""
         self._language = language
@@ -59,9 +64,14 @@ class WhisperRunner:
         """启动时预加载模型（首次含下载，缓存后秒级）。"""
         self._ensure_model()
 
-    def transcribe_pcm(self, pcm_int16: np.ndarray) -> str:
-        """16kHz 单声道 int16 → 文字。whisper.cpp 吃 float32 [-1,1]。"""
+    def transcribe_pcm(self, pcm_int16: np.ndarray, audio_ctx: int | None = None) -> str:
+        """16kHz 单声道 int16 → 文字。whisper.cpp 吃 float32 [-1,1]。
+
+        audio_ctx：非 None 时透传给 whisper（限 encoder 上下文窗口，砍 partial 重转墙钟）；
+        None（默认）= 满窗，final 路径保持原行为不变。
+        """
         model = self._ensure_model()
         audio_f32 = np.ascontiguousarray(pcm_int16, dtype=np.int16).astype(np.float32) / _INT16_FULL_SCALE
-        segments = model.transcribe(audio_f32, language=self._language)
+        kw = {} if audio_ctx is None else {"audio_ctx": audio_ctx}
+        segments = model.transcribe(audio_f32, language=self._language, **kw)
         return "".join(seg.text for seg in segments).strip()

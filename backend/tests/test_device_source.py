@@ -1,7 +1,33 @@
+import numpy as np
 import pytest
 
 from backend.audio.device_source import DeviceError, DeviceSource, open_device_with_fallback
 from backend.audio.source import AudioConfig
+
+
+class _FakeStream:
+    """假 InputStream：按预置序列报 overflowed，供测溢出计数。"""
+
+    def __init__(self, overflowed_seq: list[bool]) -> None:
+        self._seq = list(overflowed_seq)
+
+    def read(self, n: int):
+        overflowed = self._seq.pop(0) if self._seq else False
+        return np.zeros((n, 1), dtype="float32"), overflowed
+
+
+def test_overflow_count_exposes_internal_counter():
+    """overflow_count 只读属性暴露内部溢出计数，供 StreamDriver 安全阀读取（spec §3.5）。"""
+    src = DeviceSource(0, AudioConfig())
+    assert src.overflow_count == 0
+    src._stream = _FakeStream([False, True, False])  # 第 2 次 read 报溢出
+    src._block_frames = 512
+    src._read_raw_block()
+    assert src.overflow_count == 0
+    src._read_raw_block()
+    assert src.overflow_count == 1  # overflowed=True → 计数+1
+    src._read_raw_block()
+    assert src.overflow_count == 1
 
 
 def test_device_source_unknown_device_raises_with_device_list():

@@ -62,6 +62,11 @@ class DeviceSource(AudioSource):
         self._block_frames = 0
         self._overflow_count = 0
 
+    @property
+    def overflow_count(self) -> int:
+        """累计输入缓冲溢出次数（采集跟不上实时）。StreamDriver 安全阀据此停发 partial。"""
+        return self._overflow_count
+
     def _open(self) -> tuple[int, int]:
         stream, rate, channels = _open_input_stream(self._device, self._config)
         self._stream = stream

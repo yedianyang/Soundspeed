@@ -96,6 +96,8 @@ class LiveAsrSession:
                 detector_factory=self._detector_factory,
                 audio_sink=self.audio_buffer.append,
                 process_channels=self._process_channels,
+                # 流式 partial 的 audio_ctx 跟随 ASRConfig（getattr 兜底假 runner）。
+                partial_audio_ctx=getattr(self._runner, "partial_audio_ctx", None),
             )
             self._driver = driver
             self._thread = threading.Thread(

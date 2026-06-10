@@ -49,6 +49,9 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._active: set[WebSocket] = set()
+        # 串行化广播：每条消息独立协程并发 send 同一连接会乱序/报错（背压下尤甚）。
+        # asyncio.Lock 的 waiter 队列 FIFO → 协程按调度（=广播）顺序拿锁 → 到达顺序保序。
+        self._send_lock = asyncio.Lock()
 
     def set_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
         """记录服务端 event loop 引用（lifespan startup 时调用）。
@@ -136,12 +139,14 @@ class ConnectionManager:
         快照迭代（边界：广播时并发改集合）；单个连接 send 失败 catch 后标记移除
         （边界：广播中途 disconnect 的死连接清理）。
         """
-        for ws in list(self._active):
-            try:
-                await ws.send_json(data)
-            except Exception:
-                logger.debug("ws send failed, removing dead connection", exc_info=True)
-                self._active.discard(ws)
+        # 锁内逐连接发送：同一时刻只有一条广播在 send，按拿锁顺序（=广播顺序）保序到达。
+        async with self._send_lock:
+            for ws in list(self._active):
+                try:
+                    await ws.send_json(data)
+                except Exception:
+                    logger.debug("ws send failed, removing dead connection", exc_info=True)
+                    self._active.discard(ws)
 
 
 @router.websocket("/ws")

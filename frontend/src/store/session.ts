@@ -176,6 +176,16 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
       const key = ch === 1 ? "ch1" : "ch2"
       const list = state.segments[key]
+      // 空文本 partial = 清除信号（流式 partial spec §3.6）：后端 turn 结束未出 final 时
+      // 发空 partial，前端据此移除该声道悬挂的 partial 行。仅当末条确为 partial 才删；
+      // 末条是 final（已落定文本）或空声道则 no-op。
+      if (!isFinal && p.text.trim() === "") {
+        const tail = list[list.length - 1]
+        if (tail && tail.isPartial) {
+          return { segments: { ...state.segments, [key]: list.slice(0, -1) } }
+        }
+        return {}
+      }
       const seg: LiveSeg = {
         text: p.text,
         speaker: p.speaker,
