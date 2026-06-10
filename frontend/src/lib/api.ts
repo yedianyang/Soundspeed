@@ -426,11 +426,14 @@ export function refreshDevices(): Promise<DevicesResponse> {
   return request<DevicesResponse>(`/api/v1/devices/refresh`, { method: "POST" })
 }
 
-// ── ASR 运行配置（转录语言 + 当前模型）──
+// ── ASR 运行配置（引擎 + 转录语言 + 当前模型）──
 export interface AsrConfigResponse {
   enabled: boolean
+  engine: string | null
   language: string | null
   model: string | null
+  engines: { id: string; label: string; languages: string[]; installed: boolean }[]
+  /** legacy:旧组件用的顶层语言列表,新 UI 用 engines[].languages */
   languages: string[]
 }
 
@@ -443,6 +446,14 @@ export function setAsrLanguage(language: string): Promise<void> {
   return request<void>(`/api/v1/asr/language`, {
     method: "POST",
     body: JSON.stringify({ language }),
+  })
+}
+
+// 切换 ASR 引擎(仅非录制时)。录制中/未安装 funasr → 后端 409(调用方 catch 显示 detail)。
+export function setAsrEngine(engine: string): Promise<void> {
+  return request<void>(`/api/v1/asr/engine`, {
+    method: "POST",
+    body: JSON.stringify({ engine }),
   })
 }
 
