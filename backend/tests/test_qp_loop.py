@@ -171,6 +171,7 @@ def test_build_scene_catalog_empty() -> None:
 
 
 def test_build_scene_catalog_with_scenes() -> None:
+    # catalog 瘦身后只列场次编号+总数,slugline(地点/内外景/时间)一律不进 prompt,逼模型走工具查事实
     class _DALWithScenes:
         def list_scenes_readonly(self):
             return [
@@ -181,7 +182,11 @@ def test_build_scene_catalog_with_scenes() -> None:
     catalog = build_scene_catalog(_DALWithScenes())
     assert "Scene_1" in catalog
     assert "Scene_2" in catalog
-    assert "客厅" in catalog
+    assert "共 2 场" in catalog
+    # 不泄漏 slugline 内容
+    assert "客厅" not in catalog
+    assert "天台" not in catalog
+    assert "室内" not in catalog
 
 
 @pytest.mark.asyncio

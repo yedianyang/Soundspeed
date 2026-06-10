@@ -56,7 +56,7 @@ def build_get_scene_info_tool() -> dict:
         "type": "function",
         "function": {
             "name": "get_scene_info",
-            "description": "返回某场次的地点/内外景/时间/拍摄日期/角色数。问「第N场在哪拍」用它。",
+            "description": "返回某场次的地点/内外景/时间/拍摄日期/角色数。问「第N场在哪拍/几个角色」用它。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -81,7 +81,7 @@ def build_list_characters_tool() -> dict:
         "type": "function",
         "function": {
             "name": "list_characters",
-            "description": "返回某场次剧本里出现的角色清单。问「这场有几个角色/都有谁」用它。",
+            "description": "返回某场次剧本里的角色名单。问「这场都有谁」用它。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -106,7 +106,7 @@ def build_search_script_lines_tool() -> dict:
         "type": "function",
         "function": {
             "name": "search_script_lines",
-            "description": "按关键词全文检索剧本台词，返回匹配行。问「哪句台词提到X / 某句台词在第几行」用它。",
+            "description": "按关键词全文检索剧本台词，返回匹配行及所在场次。问「哪句/哪场台词提到X」用它。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -184,7 +184,7 @@ def build_list_scenes_tool() -> dict:
         "type": "function",
         "function": {
             "name": "list_scenes",
-            "description": "按地点/时间/内外景筛选场次并统计数量。问「某地点有几场戏/几场日戏夜戏/哪些场在哪拍」用它;不填条件=全剧统计。",
+            "description": "按地点/时间/内外景筛选并统计场次。问「有多少场/几场戏/哪些场」必须用它，不要自己数场次目录；不填条件=全剧。",
             "parameters": {
                 "type": "object",
                 "properties": {

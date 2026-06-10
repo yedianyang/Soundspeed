@@ -150,18 +150,13 @@ async def run_tool_loop(
 
 
 def build_scene_catalog(dal: "DAL") -> str:
-    """场次目录注入（spec §7.1）：编号 + scene_code + slugline + 顺序号，注入 user/context。"""
+    """场次目录注入:只列场次编号(供场次引用解析),地点/时间等事实一律走工具查。"""
     scenes = dal.list_scenes_readonly()
     if not scenes:
         return "（当前项目还没有任何场次记录。）"
-    lines = ["当前项目场次目录（顺序号. 编号 ｜ 内外景 地点 时间）："]
-    for pos, s in enumerate(scenes, start=1):
-        slug = " ".join(
-            v for v in (s.get("int_ext"), s.get("location"), s.get("time_of_day")) if v
-        )
-        lines.append(f"{pos}. {s['scene_code']} ｜ {slug or '（无 slugline）'}")
-    lines.append(f"（共 {len(scenes)} 场）")
-    return "\n".join(lines)
+    # 单行长度 tradeoff 有意接受:200 场≈1.8KB 可控;scene_code 命名变长或千场级再加截断
+    codes = "、".join(s["scene_code"] for s in scenes)
+    return f"当前项目已有场次（编号）：{codes}（共 {len(scenes)} 场）。地点/时间/角色等信息用工具查询。"
 
 
 async def run_qp_query(

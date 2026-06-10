@@ -11,11 +11,10 @@ import pytest
 
 FIXTURE = Path(__file__).parent / "fixtures" / "qp_eval.jsonl"
 RUNS_PER_CASE = 3
-# 基线 2026-06-11 实测 17/30=0.567(commit ecdaaa6,E4B Q4_K_M 真模型):
-# 挂的 case 与修复任务一一对应——mic-advice(prompt 禁建议)、agg-time(无聚合工具,编造 10日6夜)、
-# search-line(FTS trigram 2字查询 0 命中)、content-16(无场内容工具)、single-count 2/3(转述失误)。
-# FLOOR = 基线 - 0.10 向下取一位;后续修复任务逐步抬。
-ACCURACY_FLOOR = 0.46
+# 基线 2026-06-11:0.567 → D5 0.667 → 描述重审 0.767 → catalog 瘦身 0.833(两轮一致,commit 891de21)。
+# 终态已知失败:mic-advice 0/3(prompt 禁令,实验否决记 design doc)+ agg-time 2/3 抖动(候选 B2)。
+# FLOOR = 0.833 - 0.10 向下取一位。
+ACCURACY_FLOOR = 0.73
 
 
 def _load_cases() -> list[dict]:
