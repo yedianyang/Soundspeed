@@ -11,7 +11,11 @@ import pytest
 
 FIXTURE = Path(__file__).parent / "fixtures" / "qp_eval.jsonl"
 RUNS_PER_CASE = 3
-ACCURACY_FLOOR = 0.0  # Task 6 基线实测后定为 基线-0.10,此前 0.0 占位(只产报告不拦截)
+# 基线 2026-06-11 实测 17/30=0.567(commit ecdaaa6,E4B Q4_K_M 真模型):
+# 挂的 case 与修复任务一一对应——mic-advice(prompt 禁建议)、agg-time(无聚合工具,编造 10日6夜)、
+# search-line(FTS trigram 2字查询 0 命中)、content-16(无场内容工具)、single-count 2/3(转述失误)。
+# FLOOR = 基线 - 0.10 向下取一位;后续修复任务逐步抬。
+ACCURACY_FLOOR = 0.46
 
 
 def _load_cases() -> list[dict]:
