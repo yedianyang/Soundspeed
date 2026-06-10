@@ -35,6 +35,7 @@ import {
   refreshDevices,
   resetDb,
   selectDevice,
+  setAsrEngine,
   setAsrLanguage,
   startTake,
   useAsrConfig,
@@ -43,6 +44,7 @@ import {
   type DebugAsrSeg,
   type DebugScriptLine,
 } from "@/lib/api"
+import { asrSelectModel } from "@/lib/asr-settings"
 import { FlaskConical, RefreshCw, Server, Trash2 } from "lucide-react"
 import ActorManagementPanel from "@/components/admin/ActorManagementPanel"
 import { useFileNameFormat } from "@/store/filename"
@@ -148,19 +150,45 @@ const ASR_LANG_LABEL: Record<string, string> = {
   auto: "自动检测",
 }
 
-// 转录语言（ASR whisper.cpp）下拉 + 当前模型展示。默认 zh；切换即时生效（POST /asr/language）。
-function AsrLanguageSelect() {
+// 转录引擎 + 语言双下拉(左=引擎,右=语言,语言列表随引擎联动)+ 当前模型展示。
+// 录制中禁止切引擎(后端同样 409 把守);语言切换即时生效。
+function AsrEngineLanguageSelect() {
   const { data, isLoading } = useAsrConfig()
   const qc = useQueryClient()
-  const langs = data?.languages ?? ["zh", "en", "auto"]
-  const value = data?.language ?? "zh"
+  const isRecording = useSessionStore((s) => s.isRecording)
+  const [err, setErr] = useState<string | null>(null)
+  // 引擎切换 in-flight：首切 funasr 含 ~1GB 模型下载（可能数分钟），期间禁用双下拉防重复点击（409）。
+  const [switching, setSwitching] = useState(false)
 
-  const onChange = async (v: string) => {
+  const model = asrSelectModel({
+    engines: data?.engines ?? [],
+    engine: data?.engine ?? null,
+    isRecording,
+  })
+  const engineDisabled = model.engineDisabled || switching
+  const engineValue = data?.engine ?? "whisper"
+  const langValue = data?.language ?? "zh"
+
+  const onEngineChange = async (v: string) => {
+    setErr(null)
+    setSwitching(true)
+    try {
+      await setAsrEngine(v)
+      qc.invalidateQueries({ queryKey: asrConfigQueryKey() })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "切换引擎失败")
+    } finally {
+      setSwitching(false)
+    }
+  }
+
+  const onLangChange = async (v: string) => {
+    setErr(null)
     try {
       await setAsrLanguage(v)
       qc.invalidateQueries({ queryKey: asrConfigQueryKey() })
-    } catch (err) {
-      console.error("setAsrLanguage failed", err)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "切换语言失败")
     }
   }
 
@@ -169,22 +197,46 @@ function AsrLanguageSelect() {
   }
   return (
     <div className="grid gap-1.5">
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger className="w-full">
-          <SelectValue placeholder="选择转录语言" />
-        </SelectTrigger>
-        <SelectContent>
-          {langs.map((l) => (
-            <SelectItem key={l} value={l}>
-              {ASR_LANG_LABEL[l] ?? l}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <span className="text-[11px] text-muted-foreground">
-        当前模型：{data?.model ?? "—"}
-        {data && !data.enabled ? "（实时 ASR 未启用）" : ""}
-      </span>
+      <div className="flex gap-2">
+        <Select value={engineValue} onValueChange={onEngineChange} disabled={engineDisabled}>
+          <SelectTrigger
+            className="w-1/2"
+            title={model.engineDisabled ? "录制中不可切换引擎" : undefined}
+          >
+            <SelectValue placeholder="选择引擎" />
+          </SelectTrigger>
+          <SelectContent>
+            {model.engineOptions.map((e) => (
+              <SelectItem key={e.id} value={e.id}>
+                {e.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={langValue} onValueChange={onLangChange} disabled={switching}>
+          <SelectTrigger className="w-1/2">
+            <SelectValue placeholder="选择转录语言" />
+          </SelectTrigger>
+          <SelectContent>
+            {model.languageOptions.map((l) => (
+              <SelectItem key={l} value={l}>
+                {ASR_LANG_LABEL[l] ?? l}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      {err && <span className="text-xs text-destructive">{err}</span>}
+      {switching ? (
+        <span className="text-[11px] text-muted-foreground">
+          切换引擎中…（首次切换需下载模型，可能数分钟）
+        </span>
+      ) : (
+        <span className="text-[11px] text-muted-foreground">
+          当前模型：{data?.model ?? "—"}
+          {data && !data.enabled ? "（实时 ASR 未启用）" : ""}
+        </span>
+      )}
     </div>
   )
 }
@@ -749,8 +801,8 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
             </div>
 
             <div className="grid gap-2">
-              <span className="text-sm font-medium">转录语言（ASR）</span>
-              <AsrLanguageSelect />
+              <span className="text-sm font-medium">转录引擎与语言（ASR）</span>
+              <AsrEngineLanguageSelect />
             </div>
 
             <Separator />

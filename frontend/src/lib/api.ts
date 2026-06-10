@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { API_BASE } from "@/lib/config"
 import type { FileNameFormat } from "@/lib/filename-format"
+import type { AsrEngineInfo } from "@/lib/asr-settings"
 import { randomId } from "@/lib/uuid"
 import { useSessionStore } from "@/store/session"
 import type {
@@ -43,7 +44,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers })
   if (!res.ok) {
-    throw new ApiError(res.status, `${init?.method ?? "GET"} ${path} → ${res.status}`)
+    // 错误透出后端 detail（如 409 的「FunASR 未安装」/「正在录制…」），同 requestMultipart 先例。
+    let detail = `${init?.method ?? "GET"} ${path} → ${res.status}`
+    try {
+      const j = await res.json()
+      if (typeof j?.detail === "string") detail = j.detail
+    } catch {
+      /* 忽略非 JSON 错误体 */
+    }
+    throw new ApiError(res.status, detail)
   }
   if (res.status === 204) return undefined as T
   const text = await res.text()
@@ -63,7 +72,7 @@ async function requestMultipart<T>(path: string, fd: FormData): Promise<T> {
     let detail = `POST ${path} → ${res.status}`
     try {
       const j = await res.json()
-      if (j?.detail) detail = String(j.detail)
+      if (typeof j?.detail === "string") detail = j.detail
     } catch {
       /* 忽略非 JSON 错误体 */
     }
@@ -209,7 +218,7 @@ async function postNoBody<T>(path: string): Promise<T> {
     let detail = `POST ${path} → ${res.status}`
     try {
       const j = await res.json()
-      if (j?.detail) detail = String(j.detail)
+      if (typeof j?.detail === "string") detail = j.detail
     } catch {
       /* 忽略非 JSON 错误体 */
     }
@@ -363,7 +372,7 @@ export async function uploadScript(file: File): Promise<UploadSavedResult> {
     let detail = `upload → ${res.status}`
     try {
       const j = await res.json()
-      if (j?.detail) detail = String(j.detail)
+      if (typeof j?.detail === "string") detail = j.detail
     } catch { /* 忽略非 JSON 错误体 */ }
     throw new ApiError(res.status, detail)
   }
@@ -426,11 +435,14 @@ export function refreshDevices(): Promise<DevicesResponse> {
   return request<DevicesResponse>(`/api/v1/devices/refresh`, { method: "POST" })
 }
 
-// ── ASR 运行配置（转录语言 + 当前模型）──
+// ── ASR 运行配置（引擎 + 转录语言 + 当前模型）──
 export interface AsrConfigResponse {
   enabled: boolean
+  engine: string | null
   language: string | null
   model: string | null
+  engines: AsrEngineInfo[]
+  /** legacy:旧组件用的顶层语言列表,新 UI 用 engines[].languages */
   languages: string[]
 }
 
@@ -443,6 +455,14 @@ export function setAsrLanguage(language: string): Promise<void> {
   return request<void>(`/api/v1/asr/language`, {
     method: "POST",
     body: JSON.stringify({ language }),
+  })
+}
+
+// 切换 ASR 引擎(仅非录制时)。录制中/未安装 funasr → 后端 409(调用方 catch 显示 detail)。
+export function setAsrEngine(engine: string): Promise<void> {
+  return request<void>(`/api/v1/asr/engine`, {
+    method: "POST",
+    body: JSON.stringify({ engine }),
   })
 }
 

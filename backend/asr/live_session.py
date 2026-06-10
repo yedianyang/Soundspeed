@@ -13,6 +13,7 @@ import logging
 import threading
 from collections.abc import Callable, Iterable
 
+from backend.asr.funasr_runner import FunAsrRunner
 from backend.asr.stream_driver import StreamDriver
 from backend.asr.whisper_runner import WhisperRunner
 from backend.diarization.buffer import TakeAudioBuffer
@@ -34,8 +35,13 @@ class LiveAsrSession:
         detector_factory: Callable[[], VadDetector],
         default_device: object = None,
         process_channels: tuple[int, ...] | None = (0,),
+        funasr_runner_factory: Callable[[], object] | None = None,
     ) -> None:
         self._runner = runner
+        self._engine = "whisper"
+        self._whisper_runner = runner  # 切回 whisper 时复用,不重建
+        self._funasr_runner: object | None = None  # 首切 funasr 时构造
+        self._funasr_runner_factory = funasr_runner_factory or FunAsrRunner
         self._publish = publish
         self._source_factory = source_factory  # (device) -> AudioSource
         self._vad_config = vad_config
@@ -46,6 +52,7 @@ class LiveAsrSession:
         self._driver: StreamDriver | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._switch_lock = threading.Lock()  # 串行化 set_engine(warmup 可能分钟级,禁止并发切换)
         self.audio_buffer = TakeAudioBuffer()  # ch1 PCM 累积，供 diarization 使用
 
     @property
@@ -81,6 +88,39 @@ class LiveAsrSession:
     def set_language(self, language: str) -> None:
         """切换转录语言（即时生效，下一段起）。"""
         self._runner.set_language(language)
+
+    @property
+    def engine(self) -> str:
+        return self._engine
+
+    def set_engine(self, engine: str) -> None:
+        """切换 ASR 引擎。仅非录制时可调;funasr 首切时构造并 warmup(同步加载模型,
+        首次含 modelscope 下载)。重启后归位 whisper(不持久化,见设计文档)。"""
+        if engine not in ("whisper", "funasr"):
+            raise ValueError(f"未知 ASR 引擎: {engine}")
+        if not self._switch_lock.acquire(blocking=False):
+            raise RuntimeError("引擎切换进行中,稍后重试")
+        try:
+            if self.running:  # 快速失败;锁内还会复检
+                raise RuntimeError("录制中不可切换引擎")
+            if engine == self._engine:
+                return
+            if engine == "funasr":
+                if self._funasr_runner is None:
+                    self._funasr_runner = self._funasr_runner_factory()
+                self._funasr_runner.warmup()  # FunAsrNotInstalled 在此抛出,引擎状态不变
+                new_runner = self._funasr_runner
+            else:
+                new_runner = self._whisper_runner
+            with self._lock:
+                # 复检:warmup 阻塞期间(首次 ~1GB 下载)可能有 take.start 抢先起线程,
+                # 锁内直接读 _thread(不经 running property,语义更明确)。
+                if self._thread is not None and self._thread.is_alive():
+                    raise RuntimeError("录制中不可切换引擎")
+                self._runner = new_runner
+                self._engine = engine
+        finally:
+            self._switch_lock.release()
 
     def start(self) -> None:
         """起后台线程。已在运行则忽略（幂等）。"""
