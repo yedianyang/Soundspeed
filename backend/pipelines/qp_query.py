@@ -71,8 +71,12 @@ async def run_tool_loop(
     dal: "DAL",
     max_hops: int = _MAX_HOPS,
     timeout: float = 30.0,
+    trace: list[dict] | None = None,
 ) -> str:
     """两步走循环：≤max_hops 跳，返回最终自然语言文本。messages 原地追加每跳的 tool 往返。
+
+    trace：评测诊断用，传入非 None 的列表则每跳 append {"tool", "args", "result"}，
+           默认 None 不收集（不影响任何现有调用方行为）。
 
     异常契约：
     - asyncio.TimeoutError / asyncio.CancelledError 放行给 caller（route 兜底返回友好错误）。
@@ -106,10 +110,15 @@ async def run_tool_loop(
         except (LookupError, KeyError, json.JSONDecodeError, TypeError) as exc:
             # forced 没拿到干净参数（模型没走 FC / arguments 缺失或非法）→ 当工具失败回喂，模型自纠，不抛穿
             logger.warning("qp forced 跳取参失败 name=%s: %r", name, exc)
+            args = {}  # 取参失败；trace 用空 dict
             result: dict = {"error": f"工具 {name} 调用失败：参数无法解析，请换种方式或直接回答。"}
         else:
             # step C — 执行（executor 包 to_thread，错误不抛穿）
             result = await asyncio.to_thread(_run_executor, name, args, dal)
+
+        # trace 收集（评测诊断用，默认 None 跳过）
+        if trace is not None:
+            trace.append({"tool": name, "args": args, "result": result})
 
         # 回喂（单点，纯文本，Task 7.5 probe 实证定案）：
         # **不**用 OpenAI 风格 assistant{tool_calls}+role=tool——
@@ -145,12 +154,17 @@ async def run_qp_query(
     dal: "DAL",
     service: "LLMService",
     timeout: float = 30.0,
+    trace: list[dict] | None = None,
 ) -> str:
-    """QP 入口：拼场次目录 + 极简 system → 跑两步走循环 → 返回自然语言答案。"""
+    """QP 入口：拼场次目录 + 极简 system → 跑两步走循环 → 返回自然语言答案。
+
+    trace：评测诊断用，传入非 None 的列表则每跳 append {"tool", "args", "result"}，
+           透传给 run_tool_loop，默认 None 不收集。
+    """
     # 场次目录是同步 SQLite I/O，包 to_thread 不阻塞事件循环（与 step C executor 的 to_thread 一致）。
     catalog = await asyncio.to_thread(_build_scene_catalog, dal)
     messages = [
         {"role": "system", "content": _QP_SYSTEM},
         {"role": "user", "content": f"{catalog}\n\n用户提问：{text}"},
     ]
-    return await run_tool_loop(messages, service=service, dal=dal, timeout=timeout)
+    return await run_tool_loop(messages, service=service, dal=dal, timeout=timeout, trace=trace)

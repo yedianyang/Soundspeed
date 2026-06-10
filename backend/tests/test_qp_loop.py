@@ -59,6 +59,9 @@ class _StubDAL:
     def count_takes(self, scene_id, status=None):
         return 3
 
+    def get_scene_info(self, scene_id):
+        return {"scene_id": 1, "scene_code": "1"}
+
     def list_scenes_readonly(self):
         return []
 
@@ -172,3 +175,43 @@ def test_build_scene_catalog_with_scenes() -> None:
     assert "Scene_1" in catalog
     assert "Scene_2" in catalog
     assert "客厅" in catalog
+
+
+@pytest.mark.asyncio
+async def test_loop_trace_collects_tool_hops() -> None:
+    svc = _ScriptedService(
+        auto_replies=[
+            "<|tool_call>call:count_takes{scene_ref:<|\"|>1<|\"|>}<tool_call|>",
+            "第一场一共拍了 3 条。",
+        ],
+        forced_args=[{"scene_ref": "1"}],
+    )
+    trace: list[dict] = []
+    answer = await run_tool_loop(
+        [{"role": "user", "content": "第一场拍了多少条"}],
+        service=svc, dal=_StubDAL(), trace=trace,
+    )
+    assert answer == "第一场一共拍了 3 条。"
+    assert len(trace) == 1
+    assert trace[0]["tool"] == "count_takes"
+    assert trace[0]["args"] == {"scene_ref": "1"}
+    assert trace[0]["result"]["count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_loop_trace_accumulates_multi_hop() -> None:
+    svc = _ScriptedService(
+        auto_replies=[
+            "<|tool_call>call:count_takes{scene_ref:<|\"|>1<|\"|>}<tool_call|>",
+            "<|tool_call>call:get_scene_info{scene_ref:<|\"|>1<|\"|>}<tool_call|>",
+            "查完了。",
+        ],
+        forced_args=[{"scene_ref": "1"}, {"scene_ref": "1"}],
+    )
+    trace: list[dict] = []
+    answer = await run_tool_loop(
+        [{"role": "user", "content": "第一场情况"}],
+        service=svc, dal=_StubDAL(), trace=trace,
+    )
+    assert answer == "查完了。"
+    assert [t["tool"] for t in trace] == ["count_takes", "get_scene_info"]
