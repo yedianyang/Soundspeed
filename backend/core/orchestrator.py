@@ -519,6 +519,26 @@ class Orchestrator:
         )
         self._np_task = task
 
+    def run_np_confirm_async(
+        self, extraction: Any, ts: float, client_id: str | None = None
+    ) -> None:
+        """fire-and-forget 确认卡 NP Pipeline（Task 4）：来自 POST /notes/confirm，extraction 已校验。
+
+        extraction 由前端回传（可能修正过），直接进 _resolve_apply_publish（clarify/apply/publish）。
+        raw_text_override=None → _resolve_apply_publish 用 extraction.note_text 作原文（与语音路径语义一致）。
+        task 管理/done callback 照 run_np_async 惯例：同一 _np_task 持有 + _np_done_callback 兜底。
+        """
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(
+            self._resolve_apply_publish(
+                extraction, ts=ts, client_id=client_id, raw_text_override=None
+            )
+        )
+        task.add_done_callback(
+            lambda t: self._np_done_callback(t, label=f"confirm(client_id={client_id!r})")
+        )
+        self._np_task = task
+
     def run_np_voice_async(
         self, audio: bytes, ts: float, client_id: str | None = None
     ) -> None:

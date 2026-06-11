@@ -56,6 +56,8 @@ from backend.core.events import (
 )
 from backend.pipelines.memo_route import classify_memo
 from backend.pipelines.note_parse import NoteParseError, parse_note
+# _validate_extraction：与语音/文本 NP 提取同一校验，同源（backend.pipelines.np_extract）。
+from backend.pipelines.np_extract import NPParseError, _validate_extraction
 from backend.pipelines.qp_query import build_scene_catalog  # D4：与 run_qp_query 同源
 from backend.pipelines.voice_dispatch import run_voice_dispatch
 
@@ -679,6 +681,44 @@ async def create_note(
         "category": note.category,
         "content": note.content,
     }
+
+
+class NoteConfirmBody(BaseModel):
+    """POST /notes/confirm 请求体。
+
+    前端将确认卡（可能修正过的）extraction 回传，复用 resolve+apply 落库。
+    取消操作不打此端点——前端纯丢弃，无需后端介入。
+    """
+
+    # 保留 dict 而非嵌套 BaseModel——校验权威在 _validate_extraction，避免两套枚举漂移。
+    extraction: dict
+    ts: float | None = None
+    client_id: str | None = None
+
+
+@router.post("/notes/confirm", status_code=202)
+async def confirm_note(
+    body: NoteConfirmBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict:
+    """确认卡回传（可能修正过的）extraction → 复用 resolve+apply 落库，返回 202。
+
+    校验 extraction（_validate_extraction，与语音/文本 NP 同一入口）同步发生在 202 关键路径：
+      非法 → 400，不触发任何后台 task，无副作用（note.* 事件不发出）。
+    合法 → fire-and-forget run_np_confirm_async → 返回 202。
+    ts 缺省时服务端 time.time() 兜底；client_id 缺省透传 None。
+    """
+    try:
+        extraction = _validate_extraction(body.extraction)
+    except NPParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    resolved_ts = body.ts if body.ts is not None else time.time()
+    orchestrator = request.app.state.orchestrator
+    orchestrator.run_np_confirm_async(extraction, resolved_ts, body.client_id)
+
+    return {"status": "processing"}
 
 
 # 后端语音上限：48kHz/30s mono PCM16 ≈ 2.9MB，给到 10MB 安全冗余（前端另有 30s/2MB 限制，§3.2）。
