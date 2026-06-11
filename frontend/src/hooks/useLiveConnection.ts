@@ -10,6 +10,7 @@ import type {
   DeviceWarningMsg,
   LlmStatusMsg,
   NoteAppliedMsg,
+  NoteConfirmMsg,
   NoteClarifyMsg,
   NoteFailedMsg,
   QpAnswerMsg,
@@ -123,6 +124,11 @@ export function useLiveConnection(): void {
         if (topic === "note.clarify") {
           // 确定性解析失败：移 pending + 推 clarify item（store）。无写库，不失效查询。
           s.noteClarify(payload as NoteClarifyMsg)
+          return
+        }
+        if (topic === "note.confirm") {
+          // NP 提取结果不确定：移 pending + 推 confirm item，等用户编辑后 submitConfirm。
+          s.noteConfirm(payload as NoteConfirmMsg)
           return
         }
         if (topic === "note.failed") {

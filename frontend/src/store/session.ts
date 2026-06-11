@@ -11,11 +11,14 @@ import type {
 } from "@/types/api"
 
 import type {
+  ConfirmItem,
   ClarifyItem,
   FeedReceipt,
   NoteAppliedMsg,
+  NoteConfirmMsg,
   NoteClarifyMsg,
   NoteFailedMsg,
+  NpExtractionDTO,
   PendingNote,
   QaItem,
 } from "@/types/api"
@@ -103,6 +106,9 @@ interface SessionState {
   // 就地队列的 clarify 项（note.clarify 派生，lingers，手动 dismiss）。
   clarifyItems: ClarifyItem[]
 
+  // 就地队列的 confirm 项（note.confirm 派生）。用户编辑后 submitConfirm 或 dismissConfirm。
+  confirmItems: ConfirmItem[]
+
   // QP 问答项：就地队列渲染（processing/done/failed）+ 留存供档案（P5）。
   // inlineDismissed 后只在档案显示，不在就地层。query 答案经 qp.answer.{CONN_ID} WS 按 client_id resolveQa。
   qaItems: QaItem[]
@@ -156,6 +162,9 @@ interface SessionState {
   noteApplied: (m: NoteAppliedMsg) => void
   noteClarify: (m: NoteClarifyMsg) => void
   dismissClarify: (clientId: string) => void
+  noteConfirm: (m: NoteConfirmMsg) => void
+  submitConfirm: (clientId: string, edited: NpExtractionDTO) => void
+  dismissConfirm: (clientId: string) => void
   noteFailed: (m: NoteFailedMsg) => void
   retryPending: (clientId: string) => void
   dismissPending: (clientId: string) => void
@@ -180,6 +189,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   pendingNotes: [],
   feedReceipts: [],
   clarifyItems: [],
+  confirmItems: [],
   qaItems: [],
   archiveUnread: 0,
   notesVersion: 0,
@@ -398,6 +408,55 @@ export const useSessionStore = create<SessionState>((set) => ({
   dismissClarify: (clientId) =>
     set((s) => ({
       clarifyItems: s.clarifyItems.filter((c) => c.client_id !== clientId),
+    })),
+
+  // note.confirm：按 client_id 移除对应 pending（若有）→ 推一条 ConfirmItem 等用户确认。
+  // null client_id 对齐 noteClarify 静默丢弃：生产语音 MemoInput 恒生成 client_id，null 仅边缘
+  // 路径；无法提交的孤儿卡不值得渲染。
+  noteConfirm: (m) =>
+    set((s) => {
+      const cid = m.client_id
+      if (!cid) return {}
+      const matched = s.pendingNotes.find((p) => p.client_id === cid)
+      const item: ConfirmItem = {
+        client_id: cid,
+        extraction: m.extraction,
+        disagreement: m.disagreement,
+        options: m.options,
+        ts: m.ts,
+        rawTextSummary: matched?.rawText,
+      }
+      return {
+        pendingNotes: s.pendingNotes.filter((p) => p.client_id !== cid),
+        confirmItems: [...s.confirmItems, item],
+      }
+    }),
+
+  // 用户确认（编辑后提交）：移除 ConfirmItem → 把 pending 以同一 client_id 回插（processing 态）。
+  // 网络调用（postNoteConfirm）由组件层负责（跟随 store 不发网络的既有模式）。
+  submitConfirm: (clientId, edited) =>
+    set((s) => {
+      const item = s.confirmItems.find((c) => c.client_id === clientId)
+      if (!item) return {}
+      // category/content 取 edited（用户可能已改），rawText 保留原始输入供 receipt 回填。
+      const reinserted: PendingNote = {
+        client_id: clientId,
+        kind: "text",
+        ts: item.ts,
+        category: edited.note_category,
+        content: edited.note_text,
+        rawText: item.rawTextSummary ?? edited.note_text,
+      }
+      return {
+        confirmItems: s.confirmItems.filter((c) => c.client_id !== clientId),
+        pendingNotes: [...s.pendingNotes, reinserted],
+      }
+    }),
+
+  // 纯前端丢弃确认卡（不打端点）。
+  dismissConfirm: (clientId) =>
+    set((s) => ({
+      confirmItems: s.confirmItems.filter((c) => c.client_id !== clientId),
     })),
 
   // 4.I：NP 失败 → 按 client_id 把对应 pending 标失败态（保留在列表，渲染红 + reason + 重试），

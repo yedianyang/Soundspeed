@@ -401,3 +401,35 @@ export interface QaItem {
 export interface ViewerCountMsg {
   count: number
 }
+
+// ── note.confirm 契约（确认卡，后端 NoteConfirmPayload / POST /notes/confirm）──
+
+// NP 提取结果（extraction 字段），note.confirm payload 与 POST /notes/confirm body 共用。
+export interface NpExtractionDTO {
+  scene_ordinal: number
+  shot_ordinal: number
+  take_ordinals: number[]
+  deictic: "none" | "current" | "prev"
+  mark: "pass" | "ng" | "keep" | "tbd" | "none"
+  note_text: string
+  note_category: "note" | "issue"
+}
+
+// WS note.confirm payload（后端 NoteConfirmPayload）。后端不确定时广播让前端展示确认卡。
+export interface NoteConfirmMsg {
+  client_id?: string | null
+  extraction: NpExtractionDTO
+  disagreement: string[]
+  options: { scenes: string[]; shots: string[]; take_numbers: number[] }
+  ts: number
+}
+
+// 就地队列的 confirm 项（由 note.confirm 派生）。用户编辑后提交或 dismiss。
+export interface ConfirmItem {
+  client_id: string
+  extraction: NpExtractionDTO
+  disagreement: string[]
+  options: { scenes: string[]; shots: string[]; take_numbers: number[] }
+  ts: number
+  rawTextSummary?: string // 原始输入摘要（取自对应 pending.rawText），供 receipt.rawText 回填
+}

@@ -10,6 +10,7 @@ import type {
   CreateSceneResult,
   NoteCreateResponse,
   NoteListResponse,
+  NpExtractionDTO,
   ParseSingleResult,
   PatchTakeBody,
   QueryResponse,
@@ -552,6 +553,17 @@ export function postNote(
 
 export function getTakeNotes(takeId: number): Promise<NoteListResponse> {
   return request<NoteListResponse>(`/api/v1/takes/${takeId}/notes`)
+}
+
+// 用户确认/编辑后提交确认卡（POST /notes/confirm）→ 202；后端随后发 note.applied 或 note.clarify。
+export function postNoteConfirm(
+  extraction: NpExtractionDTO,
+  clientId?: string | null,
+): Promise<void> {
+  return request<void>(`/api/v1/notes/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ extraction, client_id: clientId }),
+  })
 }
 
 // QP 同步直连：跑 tool-loop 并在 HTTP body 返回答案。仅用于「↩ 其实是提问」显式强制查询
