@@ -1,8 +1,10 @@
-"""NP 语音 A/B 评测 harness。同一批真实录音，两步式（现生产：ASR 转写→extract_np）
-vs 一步式 v2（音频直推 extract_np + user 帧哨兵句），逐字段判分，输出两模式对比行。
+"""NP 语音评测 harness（B 类门控 + A/B 诊断）。同一批真实录音，两步式（生产：ASR 转写→
+extract_np）vs 一步式 v3（音频直推，诊断备查），逐字段判分，输出两模式对比行。
 
-本文件为纯报告工具，不设准确率 FLOOR 断言（A/B 收口切生产后改造成门控）。
-断言只确认两模式都真的跑了（total > 0）。
+A/B 终裁（2026-06-11，design doc §5）：two_step 0.638 vs one_step v3 0.609，**两步式定案**；
+一步式赢内容保真、输映射纪律，v3 规则句 zero-sum，helper 留作模型升级后重测。
+门控只压 two_step（生产路径）：FLOOR = 0.638 − 0.10 ≈ 0.53；one_step 仅诊断不断言。
+共性上游盲区（乱序/大数字/口语省略，两模式都挂、三次一致）记 design doc §5，确认卡 UX 兜。
 
 跑法：
   GEMMA_MODEL_PATH=/path/to/gemma-4-E4B-it-Q4_K_M.gguf \\
@@ -30,6 +32,9 @@ from backend.tests.test_qp_eval import judge_answer
 FIXTURE = Path(__file__).parent / "fixtures" / "np_voice_eval.jsonl"
 AUDIO_DIR = Path(__file__).parent / "fixtures"
 RUNS_PER_CASE = 3
+# 基线 2026-06-11(23 case 全量,v3 轮):two_step 44/69=0.638。FLOOR=基线−0.10 向下取一位。
+# 已知失分:转写污染(nv01/s07/s18/s19)+ 共性上游盲区(s10/s11/s12/s22),见 design doc §5。
+ACCURACY_FLOOR = 0.53
 
 # 与 test_np_extract_eval 保持一致（上下文行格式一致）。
 CONTEXT = "当前：第1场 / 第1进 / 当前活跃第3条；上一条=第2条。"
@@ -176,9 +181,14 @@ async def test_np_voice_ab(np_service) -> None:
 
     print(f"\nA/B: two_step {_fmt('two_step')} vs one_step {_fmt('one_step')}", flush=True)
 
-    # 唯一断言：两模式都实际跑了
+    # 门控：只压生产路径 two_step（基线 2026-06-11 全量 0.638，FLOOR=基线−0.10）。
+    # one_step 仅诊断不断言（A/B 终裁两步式定案，design doc §5）。
     assert totals["two_step"] > 0, "two_step 没有跑任何 case"
     assert totals["one_step"] > 0, "one_step 没有跑任何 case"
+    two_step_acc = passed_counts["two_step"] / totals["two_step"]
+    assert two_step_acc >= ACCURACY_FLOOR, (
+        f"语音 NP(two_step) 准确率 {two_step_acc:.3f} 跌破门控 {ACCURACY_FLOOR}"
+    )
 
 
 # ── 契约测试（无模型常跑）────────────────────────────────────────────────────────
