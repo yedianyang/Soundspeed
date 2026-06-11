@@ -58,3 +58,36 @@ def test_seed_db_invariants(tmp_dal) -> None:
 
     hits = tmp_dal.search_script_lines("合同")
     assert len(hits) == 1 and "合同" in hits[0]["text"]
+
+
+# ── 语音 QP 评测夹具 schema 验证 ─────────────────────────────────────────────
+
+VOICE_FIXTURE = Path(__file__).parent / "fixtures" / "qp_voice_eval.jsonl"
+
+
+def _load_voice_cases() -> list[dict]:
+    with VOICE_FIXTURE.open(encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def test_voice_fixture_schema() -> None:
+    cases = _load_voice_cases()
+    assert len(cases) >= 1, "语音夹具至少一条"
+    ids = [c["id"] for c in cases]
+    assert len(ids) == len(set(ids)), "id 重复"
+    for c in cases:
+        assert isinstance(c.get("id"), str) and c["id"].strip(), f"id 缺失: {c}"
+        assert isinstance(c.get("audio"), str) and c["audio"].strip(), f"audio 缺失: {c['id']}"
+        assert isinstance(c.get("question"), str) and c["question"].strip(), f"question 缺失: {c['id']}"
+        assert isinstance(c.get("must_contain_all"), list), f"{c['id']}: must_contain_all 须为 list"
+        for group in c["must_contain_all"]:
+            assert isinstance(group, list) and group, f"{c['id']}: 内层须非空 list"
+            assert all(isinstance(s, str) and s for s in group), c["id"]
+        assert isinstance(c.get("must_not_contain"), list), f"{c['id']}: must_not_contain 须为 list"
+        assert all(isinstance(s, str) and s for s in c["must_not_contain"]), c["id"]
+        # audio 文件真实存在
+        audio_path = Path(__file__).parent / "fixtures" / c["audio"]
+        assert audio_path.exists(), f"{c['id']}: audio 文件不存在: {audio_path}"
+        # WAV 文件头校验：前 4 字节必须是 RIFF
+        header = audio_path.read_bytes()[:4]
+        assert header == b"RIFF", f"{c['id']}: WAV 头异常，前4字节={header!r}"

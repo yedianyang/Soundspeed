@@ -1,0 +1,4 @@
+{"id": "v-multihop-chars", "audio": "qp_eval_audio/v01_multihop_chars.wav", "question": "现在拍第十五场,下一场第十六场有几个演员?都是谁?", "must_contain_all": [["4", "四"], ["顾朗"], ["沈舟"], ["林晚"], ["陈默"]], "must_not_contain": ["没有这", "查不到"]}
+{"id": "v-negative-scene", "audio": "qp_eval_audio/v02_negative_scene.wav", "question": "第九十九场拍了多少条?", "must_contain_all": [["没有", "找不到", "不存在"]], "must_not_contain": []}
+{"id": "v-ghost-char-scenes", "audio": "qp_eval_audio/v03_ghost_char_scenes.wav", "question": "沈默在哪些场次出现了?", "must_contain_all": [["没有", "找不到", "不存在", "未出现", "没出现"]], "must_not_contain": [], "note": "防顶替哨兵:种子库只有沈舟/陈默无沈默;顶替成陈默答16场→缺『没有』即挂"}
+{"id": "v-ghost-char-home", "audio": "qp_eval_audio/v04_ghost_char_home.wav", "question": "哪几场是沈默都在的,而且在家里拍的?", "must_contain_all": [["没有", "找不到", "不存在", "未出现", "没出现"]], "must_not_contain": [], "note": "跨场角色+地点复合,typed 工具缺位逼 SQL;真值=无沈默(陈默也只在16场咖啡馆非江城家)"}

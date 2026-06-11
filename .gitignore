@@ -74,6 +74,9 @@ backend/models/
 data/*
 !data/.gitkeep
 
+# 语音 QP 评测原始录音（m4a）—— 现场采集含个人声纹，不进 git；转换后的 wav 进
+backend/tests/fixtures/qp_eval_audio/raw/
+
 # SQLite 运行库（schema / 迁移脚本是源码，正常进 git）
 *.db
 *.sqlite
