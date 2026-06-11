@@ -58,12 +58,13 @@ def _judge_note_text(note_text: str, note_text_keywords: list[list[str]]) -> tup
 async def _run_one_step(audio: bytes, svc, context_line: str):
     """一步式 v2 runner（harness 内部 helper）。
 
-    音频直推 forced extract_np + user 帧哨兵句「没听到明确条/次编号就填空数组，不要编造」。
+    音频直推 forced extract_np + user 帧规则句（v3）。
     A/B 赢了才进生产 np_extract.py，替代 run_extract_np_voice。
 
-    等价于探针一步式 v2（docs/superpowers/specs/2026-06-11-np-voice-design.md §1）：
-    直接把音频喂 infer_voice_tool，不经 ASR 转写步骤，消除转写污染
-    （「噪声」→「操聲」、幻觉词等）。迁生产时从该 design doc 找完整上下文。
+    版本史（docs/superpowers/specs/2026-06-11-np-voice-design.md §1/§4）：
+    v2=哨兵句（修 take=[-1]）；v3=追加 钉死 过=pass/指代映射/上下文数字不算——
+    针对全量 A/B 暴露的一步式映射纪律失守（s02/s13 过→keep、s08/s14 指代丢、
+    s01 上下文渗漏 take=[3]）。迁生产时从该 design doc 找完整上下文。
     """
     from backend.llm.multimodal import AUDIO_SENTINEL
     from backend.llm.tools.note_extract import EXTRACT_NP_TOOL_NAME
@@ -75,7 +76,7 @@ async def _run_one_step(audio: bytes, svc, context_line: str):
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": "听这段录音师的话,提取成固定结构。第N次/第N条=take_ordinals 数组元素;没听到明确的条/次编号就填空数组,不要编造。"},
+                {"type": "text", "text": "听这段录音师的话,提取成固定结构。注意:过/通过=pass,保/留=keep,别混;这条=current,刚才那条/上一条=prev;take_ordinals 只填语音里明确说出的条/次编号,上下文行里的数字不算,没说就填空数组,不要编造。"},
                 {"type": "image_url", "image_url": {"url": AUDIO_SENTINEL}},
             ],
         },
