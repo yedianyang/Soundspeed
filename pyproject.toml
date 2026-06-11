@@ -38,6 +38,7 @@ markers = [
     "np_eval: NP 提取评测 harness，需真 E4B，GEMMA_MODEL_PATH 未设则 skip",
     "qp_eval: QP 查询评测 harness,需真 E4B,GEMMA_MODEL_PATH 未设则 skip",
     "qp_voice_eval: 语音 QP 评测 harness,需真 E4B,GEMMA_MODEL_PATH 未设则 skip",
+    "np_voice_eval: 语音 NP A/B 评测 harness,需真 E4B,GEMMA_MODEL_PATH 未设则 skip",
 ]
 
 [tool.ruff]
