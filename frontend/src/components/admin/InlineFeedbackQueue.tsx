@@ -3,9 +3,9 @@ import { Loader2, ChevronDown, X } from "lucide-react"
 import { cn, formatTakeLabel } from "@/lib/utils"
 import { feedBlock } from "@/lib/styles"
 import { useSessionStore } from "@/store/session"
-import { postNote, postVoiceNote } from "@/lib/api"
+import { postNote, postVoiceNote, postNoteConfirm } from "@/lib/api"
 import { runQuery, runNote } from "@/lib/feed-actions"
-import type { ClarifyItem, PendingNote, FeedReceipt, QaItem } from "@/types/api"
+import type { ClarifyItem, ConfirmItem, PendingNote, FeedReceipt, QaItem, NpExtractionDTO } from "@/types/api"
 
 // note.failed reason → 场记可读文案（4.I），沿用旧 NoteList 映射。
 const FAIL_REASON_TEXT: Record<string, string> = {
@@ -82,6 +82,216 @@ function ClarifyRow({
         onClick={() => onDismiss(c.client_id)}
         className="flex-shrink-0 text-muted-foreground/70 hover:text-foreground"
         title="收起"
+      >
+        <X className="size-3.5" />
+      </button>
+    </div>
+  )
+}
+
+// ── 验证「次」输入：空串→[]（当前条，合法）；非空则要求逗号分隔的正整数（>0）。
+// 返回 null=非法，数组=合法（含空数组）。export 供测试直接覆盖。
+export function parseTakeOrdinals(raw: string): number[] | null {
+  const trimmed = raw.trim()
+  if (trimmed === "") return []
+  const parts = trimmed.split(",").map((s) => s.trim())
+  const nums = parts.map(Number)
+  if (nums.some((n) => !Number.isInteger(n) || n <= 0)) return null
+  return nums
+}
+
+// ── ConfirmRow：note.confirm 确认卡，横向单行，场/镜 chip 可切换，次输入可改，分歧高亮。──
+// 配色 alert 档（行动优先级高），对齐 PendingRow 失败态 / ClarifyRow。
+// 场 select：scenes 为选项（string[]）；shot select：shots 为选项；次：逗号分隔正整数。
+// 初值 0 → 「当前场/镜」虚拟选项；非 0 且不在列表 → 追加并标「(新)」。
+// disagreement 含对应键 → 加 ring 高亮（alert 同色调，ring-primary）。
+// 确认：submitConfirm + postNoteConfirm（fire-and-forget，catch 走 noteFailed）。
+// 取消：dismissConfirm（纯前端，不落库）。
+function ConfirmRow({
+  c,
+  onDismiss,
+}: {
+  c: ConfirmItem
+  onDismiss: (id: string) => void
+}) {
+  const submitConfirm = useSessionStore((s) => s.submitConfirm)
+  const noteFailed = useSessionStore((s) => s.noteFailed)
+
+  // ── 本地编辑状态（初值来自 extraction）──
+  const [scene, setScene] = useState(String(c.extraction.scene_ordinal))
+  const [shot, setShot] = useState(String(c.extraction.shot_ordinal))
+  const [takeRaw, setTakeRaw] = useState(c.extraction.take_ordinals.join(","))
+
+  const parsedTakes = parseTakeOrdinals(takeRaw)
+  const takeInvalid = parsedTakes === null
+
+  // ── 场次选项构造（string[]）──
+  function buildSceneOptions(): { value: string; label: string }[] {
+    const opts = c.options.scenes.map((s) => ({ value: s, label: s }))
+    if (c.extraction.scene_ordinal === 0) {
+      return [{ value: "0", label: "当前场" }, ...opts]
+    }
+    const cur = String(c.extraction.scene_ordinal)
+    if (!c.options.scenes.includes(cur)) {
+      opts.push({ value: cur, label: `${cur}(新)` })
+    }
+    return opts
+  }
+
+  // ── 镜选项构造（string[]）──
+  function buildShotOptions(): { value: string; label: string }[] {
+    const opts = c.options.shots.map((s) => ({ value: s, label: s }))
+    if (c.extraction.shot_ordinal === 0) {
+      return [{ value: "0", label: "当前镜" }, ...opts]
+    }
+    const cur = String(c.extraction.shot_ordinal)
+    if (!c.options.shots.includes(cur)) {
+      opts.push({ value: cur, label: `${cur}(新)` })
+    }
+    return opts
+  }
+
+  const sceneOpts = buildSceneOptions()
+  const shotOpts = buildShotOptions()
+  const shotsEmpty = c.options.shots.length === 0
+
+  // 镜号退化 input 的数值校验（select 路径选项受控不会非法）：非空且非数字 → 非法。
+  const shotInvalid = shotsEmpty && shot.trim() !== "" && Number.isNaN(Number(shot))
+
+  // disagreement 高亮辅助
+  const dg = new Set(c.disagreement)
+  const ringCls = "ring-1 ring-primary/60"
+
+  const handleConfirm = () => {
+    if (takeInvalid || shotInvalid) return
+    const edited: NpExtractionDTO = {
+      ...c.extraction,
+      scene_ordinal: Number(scene),
+      shot_ordinal: Number(shot),
+      take_ordinals: parsedTakes ?? [],
+    }
+    submitConfirm(c.client_id, edited)
+    postNoteConfirm(edited, c.client_id).catch(() => {
+      noteFailed({ reason: "upload_failed", ts: c.ts, client_id: c.client_id })
+    })
+  }
+
+  // 共用 select 基类（小、克制）
+  const selectCls = (highlighted: boolean) =>
+    cn(
+      "h-7 rounded-md border border-border/60 bg-background px-1.5 text-xs text-foreground",
+      "focus:outline-none focus:ring-1 focus:ring-primary/40",
+      highlighted && ringCls,
+    )
+
+  return (
+    <div
+      className={cn(
+        feedBlock.alert,
+        "flex flex-wrap items-center gap-1.5 px-2.5 py-1.5 text-xs",
+      )}
+    >
+      {/* 场 select */}
+      <select
+        value={scene}
+        onChange={(e) => setScene(e.target.value)}
+        className={selectCls(dg.has("scene_ordinal"))}
+        aria-label="场次"
+      >
+        {sceneOpts.map((o) => (
+          <option key={o.value} value={o.value}>
+            场{o.label}
+          </option>
+        ))}
+      </select>
+
+      {/* 镜 select 或 input（shots 为空退化 input）*/}
+      {shotsEmpty ? (
+        <input
+          type="text"
+          value={shot}
+          onChange={(e) => setShot(e.target.value)}
+          className={cn(
+            "h-7 w-14 rounded-md border bg-background px-1.5 text-xs text-foreground",
+            "focus:outline-none focus:ring-1 focus:ring-primary/40",
+            shotInvalid
+              ? "border-destructive/70 ring-1 ring-destructive/50"
+              : dg.has("shot_ordinal")
+                ? cn("border-border/60", ringCls)
+                : "border-border/60",
+          )}
+          aria-label="镜号"
+          placeholder="镜"
+          aria-invalid={shotInvalid}
+        />
+      ) : (
+        <select
+          value={shot}
+          onChange={(e) => setShot(e.target.value)}
+          className={selectCls(dg.has("shot_ordinal"))}
+          aria-label="镜号"
+        >
+          {shotOpts.map((o) => (
+            <option key={o.value} value={o.value}>
+              镜{o.label}
+            </option>
+          ))}
+        </select>
+      )}
+
+      {/* 次 input */}
+      <input
+        type="text"
+        value={takeRaw}
+        onChange={(e) => setTakeRaw(e.target.value)}
+        className={cn(
+          "h-7 w-20 rounded-md border bg-background px-1.5 text-xs text-foreground",
+          "focus:outline-none focus:ring-1 focus:ring-primary/40",
+          takeInvalid
+            ? "border-destructive/70 ring-1 ring-destructive/50"
+            : dg.has("take_ordinals")
+              ? cn("border-border/60", ringCls)
+              : "border-border/60",
+        )}
+        placeholder="当前条"
+        aria-label="条次"
+        aria-invalid={takeInvalid}
+      />
+      {takeInvalid && (
+        <span className="text-destructive/80 text-[10px] flex-shrink-0">格式有误</span>
+      )}
+
+      {/* mark 徽章（none 不显示）*/}
+      {c.extraction.mark !== "none" && (
+        <span className="flex-shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary font-medium">
+          {c.extraction.mark}
+        </span>
+      )}
+
+      {/* note_text 摘要（截断）*/}
+      {c.extraction.note_text && (
+        <span className="flex-1 min-w-0 truncate text-foreground/80">
+          {c.extraction.note_text}
+        </span>
+      )}
+
+      {/* 确认 / 取消 */}
+      <button
+        onClick={handleConfirm}
+        disabled={takeInvalid || shotInvalid}
+        className={cn(
+          "flex-shrink-0 rounded-md px-2 py-0.5 text-xs font-medium transition-opacity",
+          takeInvalid || shotInvalid
+            ? "opacity-40 cursor-not-allowed text-foreground/50"
+            : "text-primary hover:underline",
+        )}
+      >
+        确认
+      </button>
+      <button
+        onClick={() => onDismiss(c.client_id)}
+        className="flex-shrink-0 text-muted-foreground/70 hover:text-foreground"
+        title="取消，不落库"
       >
         <X className="size-3.5" />
       </button>
@@ -210,14 +420,16 @@ function QaRow({
 }
 
 // 就地反馈队列：替代旧常驻 NoteList。短暂、就地、自清理。
-// note（pending + 回执）+ query（QaRow）按 ts 混排，最新贴底。
+// note（pending + 回执）+ query（QaRow）+ confirm（ConfirmRow）+ clarify（ClarifyRow）按 ts 混排，最新贴底。
 export default function InlineFeedbackQueue() {
   const pendingNotes = useSessionStore((s) => s.pendingNotes)
   const feedReceipts = useSessionStore((s) => s.feedReceipts)
   const clarifyItems = useSessionStore((s) => s.clarifyItems)
+  const confirmItems = useSessionStore((s) => s.confirmItems)
   const qaItems = useSessionStore((s) => s.qaItems)
   const dismissReceipt = useSessionStore((s) => s.dismissReceipt)
   const dismissClarify = useSessionStore((s) => s.dismissClarify)
+  const dismissConfirm = useSessionStore((s) => s.dismissConfirm)
   const dismissQaInline = useSessionStore((s) => s.dismissQaInline)
   const dismissPending = useSessionStore((s) => s.dismissPending)
   const retryPending = useSessionStore((s) => s.retryPending)
@@ -284,6 +496,10 @@ export default function InlineFeedbackQueue() {
     ...clarifyItems.map((c) => ({
       ts: c.ts,
       node: <ClarifyRow key={`c-${c.client_id}`} c={c} onDismiss={dismissClarify} />,
+    })),
+    ...confirmItems.map((c) => ({
+      ts: c.ts,
+      node: <ConfirmRow key={`confirm-${c.client_id}`} c={c} onDismiss={dismissConfirm} />,
     })),
   ].sort((a, b) => a.ts - b.ts)
 
