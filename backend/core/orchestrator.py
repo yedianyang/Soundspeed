@@ -617,39 +617,23 @@ class Orchestrator:
             current_take_number=self.session.take_number if current_take_id is not None else None,
         )
 
-    async def _finalize_np(
+    async def _resolve_apply_publish(
         self,
-        run_awaitable: Any,
+        extraction: Any,
         *,
         ts: float,
         client_id: str | None,
         raw_text_override: str | None,
     ) -> None:
-        """await extract runner → NPExtraction → 解析 → clarify 或 多目标 apply → 回灌。
+        """拿到 extraction 后的确定性段：resolve → clarify 或 apply → publish。
 
-        失败（parse/timeout/FK/model_unavailable）→ note.failed（带 client_id）。
-        clarify（解不出/不唯一/不存在）→ note.clarify（非失败，不经 except 分支）。
+        _finalize_np（文本单跑）和语音双跑一致分支共用此路径。
+        clarify（解不出/不唯一/不存在）→ note.clarify（非失败）。
         成功 apply → note.applied（一条带 N changes）+ 逐 marked take_id 发 take.changed。
+        FK 失败 → note.failed(take_not_found)。
         """
-        from backend.llm.errors import ModelUnavailableError  # noqa: PLC0415
         from backend.pipelines.np_apply import apply_targets  # noqa: PLC0415
-        from backend.pipelines.np_extract import NPParseError  # noqa: PLC0415
-        from backend.pipelines.np_resolve import NPContext, resolve_targets  # noqa: PLC0415
-
-        try:
-            extraction = await run_awaitable
-        except Exception as exc:
-            if isinstance(exc, NPParseError):
-                reason = "parse_error"
-            elif isinstance(exc, asyncio.TimeoutError):
-                reason = "timeout"
-            elif isinstance(exc, ModelUnavailableError):
-                reason = "model_unavailable"
-            else:
-                raise
-            logger.warning("NP extract failed (%s) [client_id=%s]: %s", reason, client_id, exc)
-            self.publish(NOTE_FAILED, NoteFailedPayload(reason=reason, ts=ts, client_id=client_id))
-            return
+        from backend.pipelines.np_resolve import resolve_targets  # noqa: PLC0415
 
         # 确定性解析（不引用 take_context，直接打 DAL）。
         ctx = self._build_np_context()
@@ -712,6 +696,42 @@ class Orchestrator:
                         script_diff=take.script_diff,
                     ),
                 )
+
+    async def _finalize_np(
+        self,
+        run_awaitable: Any,
+        *,
+        ts: float,
+        client_id: str | None,
+        raw_text_override: str | None,
+    ) -> None:
+        """await extract runner → NPExtraction → 解析 → clarify 或 多目标 apply → 回灌。
+
+        失败（parse/timeout/FK/model_unavailable）→ note.failed（带 client_id）。
+        clarify（解不出/不唯一/不存在）→ note.clarify（非失败，不经 except 分支）。
+        成功 apply → note.applied（一条带 N changes）+ 逐 marked take_id 发 take.changed。
+        """
+        from backend.llm.errors import ModelUnavailableError  # noqa: PLC0415
+        from backend.pipelines.np_extract import NPParseError  # noqa: PLC0415
+
+        try:
+            extraction = await run_awaitable
+        except Exception as exc:
+            if isinstance(exc, NPParseError):
+                reason = "parse_error"
+            elif isinstance(exc, asyncio.TimeoutError):
+                reason = "timeout"
+            elif isinstance(exc, ModelUnavailableError):
+                reason = "model_unavailable"
+            else:
+                raise
+            logger.warning("NP extract failed (%s) [client_id=%s]: %s", reason, client_id, exc)
+            self.publish(NOTE_FAILED, NoteFailedPayload(reason=reason, ts=ts, client_id=client_id))
+            return
+
+        await self._resolve_apply_publish(
+            extraction, ts=ts, client_id=client_id, raw_text_override=raw_text_override
+        )
 
     async def _run_np_async(
         self, raw_text: str, parsed_category: str, ts: float, client_id: str | None = None
