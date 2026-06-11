@@ -253,6 +253,24 @@ class NoteClarifyPayload:
     ts: float
 
 
+NOTE_CONFIRM = "note.confirm"
+
+
+@dataclass(frozen=True)
+class NoteConfirmPayload:
+    """语音 NP 自一致性分歧 → 待人确认（不落库）。
+
+    options 是确认卡 chip 下拉值域（v1：按 extraction 的场解析；切场不刷新，
+    确认后 resolve_targets 兜底不存在组合）。extraction=第一跑的 NPExtraction asdict。
+    """
+
+    client_id: str | None
+    extraction: dict          # NPExtraction asdict（7 字段）
+    disagreement: list[str]   # 两跑不一致的字段名（前端高亮）
+    options: dict             # {"scenes": [str], "shots": [str], "take_numbers": [int]}
+    ts: float
+
+
 @dataclass(frozen=True)
 class TakeDeletedPayload:
     """take.deleted 的 payload（2.C）。"""
