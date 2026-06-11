@@ -44,6 +44,21 @@ describe("noteApplied", () => {
     useSessionStore.getState().noteApplied({ client_id: null, changes: [], ts: 9 })
     expect(useSessionStore.getState().pendingNotes).toHaveLength(1)
     expect(useSessionStore.getState().notesVersion).toBe(1)
+    expect(useSessionStore.getState().feedReceipts).toHaveLength(0)
+  })
+
+  it("client_id 非空但无匹配 pending（迟到/孤儿）：仍推回执 + bump，rawText 兜底为空串", () => {
+    // pendingNotes 里没有 c-orphan，模拟后端重播或迟到的 applied
+    useSessionStore.getState().noteApplied({
+      client_id: "c-orphan",
+      changes: [{ op: "mark", take_id: 1, scene_code: "1", shot: "", take_number: 1, take_suffix: "", status: "keep" }],
+      ts: 5,
+    })
+    const s = useSessionStore.getState()
+    expect(s.notesVersion).toBe(1)
+    expect(s.feedReceipts).toHaveLength(1)
+    expect(s.feedReceipts[0].client_id).toBe("c-orphan")
+    expect(s.feedReceipts[0].rawText).toBe("") // 无 pending 时兜底空串
   })
 })
 

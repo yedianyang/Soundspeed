@@ -4,7 +4,6 @@ import { useSessionStore, type ToolCallEntry } from "@/store/session"
 import type {
   AsrMsg,
   NoteFailedMsg,
-  NoteProcessedMsg,
   PendingNote,
   QaItem,
   ScriptDiff,
@@ -69,19 +68,6 @@ function pendingNote(
     category: "note",
     content: "",
     rawText: "",
-    ...over,
-  }
-}
-
-function noteProcessedMsg(
-  over: Partial<NoteProcessedMsg> & Pick<NoteProcessedMsg, "client_id">,
-): NoteProcessedMsg {
-  return {
-    event_id: 1,
-    take_id: 1,
-    category: "note",
-    content: "",
-    ts: 0,
     ...over,
   }
 }
@@ -445,50 +431,6 @@ describe("applyBackfilledSegments", () => {
     useSessionStore.setState({ currentTakeId: 1, isRecording: true })
     useSessionStore.getState().applyBackfilledSegments(1, [transcriptSeg({ ch: 2, text: "同take回填" })])
     expect(useSessionStore.getState().segments.ch2[0].text).toBe("同take回填")
-  })
-})
-
-// noteProcessed：client_id 精确移除 pending + notesVersion 递增 + 推 feedReceipt（rawText 兜底）。
-describe("noteProcessed", () => {
-  beforeEach(() => {
-    useSessionStore.setState({ pendingNotes: [], feedReceipts: [], notesVersion: 0 })
-  })
-
-  it("命中 pending：移除该 pending + notesVersion+1 + 推回执（rawText 取 pending 原文）", () => {
-    useSessionStore.setState({
-      pendingNotes: [pendingNote({ client_id: "c1", rawText: "原始口述", content: "改写后" })],
-    })
-    useSessionStore.getState().noteProcessed(
-      noteProcessedMsg({ client_id: "c1", category: "keep", content: "LLM改写文案" }),
-    )
-    const s = useSessionStore.getState()
-    expect(s.pendingNotes.find((p) => p.client_id === "c1")).toBeUndefined()
-    expect(s.notesVersion).toBe(1)
-    expect(s.feedReceipts).toHaveLength(1)
-    expect(s.feedReceipts[0]).toMatchObject({
-      client_id: "c1",
-      category: "keep",
-      content: "LLM改写文案",
-      rawText: "原始口述", // 取 pending 的 rawText，非 m.content
-    })
-  })
-
-  it("有 client_id 但无匹配 pending：rawText 回退 m.content，仍推回执 + bump", () => {
-    useSessionStore.getState().noteProcessed(
-      noteProcessedMsg({ client_id: "c-none", content: "兜底文案" }),
-    )
-    const s = useSessionStore.getState()
-    expect(s.notesVersion).toBe(1)
-    expect(s.feedReceipts[0].rawText).toBe("兜底文案")
-  })
-
-  it("client_id=null（异常/旧链路）：不删 pending、不推回执，仅 notesVersion+1", () => {
-    useSessionStore.setState({ pendingNotes: [pendingNote({ client_id: "keep-me" })] })
-    useSessionStore.getState().noteProcessed(noteProcessedMsg({ client_id: null }))
-    const s = useSessionStore.getState()
-    expect(s.pendingNotes).toHaveLength(1) // 未误删
-    expect(s.feedReceipts).toHaveLength(0)
-    expect(s.notesVersion).toBe(1)
   })
 })
 
