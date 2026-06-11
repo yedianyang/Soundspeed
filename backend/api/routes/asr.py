@@ -60,6 +60,7 @@ async def get_asr(
             "engine": None,
             "language": None,
             "model": None,
+            "streaming": False,
             "languages": _UI_LANGUAGES,
             "engines": _engines_payload(),
         }
@@ -68,6 +69,8 @@ async def get_asr(
         "engine": session.engine,
         "language": session.language,
         "model": session.model_size,
+        # 2pass 流式 partial 是否激活(additive 字段,旧前端无感;spec §3 Q3)
+        "streaming": session.streaming,
         "languages": _UI_LANGUAGES,
         "engines": _engines_payload(),
     }

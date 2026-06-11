@@ -76,7 +76,8 @@ interface SessionState {
   token: string | null
   connection: ConnectionState
 
-  // 当前录制 take 的实时转录（按 ch）。partial 替换该声道最后一条 partial，final 落定。
+  // 当前录制 take 的实时转录（按 ch）。
+  // applyAsr 三规则：①空文本 partial = 墓碑清除；②同键（start_frame）原位替换/落定；③否则 legacy 尾替换/push。
   segments: { ch1: LiveSeg[]; ch2: LiveSeg[] }
 
   // 当前 take 的 take_id。REC/建 take 解耦后，「当前 take」由 AdminHome 从 takes Map + 活跃场派生
@@ -203,6 +204,19 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
       const key = ch === 1 ? "ch1" : "ch2"
       const list = state.segments[key]
+      // 墓碑：空文本 partial = 清除信号（后端对「发过 partial 但 final 被门掉/滤掉」的 turn 发出，
+      // 防幽灵 partial 永驻）。同键优先，兜底删末条 partial，无 partial 则 no-op（幂等）。
+      if (!isFinal && p.text === "") {
+        const idx = list.findIndex((s) => s.isPartial && s.start_frame === p.start_frame)
+        if (idx >= 0) {
+          return { segments: { ...state.segments, [key]: [...list.slice(0, idx), ...list.slice(idx + 1)] } }
+        }
+        const last = list[list.length - 1]
+        if (last && last.isPartial) {
+          return { segments: { ...state.segments, [key]: list.slice(0, -1) } }
+        }
+        return {}
+      }
       const seg: LiveSeg = {
         text: p.text,
         speaker: p.speaker,
@@ -210,8 +224,16 @@ export const useSessionStore = create<SessionState>((set) => ({
         end_frame: p.end_frame,
         isPartial: !isFinal,
       }
+      // 薄键控：同声道同 start_frame 的 partial 原位替换/落定（2pass 后端 partial 与 final
+      // 逐位同键）。无键匹配回退 legacy「替换/落定末条 partial,否则 push」—— whisper 从不发
+      // partial 故恒走 legacy push,行为逐位不变;dev 注入器 time 键也靠这层回退保住。
+      const keyed = list.findIndex((s) => s.isPartial && s.start_frame === p.start_frame)
+      if (keyed >= 0) {
+        const next = [...list]
+        next[keyed] = seg
+        return { segments: { ...state.segments, [key]: next } }
+      }
       const last = list[list.length - 1]
-      // partial 替换该声道最后一条 partial；final 也优先落定最后一条 partial，否则 push。
       const next =
         last && last.isPartial
           ? [...list.slice(0, -1), seg]

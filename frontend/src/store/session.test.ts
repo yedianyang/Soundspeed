@@ -537,6 +537,93 @@ describe("pending 生命周期", () => {
   })
 })
 
+// applyAsr 2pass 键控与墓碑：start_frame 作为「薄键」原位替换/落定；空 partial 为墓碑清除信号。
+describe("applyAsr 2pass 键控与墓碑", () => {
+  // is_partial 只为对齐 wire 形状;applyAsr 的 isFinal 来自 topic 解析,不读 payload 该字段
+  const partial = (start: number, text: string): AsrMsg => ({
+    text, start_frame: start, end_frame: start + 1, speaker: null, take_id: null, is_partial: true,
+  })
+  const final = (start: number, text: string): AsrMsg => ({
+    text, start_frame: start, end_frame: start + 1000, speaker: null, take_id: null, is_partial: false,
+  })
+
+  beforeEach(() => {
+    useSessionStore.setState({
+      segments: { ch1: [], ch2: [] },
+      currentTakeId: null,
+    })
+  })
+
+  it("同键 partial 原位替换(非末条也命中)", () => {
+    const s = useSessionStore.getState()
+    s.applyAsr(1, false, partial(100, "你"))
+    s.applyAsr(1, true, final(100, "你好。"))   // 落定
+    s.applyAsr(1, false, partial(200, "下一"))
+    s.applyAsr(1, false, partial(200, "下一句"))
+    const segs = useSessionStore.getState().segments.ch1
+    expect(segs).toHaveLength(2)
+    expect(segs[1].text).toBe("下一句")
+    expect(segs[1].isPartial).toBe(true)
+  })
+
+  it("键控命中中间条目:final 落定中间的同键 partial,末条新 turn partial 不动", () => {
+    // 真实序列经 WS 锁不会产生双 partial,此处直构验证键控优先于 legacy 的查找语义。
+    useSessionStore.setState({ segments: { ch1: [
+      { text: "上一句", speaker: null, start_frame: 100, end_frame: 101, isPartial: true },
+      { text: "下一句", speaker: null, start_frame: 300, end_frame: 301, isPartial: true },
+    ], ch2: [] } })
+    useSessionStore.getState().applyAsr(1, true, final(100, "上一句。"))
+    const segs = useSessionStore.getState().segments.ch1
+    expect(segs).toHaveLength(2)
+    expect(segs[0]).toMatchObject({ text: "上一句。", isPartial: false })  // 中间(首位)同键落定
+    expect(segs[1]).toMatchObject({ text: "下一句", isPartial: true })     // 末条新 turn partial 不动
+  })
+
+  it("final 同键落定对应 partial", () => {
+    const s = useSessionStore.getState()
+    s.applyAsr(1, false, partial(100, "你好"))
+    s.applyAsr(1, true, final(100, "你好。"))
+    const segs = useSessionStore.getState().segments.ch1
+    expect(segs).toHaveLength(1)
+    expect(segs[0]).toMatchObject({ text: "你好。", isPartial: false })
+  })
+
+  it("墓碑删同键 partial", () => {
+    const s = useSessionStore.getState()
+    s.applyAsr(1, false, partial(100, "幽灵"))
+    s.applyAsr(1, false, partial(100, ""))      // 墓碑
+    expect(useSessionStore.getState().segments.ch1).toHaveLength(0)
+  })
+
+  it("墓碑无键匹配时兜底删末条 partial;无 partial 时 no-op", () => {
+    const s = useSessionStore.getState()
+    s.applyAsr(1, false, partial(100, "尾巴"))
+    s.applyAsr(1, false, partial(999, ""))      // 键不匹配 → 删末条 partial
+    expect(useSessionStore.getState().segments.ch1).toHaveLength(0)
+    s.applyAsr(1, false, partial(999, ""))      // 已无 partial → no-op 幂等
+    expect(useSessionStore.getState().segments.ch1).toHaveLength(0)
+  })
+
+  it("无键匹配回退 legacy:替换末条 partial(dev 注入器 time 键路径)", () => {
+    const s = useSessionStore.getState()
+    s.applyAsr(1, false, partial(111, "a"))
+    s.applyAsr(1, false, partial(222, "b"))     // 键不同 → 回退替换末条
+    const segs = useSessionStore.getState().segments.ch1
+    expect(segs).toHaveLength(1)
+    expect(segs[0].text).toBe("b")
+  })
+
+  it("墓碑落定后 final 仍正常 push", () => {
+    const s = useSessionStore.getState()
+    s.applyAsr(1, false, partial(100, "x"))
+    s.applyAsr(1, false, partial(100, ""))      // 墓碑
+    s.applyAsr(1, true, final(100, "正文"))
+    const segs = useSessionStore.getState().segments.ch1
+    expect(segs).toHaveLength(1)
+    expect(segs[0]).toMatchObject({ text: "正文", isPartial: false })
+  })
+})
+
 // appendToolCall：有界缓冲，最近 TOOL_CALLS_MAX(150) 条，超出从头丢。
 describe("appendToolCall", () => {
   beforeEach(() => {

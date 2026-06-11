@@ -31,3 +31,12 @@ class VadConfig:
     pre_roll_ms: int = 150          # 段首回补，防吃掉起音
     post_roll_ms: int = 150         # 段尾延伸，防切掉收音
     max_segment_ms: int = 30000     # 超长强切
+
+
+def frames_to_ms(frames: int) -> int:
+    """16kHz 绝对帧 → 毫秒(contract C1)。
+
+    partial 与 final 的 start_frame 键控覆盖依赖两边逐位相等,
+    全仓唯一换算点 —— 不要在别处各写一份 round(x/16)。
+    """
+    return round(frames / 16)
