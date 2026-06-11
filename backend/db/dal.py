@@ -893,6 +893,33 @@ class DAL:
         ).fetchall()
         return [_row_to_take(r) for r in rows]
 
+    def list_shots(self, scene_id: int) -> list[str]:
+        """某场 distinct shot（live，排软删），确认卡镜 chip 值域。
+
+        同一 shot 有多条 take 时 DISTINCT 去重（suffix 冲突时同号多行）。
+        """
+        with self._readonly_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT shot FROM takes "
+                "WHERE scene_id = ? AND deleted_at IS NULL ORDER BY shot;",
+                (scene_id,),
+            ).fetchall()
+        return [r["shot"] for r in rows]
+
+    def list_take_numbers(self, scene_id: int, shot: str) -> list[int]:
+        """某场某镜 take_number 升序列表（live，排软删），确认卡次 chip 值域。
+
+        同坐标多 suffix 时 take_number 会重复，用 DISTINCT 去重。
+        """
+        with self._readonly_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT take_number FROM takes "
+                "WHERE scene_id = ? AND shot = ? AND deleted_at IS NULL "
+                "ORDER BY take_number;",
+                (scene_id, shot),
+            ).fetchall()
+        return [int(r["take_number"]) for r in rows]
+
     # ── take_events ──────────────────────────────────────────────────────────
 
     def insert_take_event(

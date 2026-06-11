@@ -44,6 +44,24 @@ class NPExtraction:
     note_category: str  # note|issue
 
 
+_CONSISTENCY_FIELDS = ("scene_ordinal", "shot_ordinal", "take_ordinals", "deictic", "mark")
+
+
+def consistency_disagreement(e1: NPExtraction, e2: NPExtraction) -> list[str]:
+    """语音双跑承重字段比对（自一致性触发，design doc 2026-06-11-np-voice-design §3）。
+
+    note_text/note_category 跑间自然波动，不参与比对。take_ordinals 排序后比。
+    """
+    diff = []
+    for f in _CONSISTENCY_FIELDS:
+        a, b = getattr(e1, f), getattr(e2, f)
+        if f == "take_ordinals":
+            a, b = sorted(a), sorted(b)
+        if a != b:
+            diff.append(f)
+    return diff
+
+
 def _as_int(value: object, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise NPParseError(f"{field} 非整数: {value!r}")
