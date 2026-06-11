@@ -655,3 +655,106 @@ def test_query_executor_failure_broadcasts_friendly_error(monkeypatch):
     assert "抱歉" in bc["answer"] or "出错" in bc["answer"], (
         f"友好错误文案不含「抱歉」或「出错」：{bc['answer']!r}"
     )
+
+
+# ── 生产路径集成：dispatch note 委托 → 真 np_voice_adapter 双跑 → NOTE_CONFIRM（Task 3）──
+
+def test_note_delegate_double_run_disagreement_emits_note_confirm(monkeypatch, tmp_dal):
+    """生产语音链路集成：run_voice_dispatch note 委托路径 + 真 np_voice_adapter 双跑分歧 →
+    经 _persist_np_output_callable(=orch._finalize_np 接线，对齐 app.py lifespan)
+    发 NOTE_CONFIRM，不落库。
+
+    这是确认卡的真实触发路径：前端 MemoInput 语音恒走 run_voice_dispatch（带 conn_id），
+    不走 orchestrator.run_np_voice_async 直跑。双跑下沉 adapter 后此路径必须覆盖。
+    """
+    _patch_build_hop_a_system(monkeypatch)
+    from dataclasses import asdict
+
+    from backend.core.events import (
+        NOTE_APPLIED,
+        NOTE_CONFIRM,
+        TAKE_START,
+        TakeStartPayload,
+    )
+    from backend.core.orchestrator import create_orchestrator
+    from backend.core.session import SessionState
+    from backend.pipelines.np_extract import NPExtraction, np_voice_adapter
+    from backend.pipelines.voice_dispatch import run_voice_dispatch
+
+    # 真 orchestrator + 真 DAL（_finalize_np 确认分支与 _build_confirm_options 都打真 DAL）
+    scene_id = tmp_dal.create_scene("SC_DISPATCH")
+    session = SessionState()
+    session.activate_scene(scene_id)
+    orch = create_orchestrator(tmp_dal, session, llm_service=MagicMock())
+    orch.publish(TAKE_START, TakeStartPayload(scene_id=scene_id, shot="A", start_ts=1.0))
+    take_id = session.take_id
+    assert take_id is not None
+
+    confirmed: list = []
+    applied: list = []
+    orch.subscribe(NOTE_CONFIRM, lambda p: confirmed.append(p))
+    orch.subscribe(NOTE_APPLIED, lambda p: applied.append(p))
+
+    # 接线对齐 app.py lifespan：_persist_np_output_callable = orch._finalize_np 包装
+    async def _persist_wrapper(run_awaitable, *, ts, client_id, raw_text_override):
+        await orch._finalize_np(
+            run_awaitable, ts=ts, client_id=client_id, raw_text_override=raw_text_override
+        )
+
+    monkeypatch.setattr(
+        "backend.pipelines.voice_dispatch._persist_np_output_callable",
+        _persist_wrapper,
+    )
+
+    # 双跑两个不同 extraction（take_ordinals 分歧）
+    e1 = NPExtraction(
+        scene_ordinal=0, shot_ordinal=0, take_ordinals=[1],
+        deictic="none", mark="ng", note_text="第一条废", note_category="note",
+    )
+    e2 = NPExtraction(
+        scene_ordinal=0, shot_ordinal=0, take_ordinals=[3],
+        deictic="none", mark="ng", note_text="第三条废", note_category="note",
+    )
+    call_count = [0]
+
+    async def _stub_extract(audio, svc, timeout=60.0, context_line=""):
+        idx = min(call_count[0], 1)
+        call_count[0] += 1
+        return (e1, e2)[idx]
+
+    monkeypatch.setattr(
+        "backend.pipelines.np_extract.run_extract_np_voice", _stub_extract
+    )
+
+    np_input = orch._build_np_input("", "note", 1000.0)
+    notes_before = len(tmp_dal.list_notes(take_id))
+
+    # hop A 抠到 structure_note → note 分支；np_input + voice_runner 非 None → 委托路径
+    svc = _StubService("structure_note", {}, {})
+    result = asyncio.run(run_voice_dispatch(
+        WAV_BYTES,
+        conn_id="c-confirm",
+        ts=1000.0,
+        client_id="cid-confirm",
+        dal=tmp_dal,
+        service=svc,
+        cm=_StubCM(),
+        scene_context="",
+        np_input=np_input,
+        voice_runner=np_voice_adapter,  # 真 adapter：双跑在它内部
+    ))
+
+    assert result["kind"] == "note"
+    assert call_count[0] == 2, "真 np_voice_adapter 应双跑（run_extract_np_voice 调 2 次）"
+
+    # NOTE_CONFIRM 真的从 dispatch 入口发出
+    assert len(confirmed) == 1, "dispatch 委托路径分歧应发 NOTE_CONFIRM"
+    p = confirmed[0]
+    assert p.client_id == "cid-confirm"
+    assert "take_ordinals" in p.disagreement
+    assert p.extraction == asdict(e1), "确认卡预填值 = 第一跑结果"
+    assert "SC_DISPATCH" in p.options["scenes"]
+
+    # 不落库
+    assert applied == [], "分歧时不发 note.applied"
+    assert len(tmp_dal.list_notes(take_id)) == notes_before, "分歧时不应写库"

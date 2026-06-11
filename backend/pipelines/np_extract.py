@@ -6,19 +6,24 @@
 公共 API：
   NPExtraction          解析后的扁平意图 dataclass
   NPParseError          tool_call 解析/校验失败
+  NPConfirmNeeded       语音双跑承重字段分歧（非失败），携带第一跑结果与分歧字段
   parse_extract_tool_call(tool_call) -> NPExtraction
   run_extract_np(...)        文本路径（PART 5）
   run_extract_np_voice(...)  语音路径（PART 5）
+  np_voice_adapter(...)      语音 adapter（双跑自一致性，两入口共用）
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from backend.llm.service import LLMService
+
+logger = logging.getLogger(__name__)
 
 _VALID_DEICTIC = ("none", "current", "prev")
 _VALID_MARK = ("pass", "ng", "keep", "tbd", "none")
@@ -31,6 +36,22 @@ class NPParseError(Exception):
     def __init__(self, message: str, cause: Exception | None = None) -> None:
         super().__init__(message)
         self.cause = cause
+
+
+class NPConfirmNeeded(Exception):
+    """语音双跑承重字段分歧 → 需人确认(非失败)。携带第一跑结果与分歧字段。
+
+    由 np_voice_adapter 双跑后上抛，orchestrator._finalize_np 接住发 note.confirm
+    （不落库）。不是失败语义：不经 note.failed 映射分支。
+
+    选异常而非联合返回：runner 契约（await→NPExtraction）不变，_finalize_np 的
+    异常通道直接承载，无需拓宽所有 caller 的返回类型。
+    """
+
+    def __init__(self, extraction: "NPExtraction", disagreement: list[str]) -> None:
+        super().__init__(f"语音自一致性分歧: {disagreement}")
+        self.extraction = extraction
+        self.disagreement = disagreement
 
 
 @dataclass(frozen=True)
@@ -221,7 +242,36 @@ async def np_text_adapter(input_data, svc, timeout: float = 30.0):
 
 
 async def np_voice_adapter(input_data, audio: bytes, svc, timeout: float = 60.0):
-    """语音 NP 适配器：保持 (input_data, audio, svc) 位置签名，转调 run_extract_np_voice。"""
-    return await run_extract_np_voice(
-        audio, svc, timeout=timeout, context_line=_np_context_line(input_data)
-    )
+    """语音 NP 适配器（自一致性双跑）：保持 (input_data, audio, svc) 位置签名。
+
+    双跑下沉在此处的原因（架构定案）：两个生产入口——dispatch 委托路径
+    （voice_dispatch._handle_note_branch，前端 MemoInput 恒走此路）与 orchestrator
+    直跑路径（_run_np_voice_async）——都以本 adapter 为 voice_runner，一处实现全覆盖。
+
+    延迟代价：语音链路总耗时 ×2（同一音频 ASR+提取各跑两遍）。有意取舍：语音听写
+    天然不稳定，双跑是检测该不稳定性的最低成本手段；两跑一致时用户感知与单跑相同。
+
+    双跑语义：
+      第一跑异常 → 原样上抛（_finalize_np 既有映射 → note.failed，主流程报错路径不变）。
+      第二跑异常 → fail-open：logger.warning + 视同一致直落第一跑结果。
+        设计权衡：第二跑只是检测增强，它挂了不应阻塞主流程（单跑语义兜底）。
+      分歧（consistency_disagreement 非空）→ raise NPConfirmNeeded(e1, diff)，
+        由 _finalize_np 接住发 note.confirm 待人确认（不落库）。
+        第一跑结果为准：确认卡预填值取 e1（模型第一次判断），第二跑只用于触发检测。
+      一致 → return e1（单跑语义）。
+    """
+    context_line = _np_context_line(input_data)
+    # 第一跑：异常原样上抛（_finalize_np 既有 parse/timeout/model_unavailable 映射处理）
+    e1 = await run_extract_np_voice(audio, svc, timeout=timeout, context_line=context_line)
+
+    # 第二跑：try/except 全包（fail-open——检测增强挂了不阻塞主流程）
+    try:
+        e2 = await run_extract_np_voice(audio, svc, timeout=timeout, context_line=context_line)
+    except Exception as exc:
+        logger.warning("语音 NP 第二跑失败，fail-open 直落第一跑结果: %r", exc)
+        return e1
+
+    diff = consistency_disagreement(e1, e2)
+    if diff:
+        raise NPConfirmNeeded(e1, diff)
+    return e1

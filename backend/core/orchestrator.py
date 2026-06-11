@@ -22,6 +22,7 @@ from backend.core.events import (
     LLM_STATUS,
     NOTE_APPLIED,
     NOTE_CLARIFY,
+    NOTE_CONFIRM,
     NOTE_FAILED,
     TAKE_CHANGED,
     TAKE_END,
@@ -31,6 +32,7 @@ from backend.core.events import (
     LlmStatusPayload,
     NoteAppliedPayload,
     NoteClarifyPayload,
+    NoteConfirmPayload,
     NoteFailedPayload,
     TakeChangedPayload,
     TakeEndPayload,
@@ -627,7 +629,7 @@ class Orchestrator:
     ) -> None:
         """拿到 extraction 后的确定性段：resolve → clarify 或 apply → publish。
 
-        _finalize_np（文本单跑）和语音双跑一致分支共用此路径。
+        _finalize_np 拿到 extraction 后委托至此（文本与语音路径共用尾段）。
         clarify（解不出/不唯一/不存在）→ note.clarify（非失败）。
         成功 apply → note.applied（一条带 N changes）+ 逐 marked take_id 发 take.changed。
         FK 失败 → note.failed(take_not_found)。
@@ -705,17 +707,35 @@ class Orchestrator:
         client_id: str | None,
         raw_text_override: str | None,
     ) -> None:
-        """await extract runner → NPExtraction → 解析 → clarify 或 多目标 apply → 回灌。
+        """await extract runner → 异常路由 → 委托 _resolve_apply_publish。
 
-        失败（parse/timeout/FK/model_unavailable）→ note.failed（带 client_id）。
-        clarify（解不出/不唯一/不存在）→ note.clarify（非失败，不经 except 分支）。
-        成功 apply → note.applied（一条带 N changes）+ 逐 marked take_id 发 take.changed。
+        本方法只管 await 与异常分流：
+          失败（parse/timeout/model_unavailable）→ note.failed（带 client_id）。
+          confirm（NPConfirmNeeded，语音双跑分歧）→ note.confirm（非失败，不落库）。
+            双跑在 np_voice_adapter 内部：dispatch 委托路径（_persist_np_output_callable
+            接线 = 本方法）与 orchestrator 直跑路径都在此 await，确认分流一处接住全覆盖。
+        拿到 extraction → 委托 _resolve_apply_publish（clarify/apply/FK 结局见其 docstring）。
         """
         from backend.llm.errors import ModelUnavailableError  # noqa: PLC0415
-        from backend.pipelines.np_extract import NPParseError  # noqa: PLC0415
+        from backend.pipelines.np_extract import NPConfirmNeeded, NPParseError  # noqa: PLC0415
 
         try:
             extraction = await run_awaitable
+        except NPConfirmNeeded as exc:
+            # 语音双跑分歧（非失败，须在通用失败映射之前接住）：发确认卡待人确认，不落库。
+            # extraction = 第一跑结果 asdict（确认卡预填值），options = chip 值域。
+            options = self._build_confirm_options(exc.extraction)
+            self.publish(
+                NOTE_CONFIRM,
+                NoteConfirmPayload(
+                    client_id=client_id,
+                    extraction=asdict(exc.extraction),
+                    disagreement=exc.disagreement,
+                    options=options,
+                    ts=ts,
+                ),
+            )
+            return
         except Exception as exc:
             if isinstance(exc, NPParseError):
                 reason = "parse_error"
@@ -752,10 +772,69 @@ class Orchestrator:
             raw_text_override=raw_text,
         )
 
+    def _build_confirm_options(self, extraction: Any) -> dict:
+        """确认卡 chip 值域装配：scenes 全量 + shots/take_numbers 按 extraction 场解析。
+
+        scenes：全量 scene_code 列表（不因场解析失败而缩减，总让用户能切场）。
+
+        shot/take_numbers 解析逻辑：
+          scene_ordinal==0 → 用 session 当前场 (self.session.scene_id)
+          scene_ordinal!=0 → dal.resolve_scene_id(str(scene_ordinal))
+          解析不到（无当前场或场号不存在）→ shots=[] / take_numbers=[]
+
+        与 np_resolve.resolve_targets 的定镜逻辑对应（只差这里不查 take，只取值域）：
+          shot_ordinal!=0 → str(shot_ordinal) 查 dal.list_take_numbers（DB shot 是字符串）
+          shot_ordinal==0 → session.shot（仅当前场时；跨场不用当前镜，返回全镜 take_numbers concat）
+          注意 shot 在 DB 是字符串（"1"/"2"/"A"），shot_ordinal 是 int → str 转换后匹配。
+
+        deictic 不参与值域装配（它在 resolve 中只用于选具体 take，不影响值域范围）。
+        """
+        # scenes 全量（独立于场解析）
+        all_scenes = [s.get("scene_code", "") for s in self.dal.list_scenes_readonly()]
+
+        # 解析目标场 scene_id
+        scene_ordinal = extraction.scene_ordinal
+        if scene_ordinal == 0:
+            scene_id = self.session.scene_id
+        else:
+            scene_id = self.dal.resolve_scene_id(str(scene_ordinal))
+
+        if scene_id is None:
+            return {"scenes": all_scenes, "shots": [], "take_numbers": []}
+
+        shots = self.dal.list_shots(scene_id)
+
+        # take_numbers：按 shot_ordinal 定镜后查
+        shot_ordinal = extraction.shot_ordinal
+        if shot_ordinal != 0:
+            # 显式指定镜号：DB shot 是字符串，与 resolve_targets 保持一致（str(shot_ordinal)）
+            shot_key = str(shot_ordinal)
+        elif scene_ordinal == 0:
+            # 当前场 + 当前镜（take 活跃时 session.shot 有值）
+            shot_key = self.session.shot if self.session.shot is not None else None
+        else:
+            shot_key = None
+
+        if shot_key is not None:
+            take_numbers = self.dal.list_take_numbers(scene_id, shot_key)
+        else:
+            # 没有定镜 → 合并该场所有镜的 take_numbers（去重升序）
+            take_numbers_set: set[int] = set()
+            for s in shots:
+                take_numbers_set.update(self.dal.list_take_numbers(scene_id, s))
+            take_numbers = sorted(take_numbers_set)
+
+        return {"scenes": all_scenes, "shots": shots, "take_numbers": take_numbers}
+
     async def _run_np_voice_async(
         self, audio: bytes, ts: float, client_id: str | None = None
     ) -> None:
-        """后台异步语音 NP（4.J）：场镜次上下文 + 音频 → 多模态 Gemma 归置 → 写库 → WS 推送。"""
+        """后台异步语音 NP（4.J）：场镜次上下文 + 音频 → 多模态 Gemma 归置 → 写库 → WS 推送。
+
+        语音自一致性双跑在 np_voice_adapter 内部（双跑语义、延迟 ×2、fail-open 取舍
+        见 adapter docstring）：dispatch 委托路径与此直跑入口共用 adapter，一处实现
+        覆盖两个入口。分歧以 NPConfirmNeeded 上抛，由 _finalize_np 统一发 note.confirm。
+        """
         svc = self._deps.llm_service
         voice_runner = self._deps.voice_runner
         if svc is None or voice_runner is None:
