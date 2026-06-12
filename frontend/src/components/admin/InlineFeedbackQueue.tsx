@@ -2,10 +2,11 @@ import { useEffect, useState } from "react"
 import { Loader2, ChevronDown, X } from "lucide-react"
 import { cn, formatTakeLabel } from "@/lib/utils"
 import { feedBlock } from "@/lib/styles"
+import { parseTakeOrdinals, buildConfirmedExtraction } from "@/lib/confirm"
 import { useSessionStore } from "@/store/session"
 import { postNote, postVoiceNote, postNoteConfirm } from "@/lib/api"
 import { runQuery, runNote } from "@/lib/feed-actions"
-import type { ClarifyItem, ConfirmItem, PendingNote, FeedReceipt, QaItem, NpExtractionDTO } from "@/types/api"
+import type { ClarifyItem, ConfirmItem, PendingNote, FeedReceipt, QaItem } from "@/types/api"
 
 // note.failed reason → 场记可读文案（4.I），沿用旧 NoteList 映射。
 const FAIL_REASON_TEXT: Record<string, string> = {
@@ -89,17 +90,6 @@ function ClarifyRow({
   )
 }
 
-// ── 验证「次」输入：空串→[]（当前条，合法）；非空则要求逗号分隔的正整数（>0）。
-// 返回 null=非法，数组=合法（含空数组）。export 供测试直接覆盖。
-export function parseTakeOrdinals(raw: string): number[] | null {
-  const trimmed = raw.trim()
-  if (trimmed === "") return []
-  const parts = trimmed.split(",").map((s) => s.trim())
-  const nums = parts.map(Number)
-  if (nums.some((n) => !Number.isInteger(n) || n <= 0)) return null
-  return nums
-}
-
 // ── ConfirmRow：note.confirm 确认卡，横向单行，场/镜 chip 可切换，次输入可改，分歧高亮。──
 // 配色 alert 档（行动优先级高），对齐 PendingRow 失败态 / ClarifyRow。
 // 场 select：scenes 为选项（string[]）；shot select：shots 为选项；次：逗号分隔正整数。
@@ -164,12 +154,7 @@ function ConfirmRow({
 
   const handleConfirm = () => {
     if (takeInvalid || shotInvalid) return
-    const edited: NpExtractionDTO = {
-      ...c.extraction,
-      scene_ordinal: Number(scene),
-      shot_ordinal: Number(shot),
-      take_ordinals: parsedTakes ?? [],
-    }
+    const edited = buildConfirmedExtraction(c.extraction, scene, shot, parsedTakes ?? [])
     submitConfirm(c.client_id, edited)
     postNoteConfirm(edited, c.client_id).catch(() => {
       noteFailed({ reason: "upload_failed", ts: c.ts, client_id: c.client_id })
