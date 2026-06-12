@@ -40,7 +40,7 @@ from backend.core.events import (
     TakeStartPayload,
 )
 from backend.core.session import SessionState
-from backend.db.dal import DAL
+from backend.db.dal import DAL, normalize_scene_code
 
 Handler = Callable[[object], None]
 
@@ -811,8 +811,19 @@ class Orchestrator:
 
         deictic 不参与值域装配（它在 resolve 中只用于选具体 take，不影响值域范围）。
         """
-        # scenes 全量（独立于场解析）
-        all_scenes = [s.get("scene_code", "") for s in self.dal.list_scenes_readonly()]
+        # scenes 全量（独立于场解析），只保留归一后为纯数字的 scene_code。
+        # 理由：前端 chip 提交时用 Number(value)；非数字编码（如 "SC_OPTS"、"3A"）经归一后
+        # 仍含字母，Number() 得 NaN → JSON null → _as_int 400。
+        # 归一规则：normalize_scene_code("Scene_7")→"7"（数字，保留）；"3A"→"3A"（含字母，丢弃）。
+        # 去重保序：list_scenes_readonly() 已按创建顺序返回，逐个归一后 isdigit() 过滤。
+        _seen_codes: set[str] = set()
+        all_scenes: list[str] = []
+        for scene_row in self.dal.list_scenes_readonly():
+            raw_code = scene_row.get("scene_code", "")
+            normalized = normalize_scene_code(raw_code)
+            if normalized.isdigit() and normalized not in _seen_codes:
+                all_scenes.append(normalized)
+                _seen_codes.add(normalized)
 
         # 解析目标场 scene_id
         scene_ordinal = extraction.scene_ordinal
@@ -824,7 +835,12 @@ class Orchestrator:
         if scene_id is None:
             return {"scenes": all_scenes, "shots": [], "take_numbers": []}
 
-        shots = self.dal.list_shots(scene_id)
+        # all_shots：该场全量 shot（含非数字镜，如 "A"），聚合 take_numbers 时用全量覆盖所有 take。
+        # shots_numeric：chip 值域，只保留 isdigit() 的 shot；非数字镜号经前端 Number() 得 NaN → 400。
+        # 非数字镜（如 "A"）虽不进 chip，其 take 仍通过 shot_ordinal=0「当前镜」路径可落到，
+        # take_numbers 聚合须用全量确保这些 take 号出现在值域里。
+        all_shots = self.dal.list_shots(scene_id)
+        shots_numeric = [s for s in all_shots if s.isdigit()]
 
         # take_numbers：按 shot_ordinal 定镜后查
         shot_ordinal = extraction.shot_ordinal
@@ -840,13 +856,14 @@ class Orchestrator:
         if shot_key is not None:
             take_numbers = self.dal.list_take_numbers(scene_id, shot_key)
         else:
-            # 没有定镜 → 合并该场所有镜的 take_numbers（去重升序）
+            # 没有定镜 → 合并该场所有镜的 take_numbers（去重升序）。
+            # 注意用 all_shots（全量，含非数字镜），保证非数字镜的 take 号也进值域。
             take_numbers_set: set[int] = set()
-            for s in shots:
-                take_numbers_set.update(self.dal.list_take_numbers(scene_id, s))
+            for shot_str in all_shots:
+                take_numbers_set.update(self.dal.list_take_numbers(scene_id, shot_str))
             take_numbers = sorted(take_numbers_set)
 
-        return {"scenes": all_scenes, "shots": shots, "take_numbers": take_numbers}
+        return {"scenes": all_scenes, "shots": shots_numeric, "take_numbers": take_numbers}
 
     async def _run_np_voice_async(
         self, audio: bytes, ts: float, client_id: str | None = None

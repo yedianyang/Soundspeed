@@ -259,3 +259,76 @@ def test_confirm_default_ts_and_client_id(dal: DAL, monkeypatch) -> None:
     assert captured["client_id"] is None, (
         f"client_id 应为 None，实际 {captured['client_id']!r}"
     )
+
+
+# ── 测试 5：Bug①——确认卡显式 take_ordinals 不被 deictic 静默覆盖 ──────────────
+
+
+def test_confirm_explicit_ordinals_override_deictic(dal: DAL, monkeypatch) -> None:
+    """take_ordinals 非空 + deictic="prev" → 路由层归一 deictic="none"，resolve 走 ordinals 分支。
+
+    种法：scene + take1（已完成，end_ts 落）+ take2（活跃）。
+    extraction = {take_ordinals:[2], deictic:"prev", ...}。
+    Bug 现行为：deictic=prev 赢 → 落到 take1（最近完成）。
+    期望修后：note 落到 take2（take_number=2），take1 状态不动。
+    """
+    scene_id = dal.create_scene("1")
+    # take1：第 1 条，已完成（start + end）
+    take1_id, _ = dal.start_take(scene_id=scene_id, shot="", start_ts=1000.0)
+    dal.end_take(take1_id, end_ts=1001.0)
+    # take2：第 2 条，活跃（only start_take，不 end）
+    take2_id, _ = dal.start_take(scene_id=scene_id, shot="", start_ts=1002.0)
+
+    monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    orch = create_orchestrator(dal)
+    orch.session.scene_id = scene_id
+    orch.session.take_id = take2_id
+    orch.session.take_active = True
+
+    published: list[tuple] = []
+    _orig = orch.publish
+
+    def _spy(event, payload):
+        published.append((event, payload))
+        _orig(event, payload)
+
+    orch.publish = _spy
+
+    app = create_app(orch)
+
+    # extraction：用户在确认卡显式填了 take_ordinals=[2]，但 deictic 保留了第一跑的 "prev"
+    extraction_with_conflict = {
+        "scene_ordinal": 0,
+        "shot_ordinal": 0,
+        "take_ordinals": [2],
+        "deictic": "prev",
+        "mark": "keep",
+        "note_text": "",
+        "note_category": "note",
+    }
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/v1/notes/confirm",
+            json={"extraction": extraction_with_conflict, "ts": 2000.0, "client_id": "c-ordinal"},
+            headers=AUTH,
+        )
+        assert resp.status_code == 202, resp.text
+
+        assert orch._np_task is not None
+        _wait_np_task(app)
+
+    # 期望：note 落到 take2（take_number=2，用户显式编号优先）
+    applied_events = [p for e, p in published if e == NOTE_APPLIED]
+    assert len(applied_events) == 1, f"应有 1 个 note.applied，实际 {len(applied_events)}"
+    changes = applied_events[0].changes
+    applied_take_ids = [c["take_id"] for c in changes]
+    assert take2_id in applied_take_ids, (
+        f"note 应落到 take2（id={take2_id}），实际 changes={changes}"
+    )
+    # take1 状态不动（原来是 tbd，不应被打 mark）
+    take1 = dal.get_take(take1_id)
+    assert take1 is not None
+    assert take1.status == "tbd", (
+        f"take1 状态应为 tbd（未被改动），实际 {take1.status!r}"
+    )

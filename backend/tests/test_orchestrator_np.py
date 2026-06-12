@@ -494,12 +494,17 @@ async def test_voice_double_run_disagreement_emits_note_confirm(
 async def test_voice_confirm_options_with_existing_scene(
     tmp_dal: DAL, make_orch_with_active_take
 ) -> None:
-    """options 装配（finalize 层）：scene_ordinal==0 → session 当前场，shots 来自该场。"""
-    orch, take_id = make_orch_with_active_take(tmp_dal, scene_code="SC_OPTS")
+    """options 装配（finalize 层）：scene_ordinal==0 → session 当前场，shots 来自该场。
 
-    # 在当前场再建镜 B（A 来自 TAKE_START）
+    scene_code 改用数字前缀形式 "Scene_77"（归一后 "77"），验证数字化值域正确下发。
+    原 "SC_OPTS" 非数字，修后会被丢弃，故此测试同步改写到新契约。
+    镜也改为数字 "1" / "2"（原 "A"/"B" 非数字，修后被过滤出 shots chip 值域）。
+    """
+    orch, take_id = make_orch_with_active_take(tmp_dal, scene_code="Scene_77")
+
+    # make_orch_with_active_take 内部用 shot="A" 建了 take；这里再建镜 "2"
     scene_id = orch.session.scene_id
-    tmp_dal.start_take(scene_id=scene_id, shot="B", start_ts=10.0)
+    tmp_dal.start_take(scene_id=scene_id, shot="2", start_ts=10.0)
 
     e1 = NPExtraction(
         scene_ordinal=0, shot_ordinal=0, take_ordinals=[1],
@@ -516,17 +521,23 @@ async def test_voice_confirm_options_with_existing_scene(
 
     assert len(confirmed) == 1
     opts = confirmed[0].options
-    assert "A" in opts["shots"]
-    assert "B" in opts["shots"]
-    assert "SC_OPTS" in opts["scenes"]
+    # 数字镜 "2" 进 shots 值域；非数字镜 "A"（make_orch_with_active_take 建的）被过滤
+    assert "2" in opts["shots"]
+    assert "A" not in opts["shots"]
+    # "Scene_77" 归一后 "77"（数字），应进 scenes 值域
+    assert "77" in opts["scenes"]
 
 
 @pytest.mark.asyncio
 async def test_voice_confirm_options_scene_ordinal_zero_no_active_scene(
     tmp_dal: DAL
 ) -> None:
-    """scene_ordinal==0 但 session 无当前场 → shots/take_numbers 空列表，scenes 仍全量。"""
-    tmp_dal.create_scene("SC_NOACTIVE")
+    """scene_ordinal==0 但 session 无当前场 → shots/take_numbers 空列表，scenes 仍全量。
+
+    scene_code 改用纯数字 "12"（归一不变），验证数字编码进值域。
+    原 "SC_NOACTIVE" 非数字，修后会被丢弃，故此测试同步改写到新契约。
+    """
+    tmp_dal.create_scene("12")
     session = SessionState()
     # 不调 session.activate_scene → session.scene_id = None
     orch = create_orchestrator(tmp_dal, session, llm_service=MagicMock())
@@ -548,7 +559,8 @@ async def test_voice_confirm_options_scene_ordinal_zero_no_active_scene(
     opts = confirmed[0].options
     assert opts["shots"] == []
     assert opts["take_numbers"] == []
-    assert "SC_NOACTIVE" in opts["scenes"]
+    # "12" 是纯数字，归一后仍 "12"，应进值域
+    assert "12" in opts["scenes"]
 
 
 @pytest.mark.asyncio
@@ -670,3 +682,75 @@ async def test_text_path_still_single_run(tmp_dal: DAL, make_orch_with_active_ta
 
     assert call_count[0] == 1, "文本路径 np_runner 仅调 1 次"
     assert len(applied) == 1
+
+
+# ── Bug②：confirm options 值域数字化 ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_confirm_options_scene_codes_normalized_numeric_only(
+    tmp_dal: DAL,
+) -> None:
+    """_build_confirm_options：scenes 值域只含归一后为纯数字的 scene_code。
+
+    种 scene_code "Scene_7"（归一→"7"）、"3A"（归一→"3A"，非纯数字）、"1"（归一→"1"）。
+    期望 options["scenes"] == ["7", "1"]（去非数字；顺序=创建序）。
+    "3A" 归一后含字母，应被丢弃。
+    """
+    tmp_dal.create_scene("Scene_7")
+    tmp_dal.create_scene("3A")
+    tmp_dal.create_scene("1")
+
+    session = SessionState()
+    orch = create_orchestrator(tmp_dal, session, llm_service=MagicMock())
+
+    extraction = NPExtraction(
+        scene_ordinal=0, shot_ordinal=0, take_ordinals=[],
+        deictic="none", mark="ng", note_text="", note_category="note",
+    )
+    opts = orch._build_confirm_options(extraction)
+
+    assert "7" in opts["scenes"], f"'7' 应在 scenes，实际 {opts['scenes']}"
+    assert "1" in opts["scenes"], f"'1' 应在 scenes，实际 {opts['scenes']}"
+    assert "3A" not in opts["scenes"], f"'3A' 归一后非纯数字，不应在 scenes，实际 {opts['scenes']}"
+    # 原始 code 也不应出现
+    assert "Scene_7" not in opts["scenes"], f"原始 'Scene_7' 不应在 scenes，实际 {opts['scenes']}"
+
+
+@pytest.mark.asyncio
+async def test_confirm_options_shots_numeric_only_but_aggregation_keeps_all(
+    tmp_dal: DAL,
+) -> None:
+    """_build_confirm_options：shots 值域只含纯数字镜，但 take_numbers 聚合包含非数字镜下的号。
+
+    种当前场：shot="1"（take_number=1）+ shot="A"（take_number=1，各自独立序列）。
+    session.scene_id 设为该场，session.shot=None（不在录制中，走聚合分支）。
+    extraction.scene_ordinal=0, shot_ordinal=0。
+    期望：
+      options["shots"] == ["1"]（"A" 非纯数字被过滤）。
+      options["take_numbers"] 包含镜 "A" 下的 take_number（聚合循环用未过滤全量 shots）。
+    """
+    scene_id = tmp_dal.create_scene("1")
+    # 镜 "1" start_take → take_number=1
+    tmp_dal.start_take(scene_id=scene_id, shot="1", start_ts=1.0)
+    # 镜 "A" start_take → take_number=1（独立序列）
+    tmp_dal.start_take(scene_id=scene_id, shot="A", start_ts=2.0)
+
+    session = SessionState()
+    session.activate_scene(scene_id)
+    # 不设 session.shot → shot_key 走聚合分支（None）
+    orch = create_orchestrator(tmp_dal, session, llm_service=MagicMock())
+
+    extraction = NPExtraction(
+        scene_ordinal=0, shot_ordinal=0, take_ordinals=[],
+        deictic="none", mark="ng", note_text="", note_category="note",
+    )
+    opts = orch._build_confirm_options(extraction)
+
+    assert opts["shots"] == ["1"], (
+        f"shots 只含纯数字镜，'A' 应被过滤，实际 {opts['shots']}"
+    )
+    # take_numbers 聚合用全量 shots（含 "A"），镜 "A" 的 take_number=1 应在值域里
+    assert 1 in opts["take_numbers"], (
+        f"镜 'A' 的 take_number=1 应在 take_numbers（聚合覆盖非数字镜），实际 {opts['take_numbers']}"
+    )
