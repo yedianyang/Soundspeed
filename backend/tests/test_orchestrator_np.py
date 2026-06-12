@@ -119,6 +119,40 @@ async def test_run_np_async_unresolved_emits_clarify_not_applied(tmp_dal: DAL, m
 
 
 @pytest.mark.asyncio
+async def test_ordinals_resolve_after_take_end(tmp_dal: DAL, make_orch_with_active_take) -> None:
+    """停录后按编号打 mark 必须能解析（真实场景：场记几乎都在停录后说「保第 N 条」）。
+
+    session.take_end() 故意保留 shot（工作槽语义），_build_np_context 不得因
+    take_active=False 把当前镜抹成 None——否则 resolve 拿空镜查 (场, "", N) 必 miss。
+    """
+    from backend.core.events import TAKE_END, TakeEndPayload  # noqa: PLC0415
+
+    orch, take_id = make_orch_with_active_take(tmp_dal)
+    orch.publish(TAKE_END, TakeEndPayload(end_ts=time.time()))
+    await asyncio.sleep(0.05)
+    assert orch.session.take_active is False
+
+    extraction = NPExtraction(
+        scene_ordinal=0, shot_ordinal=0, take_ordinals=[1],
+        deictic="none", mark="keep", note_text="", note_category="note",
+    )
+    orch._deps.np_runner = _fake_extract(extraction)
+
+    applied: list[NoteAppliedPayload] = []
+    clarify: list[NoteClarifyPayload] = []
+    orch.subscribe(NOTE_APPLIED, lambda p: applied.append(p))
+    orch.subscribe(NOTE_CLARIFY, lambda p: clarify.append(p))
+
+    orch.run_np_async(raw_text="第一条保", parsed_category="note", ts=5.0, client_id="cid")
+    await asyncio.sleep(0.05)
+
+    assert clarify == [], f"停录态不应 clarify: {clarify and clarify[0].message}"
+    assert len(applied) == 1
+    assert applied[0].changes[0]["take_id"] == take_id
+    assert applied[0].changes[0]["status"] == "keep"
+
+
+@pytest.mark.asyncio
 async def test_pure_mark_still_emits_note_applied(tmp_dal: DAL, make_orch_with_active_take) -> None:
     """纯 mark（note_text=\"\"）也必须发 note.applied（否则前端 pending 挂死，复活 4.I）。"""
     orch, take_id = make_orch_with_active_take(tmp_dal)

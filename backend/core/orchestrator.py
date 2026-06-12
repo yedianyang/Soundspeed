@@ -615,7 +615,8 @@ class Orchestrator:
             current_scene_code=(
                 scene_code_by_id.get(scene_id) if scene_id is not None else None
             ),
-            current_shot=self.session.shot if current_take_id is not None else None,
+            # shot 是工作槽状态（take_end 不清），停录后仍有效；take_id/number 才钩活跃态。
+            current_shot=self.session.shot,
             current_take_number=(
                 self.session.take_number if current_take_id is not None else None
             ),
@@ -634,7 +635,8 @@ class Orchestrator:
         return NPContext(
             current_scene_id=scene_id,
             current_scene_code=scene_code,
-            current_shot=self.session.shot if current_take_id is not None else None,
+            # shot 是工作槽状态（take_end 不清），停录后说「保第 N 条」必须还能定位到镜。
+            current_shot=self.session.shot,
             current_take_id=current_take_id,
             current_take_number=self.session.take_number if current_take_id is not None else None,
         )

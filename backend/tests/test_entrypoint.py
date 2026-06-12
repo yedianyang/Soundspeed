@@ -44,6 +44,37 @@ def test_restore_active_scene_does_not_restore_take(tmp_dal: DAL) -> None:
     assert session.take_id is None
 
 
+def test_restore_active_scene_restores_workslot_shot(tmp_dal: DAL) -> None:
+    """启动恢复工作槽的镜：活跃场最新 take 的 shot → session.shot。
+
+    shot 是工作槽状态（take_end 不清），重启后丢失则停录态「保第 N 条」解析
+    拿空镜查必 miss（resolve 按 (场,镜,号) 三元组）。从最新 take 恢复。
+    """
+    from backend.api.entrypoint import restore_active_scene  # noqa: PLC0415
+
+    scene_id = tmp_dal.create_scene("scene_restore3")
+    tmp_dal.set_active_scene(scene_id)
+    tmp_dal.start_take(scene_id, "1", 1.0)
+    tmp_dal.start_take(scene_id, "2", 2.0)  # 最新 take 在镜 2
+    session = SessionState()
+
+    restore_active_scene(tmp_dal, session)
+    assert session.shot == "2"
+    assert session.take_active is False  # 仍不恢复活跃 take
+
+
+def test_restore_active_scene_no_takes_shot_stays_none(tmp_dal: DAL) -> None:
+    """活跃场还没拍过 take → session.shot 保持 None，不乱设。"""
+    from backend.api.entrypoint import restore_active_scene  # noqa: PLC0415
+
+    scene_id = tmp_dal.create_scene("scene_restore4")
+    tmp_dal.set_active_scene(scene_id)
+    session = SessionState()
+
+    restore_active_scene(tmp_dal, session)
+    assert session.shot is None
+
+
 # ── 显存档位 SOUNDSPEED_PROFILE ─────────────────────────────────────────────────
 
 _VRAM_KEYS = (
