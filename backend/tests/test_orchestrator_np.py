@@ -498,12 +498,13 @@ async def test_voice_confirm_options_with_existing_scene(
 
     scene_code 改用数字前缀形式 "Scene_77"（归一后 "77"），验证数字化值域正确下发。
     原 "SC_OPTS" 非数字，修后会被丢弃，故此测试同步改写到新契约。
+    镜也改为数字 "1" / "2"（原 "A"/"B" 非数字，修后被过滤出 shots chip 值域）。
     """
     orch, take_id = make_orch_with_active_take(tmp_dal, scene_code="Scene_77")
 
-    # 在当前场再建镜 B（A 来自 TAKE_START）
+    # make_orch_with_active_take 内部用 shot="A" 建了 take；这里再建镜 "2"
     scene_id = orch.session.scene_id
-    tmp_dal.start_take(scene_id=scene_id, shot="B", start_ts=10.0)
+    tmp_dal.start_take(scene_id=scene_id, shot="2", start_ts=10.0)
 
     e1 = NPExtraction(
         scene_ordinal=0, shot_ordinal=0, take_ordinals=[1],
@@ -520,9 +521,10 @@ async def test_voice_confirm_options_with_existing_scene(
 
     assert len(confirmed) == 1
     opts = confirmed[0].options
-    assert "A" in opts["shots"]
-    assert "B" in opts["shots"]
-    # "Scene_77" 归一后 "77"（数字），应进值域
+    # 数字镜 "2" 进 shots 值域；非数字镜 "A"（make_orch_with_active_take 建的）被过滤
+    assert "2" in opts["shots"]
+    assert "A" not in opts["shots"]
+    # "Scene_77" 归一后 "77"（数字），应进 scenes 值域
     assert "77" in opts["scenes"]
 
 

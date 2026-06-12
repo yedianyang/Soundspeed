@@ -24,6 +24,7 @@ TakeDTO 有意省略 performer_issues / audio_quality（codex P2）：
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import difflib
 import logging
 import time
@@ -713,6 +714,13 @@ async def confirm_note(
         extraction = _validate_extraction(body.extraction)
     except NPParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    # Bug①修：确认卡用户显式填了 take_ordinals（编号）> 第一跑留下的指代（deictic）。
+    # 若 take_ordinals 非空且 deictic 不是 "none"，归一为 "none"——与 extract_np schema 约定一致
+    # （用了编号=deictic none），防止 resolve_targets 走 deictic 分支静默丢弃用户填的次号。
+    # 此归一只在路由层发生，不改变模型直跑路径（run_np_async / run_np_voice_async）的行为。
+    if extraction.take_ordinals and extraction.deictic != "none":
+        extraction = dataclasses.replace(extraction, deictic="none")
 
     resolved_ts = body.ts if body.ts is not None else time.time()
     orchestrator = request.app.state.orchestrator
