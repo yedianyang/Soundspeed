@@ -48,7 +48,8 @@ cd Soundspeed
 # 3. 装后端依赖：自动建 .venv、缺 Python 3.12 一并下载
 #    llama-cpp-python / pywhispercpp 的 wheel 自带 Metal，torch 取 MPS wheel，无需额外加速
 #    FunASR（可切换中文 ASR 引擎）随之自动安装；首次在设置页切到 FunASR 时
-#    自动从 modelscope 下载 paraformer-zh 模型（~1GB，缓存于 ~/.cache/modelscope）
+#    自动从 modelscope 下载离线+流式两个模型（≈1.8GB，缓存于 ~/.cache/modelscope）
+#    设 SOUNDSPEED_FUNASR_PARTIALS=0 可关流式 partial，仅下载离线模型（~1GB）
 uv sync
 
 # 4. 启动后端（开发模式）
@@ -72,7 +73,8 @@ cd Soundspeed
 
 # 3. 装后端依赖：自动建 .venv、缺 Python 3.12 一并下载；torch 已装成 CUDA（cu128）版
 #    FunASR（可切换中文 ASR 引擎）随之自动安装；首次在设置页切到 FunASR 时
-#    自动从 modelscope 下载 paraformer-zh 模型（~1GB，缓存于 %USERPROFILE%\.cache\modelscope）
+#    自动从 modelscope 下载离线+流式两个模型（≈1.8GB，缓存于 %USERPROFILE%\.cache\modelscope）
+#    设 SOUNDSPEED_FUNASR_PARTIALS=0 可关流式 partial，仅下载离线模型（~1GB）
 uv sync
 
 # 4. 仅 NVIDIA 显卡：装 llama-cpp / pywhispercpp 的 CUDA 变体（纯 CPU 跳过这步）

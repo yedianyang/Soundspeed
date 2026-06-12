@@ -253,6 +253,7 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
       SOUNDSPEED_AUDIO_DEVICE    设备名或索引（首次引导用；UI 选过后持久化优先）
       SOUNDSPEED_VAD=energy      VAD 探测器：energy（默认，零依赖）| silero（需 torch venv）
       SOUNDSPEED_MODELS_DIR      Whisper 模型存放目录（默认 ./models/whisper/）
+      SOUNDSPEED_FUNASR_PARTIALS=0  关 funasr 2pass 流式 partial（默认开；关=零下载零常驻）
 
     启动时设备解析优先级：
       持久化名字（DB app_settings）> env > 系统默认 > 第一个可用
@@ -348,6 +349,9 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
         source,
     )
 
+    # funasr 引擎 2pass 流式 partial 杀开关(=0 时 set_engine 不构造/不下载 online 模型)
+    funasr_partials = os.environ.get("SOUNDSPEED_FUNASR_PARTIALS", "1") != "0"
+
     session = LiveAsrSession(
         runner=runner,
         publish=orchestrator.publish,
@@ -355,6 +359,7 @@ def _maybe_wire_live_asr(orchestrator: Orchestrator):
         vad_config=VadConfig(),
         detector_factory=_detector_factory,
         default_device=initial_device_name,  # 存名字
+        funasr_partials=funasr_partials,
     )
 
     # 后台预热模型（首次含下载），不阻塞启动

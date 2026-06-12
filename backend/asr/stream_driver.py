@@ -24,16 +24,17 @@ from backend.core.events import (
     AUDIO_LEVEL,
     ASR_FINAL_CH1,
     ASR_FINAL_CH2,
+    ASR_PARTIAL_CH1,
+    ASR_PARTIAL_CH2,
     AsrFinalPayload,
+    AsrPartialPayload,
     AudioLevelPayload,
 )
 from backend.vad.detector import VadDetector
-from backend.vad.models import SpeechSegment, VadConfig
+from backend.vad.models import SpeechSegment, VadConfig, frames_to_ms
 from backend.vad.segmenter import ChannelVADSegmenter
 
 logger = logging.getLogger(__name__)
-
-_FRAMES_PER_MS = 16  # 16kHz → 每毫秒 16 帧
 
 
 class StreamDriver:
@@ -47,6 +48,7 @@ class StreamDriver:
         detector_factory: Callable[[], VadDetector],
         audio_sink: Callable[[Any, int], None] | None = None,
         process_channels: tuple[int, ...] | None = None,
+        partial_runner: Any = None,
     ) -> None:
         self._runner = runner
         self._publish = publish
@@ -59,6 +61,13 @@ class StreamDriver:
         # 只处理这些声道索引（None = 全部）。生产暂设 (0,) 只跑 ch1：避免设备双声道
         # 同源导致每句重复转录；ch2（场记 voice note）路径待基础链路跑通后再开。
         self._process_channels = process_channels
+        # 2pass 流式 partial(spec 2026-06-11-funasr-2pass-streaming):None 时下面的
+        # partial 代码一行不跑(whisper / funasr 关流式 / online 不可用 —— 零回归红线 R3)。
+        # 单实例:仅支持单 partial 声道(生产 process_channels=(0,));开 ch2 需改 per-channel runner
+        self._partial_runner = partial_runner
+        self._partial_dead = False              # 熔断:本 take 余下停发 partial(含墓碑)
+        self._turn_keys: dict[int, int] = {}    # ch -> 在制 turn 的起始绝对帧(== final 键)
+        self._partial_counts: dict[int, int] = {}  # ch -> 本 turn 已发 partial 条数
         self._stop = threading.Event()
 
     def stop(self) -> None:
@@ -68,11 +77,19 @@ class StreamDriver:
     def run(self, source: Iterable) -> None:
         """阻塞驱动：消费 source 的 AudioChunk 直到耗尽（FileSource）或被 stop() 停掉（DeviceSource）。"""
         self._stop.clear()
+        # 注:partial 状态(_partial_dead/_turn_keys)不在此重置 —— driver 实例 = 单 take(live_session 每 take 新建)
+        draining = False
         segmenters: list[ChannelVADSegmenter] = []
         with source as src:  # type: ignore[attr-defined]
             for chunk in src:
-                if self._stop.is_set():
-                    break
+                if self._stop.is_set() and not draining:
+                    if hasattr(src, "begin_drain"):
+                        # BufferedAudioSource：停读新块、排空已缓冲尾巴再退出
+                        # （尾段 PCM 进 TakeAudioBuffer、尾句进 VAD/final —— C1/C2）。
+                        src.begin_drain()
+                        draining = True
+                    else:
+                        break
                 if not segmenters:
                     segmenters = [
                         ChannelVADSegmenter(ch=i, detector=self._detector_factory(), config=self._vad_config)
@@ -97,32 +114,109 @@ class StreamDriver:
                 for i, ch_audio in enumerate(chunk.channels):
                     if self._process_channels is not None and i not in self._process_channels:
                         continue
+                    finals_pub: dict[int, bool] = {}  # seg.start_frame -> 是否真的 publish 了
                     for seg in segmenters[i].push(ch_audio, chunk.start_frame):
-                        self._emit(seg)
-        for sm in segmenters:
+                        finals_pub[seg.start_frame] = self._emit(seg)
+                    if self._partial_runner is not None:
+                        self._partial_step(i, segmenters[i], ch_audio, chunk.start_frame, finals_pub)
+        for i, sm in enumerate(segmenters):
+            finals_pub = {}
             for seg in sm.flush():
-                self._emit(seg)
+                finals_pub[seg.start_frame] = self._emit(seg)
+            if self._partial_runner is not None and self._turn_keys.get(i) is not None:
+                self._settle_turn(i, self._turn_keys[i], finals_pub)
 
-    def _emit(self, seg: SpeechSegment) -> None:
+    def _emit(self, seg: SpeechSegment) -> bool:
+        """转录并 publish 一段 final。返回是否真的 publish 了（空文本/幻觉被滤 → False，
+        partial 墓碑记账需要这个信号）。"""
         # 注意：ch1 音频在 run() 的 chunk 循环里逐块全量写 buffer（含静音），不在此处
         # 按语音段写——否则 buffer 是去静音的压缩时间轴，diarization 无法与 ASR 绝对帧对齐。
         text = self._runner.transcribe_pcm(seg.audio)
         text = _normalize_to_simplified(text)  # 繁→简，幻觉过滤前（繁体幻觉转简后能被简体表拦截）
         if not text.strip():
-            return  # 空转录（静音误触/噪声）不推
+            return False  # 空转录（静音误触/噪声）不推
         if _is_hallucination(text):
             logger.debug("丢弃疑似幻觉转录: %r", text)
-            return
+            return False
         topic = ASR_FINAL_CH1 if seg.ch == 0 else ASR_FINAL_CH2
         payload = AsrFinalPayload(
             text=text,
-            start_frame=round(seg.start_frame / _FRAMES_PER_MS),  # 16k 帧 → 毫秒（contract C1）
-            end_frame=round(seg.end_frame / _FRAMES_PER_MS),
+            start_frame=frames_to_ms(seg.start_frame),  # 16k 帧 → 毫秒（contract C1）
+            end_frame=frames_to_ms(seg.end_frame),
             speaker=None,            # Phase 1 不出 speaker；take.end 后回填
             take_id=None,            # orchestrator 由 session.take_id 回退
             is_partial=False,
         )
         self._publish(topic, payload)
+        return True
+
+    # ---- 2pass 流式 partial(spec 2026-06-11-funasr-2pass-streaming §3)----
+
+    def _partial_step(self, ch: int, segmenter, ch_audio, chunk_start: int, finals_pub: dict[int, bool]) -> None:
+        """每 chunk 一次:结清旧 turn → (在语音中)开 turn/喂料/publish partial。
+        必须在本 chunk 的 final _emit 之后调用 —— 同 chunk close+reopen 时
+        旧 final 先于新 turn 首条 partial(前端 replace 语义依赖此序)。"""
+        cur_key = segmenter.segment_start_frame  # 语音态 = _seg_start_abs;否则 None
+        prev_key = self._turn_keys.get(ch)
+        if prev_key is not None and cur_key != prev_key:
+            self._settle_turn(ch, prev_key, finals_pub)
+        if self._partial_dead or cur_key is None:
+            return
+        try:
+            if self._turn_keys.get(ch) != cur_key:
+                self._partial_runner.start_turn()
+                self._turn_keys[ch] = cur_key
+                self._partial_counts[ch] = 0
+            # 喂料折衷(spec §3 Q4):VAD 进语音后的 chunk 整块 —— 不含 pre-roll、
+            # 首块含起音前静音,首词 partial 可能缺/糊;final 吃完整段音频会纠正。不是 bug。
+            text = self._partial_runner.feed(ch_audio)
+            if text:
+                payload = AsrPartialPayload(
+                    text=text,
+                    start_frame=frames_to_ms(cur_key),  # 与 final 逐位同键
+                    # end 可超 final 的 end(尾静音裁剪 + 600ms 块量化);前端不拿 end 做键,无害
+                    end_frame=frames_to_ms(chunk_start + len(ch_audio)),
+                    speaker=None,
+                    take_id=None,
+                    is_partial=True,
+                )
+                self._publish(ASR_PARTIAL_CH1 if ch == 0 else ASR_PARTIAL_CH2, payload)
+                self._partial_counts[ch] += 1
+        except Exception:  # noqa: BLE001
+            logger.warning("partial 路径异常,本 take 熔断(final 不受影响)", exc_info=True)
+            self._fuse(ch)
+
+    def _settle_turn(self, ch: int, key_frames: int, finals_pub: dict[int, bool]) -> None:
+        """turn 结清:释放 runner 状态;发过 partial 但 final 未 publish → 墓碑(恰一条)。"""
+        try:
+            self._partial_runner.end_turn()
+        except Exception:  # noqa: BLE001
+            logger.debug("end_turn 异常,忽略(start_turn 自带清态)", exc_info=True)
+        if self._partial_counts.get(ch, 0) > 0 and not finals_pub.get(key_frames, False):
+            self._publish_tombstone(ch, key_frames)
+        self._turn_keys.pop(ch, None)
+        self._partial_counts[ch] = 0
+
+    def _fuse(self, ch: int) -> None:
+        """熔断:墓碑收尾活跃 turn 后,本 take 不再发任何 partial。final 与采集不受影响。"""
+        try:
+            key = self._turn_keys.get(ch)
+            if key is not None and self._partial_counts.get(ch, 0) > 0:
+                self._publish_tombstone(ch, key)
+            self._partial_runner.end_turn()
+        except Exception:  # noqa: BLE001
+            logger.debug("熔断清理异常,忽略", exc_info=True)
+        self._turn_keys.pop(ch, None)
+        self._partial_counts[ch] = 0
+        self._partial_dead = True
+
+    def _publish_tombstone(self, ch: int, key_frames: int) -> None:
+        """空文本 partial = 前端清除信号(同 turn 键;end 不被消费,取同值)。"""
+        payload = AsrPartialPayload(
+            text="", start_frame=frames_to_ms(key_frames), end_frame=frames_to_ms(key_frames),
+            speaker=None, take_id=None, is_partial=True,
+        )
+        self._publish(ASR_PARTIAL_CH1 if ch == 0 else ASR_PARTIAL_CH2, payload)
 
 
 # Whisper 在噪声/静音段上的典型幻觉输出（大小写不敏感，含即过滤）

@@ -9,11 +9,12 @@ _HDR = {"Authorization": f"Bearer {_TOKEN}"}
 
 
 class _FakeSession:
-    def __init__(self, language="zh", model_size="base", engine="whisper", running=False):
+    def __init__(self, language="zh", model_size="base", engine="whisper", running=False, streaming=False):
         self._lang = language
         self._model = model_size
         self._engine = engine
         self.running = running
+        self.streaming = streaming
         self.engine_errors: dict[str, Exception] = {}  # engine → 抛出的异常(测试注入)
 
     @property
@@ -152,3 +153,20 @@ def test_set_engine_409_when_switch_in_progress():
     r = _client(session).post("/api/v1/asr/engine", json={"engine": "funasr"}, headers=_HDR)
     assert r.status_code == 409
     assert "切换" in r.json()["detail"]
+
+
+def test_get_asr_streaming_reflects_session():
+    body_on = _client(_FakeSession(engine="funasr", streaming=True)).get("/api/v1/asr", headers=_HDR).json()
+    assert body_on["streaming"] is True
+    body_off = _client(_FakeSession(streaming=False)).get("/api/v1/asr", headers=_HDR).json()
+    assert body_off["streaming"] is False
+
+
+def test_get_asr_streaming_false_when_disabled():
+    body = _client(None).get("/api/v1/asr", headers=_HDR).json()
+    assert body["streaming"] is False
+
+
+def test_get_asr_legacy_fields_intact_with_streaming():
+    body = _client(_FakeSession()).get("/api/v1/asr", headers=_HDR).json()
+    assert {"enabled", "engine", "language", "model", "engines", "languages"} <= set(body)
