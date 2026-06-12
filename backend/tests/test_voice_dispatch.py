@@ -682,7 +682,8 @@ def test_note_delegate_double_run_disagreement_emits_note_confirm(monkeypatch, t
     from backend.pipelines.voice_dispatch import run_voice_dispatch
 
     # 真 orchestrator + 真 DAL（_finalize_np 确认分支与 _build_confirm_options 都打真 DAL）
-    scene_id = tmp_dal.create_scene("SC_DISPATCH")
+    # scene_code 用数字前缀形式 "Scene_5"（归一后 "5"），避免非数字编码被 options 值域过滤
+    scene_id = tmp_dal.create_scene("Scene_5")
     session = SessionState()
     session.activate_scene(scene_id)
     orch = create_orchestrator(tmp_dal, session, llm_service=MagicMock())
@@ -753,7 +754,8 @@ def test_note_delegate_double_run_disagreement_emits_note_confirm(monkeypatch, t
     assert p.client_id == "cid-confirm"
     assert "take_ordinals" in p.disagreement
     assert p.extraction == asdict(e1), "确认卡预填值 = 第一跑结果"
-    assert "SC_DISPATCH" in p.options["scenes"]
+    # "Scene_5" 归一后 "5"（纯数字），应进 options["scenes"] 值域
+    assert "5" in p.options["scenes"]
 
     # 不落库
     assert applied == [], "分歧时不发 note.applied"
