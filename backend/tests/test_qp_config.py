@@ -12,6 +12,8 @@ def test_query_session_has_qp_tools() -> None:
         "get_scene_info",
         "list_characters",
         "search_script_lines",
+        "list_scenes",
+        "get_scene_script",
         "query_database",
     ]
 

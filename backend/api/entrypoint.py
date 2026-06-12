@@ -89,11 +89,17 @@ def restore_active_scene(dal: DAL, session: SessionState) -> None:
     NP（文本/语音）take_context 为空 → 模型无真 take 可归 → 静默 take_not_found，
     直到有人手动激活场。这里在 build_app 装配时补上。
     只恢复活跃**场**，不恢复活跃 take——录制进程已随重启消失，take_active 须保持 False。
+    工作槽的镜（take_end 不清的 session.shot）一并从该场最新 take 恢复，否则重启后
+    停录态「保第 N 条」按 (场,镜,号) 解析拿空镜必 miss。场内无 take 则保持 None。
     DB 无活跃场则 no-op。
     """
     active = dal.get_active_scene_id()
-    if active is not None:
-        session.activate_scene(active)
+    if active is None:
+        return
+    session.activate_scene(active)
+    takes = dal.list_takes(active)
+    if takes:
+        session.shot = max(takes, key=lambda t: t.take_id).shot
 
 
 def _make_take_start_handler(live_asr, enroll_recorder):

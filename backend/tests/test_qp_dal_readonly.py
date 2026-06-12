@@ -186,6 +186,30 @@ def test_get_scene_info_latest_script_version(dal: DAL) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Task 8: search_script_lines 带场次 + 短查询 LIKE 回退（trigram 2 字盲区）
+# ---------------------------------------------------------------------------
+
+
+def test_search_script_lines_carries_scene_code(tmp_dal) -> None:
+    sid = tmp_dal.create_scene("21")
+    script_id = tmp_dal.insert_script(sid, "raw")
+    tmp_dal.insert_script_line(script_id, 1, "甲", "这句话提到了螺丝刀")
+    hits = tmp_dal.search_script_lines("螺丝刀")
+    assert hits and hits[0]["scene_code"] == "21"
+
+
+def test_search_script_lines_short_query_like_fallback(tmp_dal) -> None:
+    # trigram FTS 对 2 字查询 0 命中（实证），须 LIKE 回退
+    sid = tmp_dal.create_scene("22")
+    script_id = tmp_dal.insert_script(sid, "raw")
+    tmp_dal.insert_script_line(script_id, 1, "乙", "这份合同必须签。")
+    hits = tmp_dal.search_script_lines("合同")
+    assert len(hits) == 1 and hits[0]["scene_code"] == "22"
+    tmp_dal.insert_script_line(script_id, 2, "乙", "这价格是100元整。")
+    assert tmp_dal.search_script_lines("0%") == []  # 2字含通配符:走 LIKE 且 % 被转义 → 0 命中
+
+
+# ---------------------------------------------------------------------------
 # Task 3: query_readonly 万能笔安全墙（D-QP-04）
 # ---------------------------------------------------------------------------
 
@@ -273,3 +297,87 @@ def test_query_readonly_timeout(dal: DAL) -> None:
         timeout_s=0.1,
     )
     assert "error" in res
+
+
+# ---------------------------------------------------------------------------
+# Task 12: get_script_lines DAL 新方法（B6 get_scene_script 工具下层）
+# ---------------------------------------------------------------------------
+
+
+def test_get_script_lines_latest_version_ordered(tmp_dal) -> None:
+    from backend.tests.qp_eval_seed import seed_qp_eval_db
+    seed_qp_eval_db(tmp_dal)
+    sid16 = tmp_dal.resolve_scene_id("16")
+    lines = tmp_dal.get_script_lines(sid16, limit=3)
+    assert len(lines) == 3
+    assert lines[0]["character"] is None  # 舞台指示行在前
+    assert lines[0]["line_no"] == 1
+    assert tmp_dal.get_script_lines(tmp_dal.resolve_scene_id("15"), limit=3) == []  # 无剧本
+
+
+# ---------------------------------------------------------------------------
+# Task 2: list_shots / list_take_numbers 确认卡值域 DAL 查询
+# ---------------------------------------------------------------------------
+
+
+def test_list_shots_two_distinct_shots(tmp_dal: DAL) -> None:
+    """某场有两个不同 shot，各有一条 take，list_shots 返回两者（排序）。"""
+    sid = tmp_dal.create_scene("Scene_1")
+    tmp_dal.start_take(sid, "A", 1000.0)
+    tmp_dal.start_take(sid, "B", 1001.0)
+    assert tmp_dal.list_shots(sid) == ["A", "B"]
+
+
+def test_list_shots_dedup_same_shot_multiple_takes(tmp_dal: DAL) -> None:
+    """同一 shot 有多条 take，list_shots 只出现一次（DISTINCT 去重）。"""
+    sid = tmp_dal.create_scene("Scene_2")
+    tmp_dal.start_take(sid, "A", 1000.0)
+    tmp_dal.start_take(sid, "A", 1001.0)
+    assert tmp_dal.list_shots(sid) == ["A"]
+
+
+def test_list_shots_excludes_soft_deleted_only_shot(tmp_dal: DAL) -> None:
+    """某 shot 的全部 take 均被软删 → 该 shot 不出现。"""
+    sid = tmp_dal.create_scene("Scene_3")
+    t1, _ = tmp_dal.start_take(sid, "X", 1000.0)
+    tmp_dal.delete_take(t1)
+    assert tmp_dal.list_shots(sid) == []
+
+
+def test_list_shots_partial_soft_delete_keeps_shot(tmp_dal: DAL) -> None:
+    """同 shot 有一条 live + 一条软删，shot 仍出现（live 存在）。"""
+    sid = tmp_dal.create_scene("Scene_4")
+    t1, _ = tmp_dal.start_take(sid, "Y", 1000.0)
+    tmp_dal.start_take(sid, "Y", 1001.0)
+    tmp_dal.delete_take(t1)
+    assert tmp_dal.list_shots(sid) == ["Y"]
+
+
+def test_list_shots_empty_scene(tmp_dal: DAL) -> None:
+    """无 take 的场次，list_shots 返回 []。"""
+    sid = tmp_dal.create_scene("Scene_5")
+    assert tmp_dal.list_shots(sid) == []
+
+
+def test_list_take_numbers_ascending(tmp_dal: DAL) -> None:
+    """某场某镜有多条 take，返回升序 take_number 列表。"""
+    sid = tmp_dal.create_scene("Scene_6")
+    tmp_dal.start_take(sid, "A", 1000.0)  # take_number=1
+    tmp_dal.start_take(sid, "A", 1001.0)  # take_number=2
+    tmp_dal.start_take(sid, "A", 1002.0)  # take_number=3
+    assert tmp_dal.list_take_numbers(sid, "A") == [1, 2, 3]
+
+
+def test_list_take_numbers_excludes_soft_deleted(tmp_dal: DAL) -> None:
+    """软删 take 不出现在 take_number 列表中。"""
+    sid = tmp_dal.create_scene("Scene_7")
+    t1, _ = tmp_dal.start_take(sid, "B", 1000.0)  # take_number=1
+    tmp_dal.start_take(sid, "B", 1001.0)           # take_number=2
+    tmp_dal.delete_take(t1)
+    assert tmp_dal.list_take_numbers(sid, "B") == [2]
+
+
+def test_list_take_numbers_empty(tmp_dal: DAL) -> None:
+    """无匹配时返回空列表。"""
+    sid = tmp_dal.create_scene("Scene_8")
+    assert tmp_dal.list_take_numbers(sid, "C") == []

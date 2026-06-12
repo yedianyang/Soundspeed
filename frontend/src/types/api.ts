@@ -318,16 +318,6 @@ export interface PendingNote {
   voiceBlob?: Blob // 语音 note（4.L）：录音 WAV，重试据此重传 POST /notes/voice
 }
 
-// WS note.processed payload
-export interface NoteProcessedMsg {
-  event_id: number
-  take_id: number
-  category: string
-  content: string
-  ts: number
-  client_id: string | null // 后端原样回传前端提交时的去重键；null=异常/旧链路
-}
-
 // WS note.failed payload（4.I）：NP 失败兜底，前端据此把对应 pending 转失败态。
 export interface NoteFailedMsg {
   reason: string // take_not_found / parse_error / timeout / model_unavailable（后端 NP 失败）；upload_failed（前端网络/上传层失败，不进后端）
@@ -335,12 +325,57 @@ export interface NoteFailedMsg {
   client_id: string | null // 定位要标失败的 pending；null=异常/旧链路，不误标
 }
 
-// 就地队列的 note 回执（done 态，3s 自走）。由 note.processed 派生。
+// note.applied 的单条变更（mark 或 note）。字段与后端 Change dataclass 对齐。
+export interface AppliedChange {
+  op: "mark" | "note"
+  take_id: number
+  scene_code: string
+  shot: string | number
+  take_number: number
+  take_suffix: string
+  status?: string | null // op=mark
+  content?: string | null // op=note
+  category?: string | null // op=note
+}
+
+// WS note.applied payload（替代 note.processed）：一个 client_id 带一组变更，纯 mark 也走这里。
+export interface NoteAppliedMsg {
+  client_id: string | null
+  changes: AppliedChange[]
+  ts: number
+}
+
+// note.clarify 的候选 take（解不出/不唯一/不存在时展示）。
+export interface ClarifyCandidate {
+  take_id: number
+  scene_code: string
+  shot: string | number
+  take_number: number
+  take_suffix: string
+  status: string
+}
+
+// WS note.clarify payload（新）：确定性解析失败，广播候选不写库。用户经输入框重发（新 client_id）。
+export interface NoteClarifyMsg {
+  client_id: string | null
+  message: string
+  candidates: ClarifyCandidate[]
+  ts: number
+}
+
+// 就地队列的 clarify 项（由 note.clarify 派生）。lingers（手动 dismiss），无重试按钮——用户重打一句。
+export interface ClarifyItem {
+  client_id: string
+  message: string
+  candidates: ClarifyCandidate[]
+  ts: number
+}
+
+// 就地队列的 note 回执（done 态，3s 自走）。由 note.applied 派生，带一组 changes。
 export interface FeedReceipt {
   client_id: string
-  category: string // keep/pass/ng/issue/note
-  content: string
-  rawText: string // 提交原文，「↩ 其实是提问」改判据此重发 query（取自对应 pending；语音/缺失回退 content）
+  changes: AppliedChange[] // N 条变更（mark/note），ReceiptRow 渲染「已记录：第2条→keep、…」
+  rawText: string // 提交原文，「↩ 其实是提问」改判据此重发 query（取自对应 pending；缺失回退空串）
   ts: number
 }
 
@@ -365,4 +400,36 @@ export interface QaItem {
 // 驱动 header 眼睛计数。
 export interface ViewerCountMsg {
   count: number
+}
+
+// ── note.confirm 契约（确认卡，后端 NoteConfirmPayload / POST /notes/confirm）──
+
+// NP 提取结果（extraction 字段），note.confirm payload 与 POST /notes/confirm body 共用。
+export interface NpExtractionDTO {
+  scene_ordinal: number
+  shot_ordinal: number
+  take_ordinals: number[]
+  deictic: "none" | "current" | "prev"
+  mark: "pass" | "ng" | "keep" | "tbd" | "none"
+  note_text: string
+  note_category: "note" | "issue"
+}
+
+// WS note.confirm payload（后端 NoteConfirmPayload）。后端不确定时广播让前端展示确认卡。
+export interface NoteConfirmMsg {
+  client_id?: string | null
+  extraction: NpExtractionDTO
+  disagreement: string[]
+  options: { scenes: string[]; shots: string[]; take_numbers: number[] }
+  ts: number
+}
+
+// 就地队列的 confirm 项（由 note.confirm 派生）。用户编辑后提交或 dismiss。
+export interface ConfirmItem {
+  client_id: string
+  extraction: NpExtractionDTO
+  disagreement: string[]
+  options: { scenes: string[]; shots: string[]; take_numbers: number[] }
+  ts: number
+  rawTextSummary?: string // 原始输入摘要（取自对应 pending.rawText），供 receipt.rawText 回填
 }

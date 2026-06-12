@@ -10,6 +10,7 @@
 公共 API：
   run_qp_query(text, dal, service) -> str   QP 入口：拼场次目录 + system → 跑循环
   run_tool_loop(messages, *, service, dal)  纯循环（可注入 service/dal，便于测试）
+  build_scene_catalog(dal) -> str           场次目录文本（QP 文本/语音共用）
 """
 from __future__ import annotations
 
@@ -30,6 +31,11 @@ _MAX_HOPS = 5
 _FALLBACK_TEXT = "抱歉，这个问题查询轮数超过上限，没能得出结论。"
 # FunctionGemma auto content：<|tool_call>call:NAME{...}（FC spec §3.2）。名字 \w+ 在第一个 { 前。
 _TOOL_NAME_RE = re.compile(r"<\|tool_call>call:(\w+)")
+_TOOL_CALL_BLOCK_RE = re.compile(r"<\|tool_call>.*?(?:<tool_call\|>|$)", re.S)
+_CLOSING_PROMPT = (
+    "查询轮数已到上限。请只用以上工具返回的信息直接回答用户最初的问题；"
+    "如果信息确实不足，就说明目前已查到的内容。不要再调用工具。"
+)
 
 # 极简 system prompt（spec §5.5 预算纪律：先按极简跑，不稳才加且每加必量化）。
 _QP_SYSTEM = (
@@ -71,16 +77,35 @@ async def run_tool_loop(
     dal: "DAL",
     max_hops: int = _MAX_HOPS,
     timeout: float = 30.0,
+    trace: list[dict] | None = None,
+    native_toolfeed: bool = True,
 ) -> str:
     """两步走循环：≤max_hops 跳，返回最终自然语言文本。messages 原地追加每跳的 tool 往返。
 
+    trace：评测诊断用，传入非 None 的列表则每跳 append {"tool", "args", "result"}，
+           默认 None 不收集（不影响任何现有调用方行为）。
+
+    native_toolfeed：控制工具结果回喂格式（B2，A/B 裁决后默认 True）。
+    A/B 评测：native 两轮一致 0.900 vs text 两轮 0.833，agg-time 抖动被 native 接地修平。
+    - True（默认，生产）：OpenAI 风格 native 回喂——assistant{tool_calls}+role=tool 两帧。
+      Task 14 probe 结论：client.py:249 路由下带 tools kwarg 的调用走 GGUF 原生
+      Jinja2ChatFormatter，该模板原生支持 role=tool，渲染成 <|tool_call>/<|tool_response>
+      block（Gemma 原生期待格式）。
+    - False（兼容回退）：纯文本回喂——assistant 喂 auto 步原始 content（含
+      <|tool_call> 特殊 token），工具结果用 user 消息「工具 NAME 返回：...」。
+      历史背景：路由守卫建立前的 workaround，彼时 role=tool 会撞 Jinja raise_exception。
+
     异常契约：
     - asyncio.TimeoutError / asyncio.CancelledError 放行给 caller（route 兜底返回友好错误）。
+      收尾跳的 infer 超时同样放行（与主循环跳对齐）。
     - step B 取参失败（LookupError/KeyError/JSONDecodeError/TypeError）→ 包成 error 回喂，
       模型下一跳自纠；不抛穿，循环继续。
     - step C executor 错误（_run_executor 内已包）→ 同样回喂，不抛穿。
+    - 跑满 max_hops 后追加无工具收尾跳（D1 修复）：已回喂的工具结果全在 messages 里，
+      收尾跳返回自然语言 → 直接作答；收尾跳仍含 tool_call 标记 → strip 后有文本则返回，
+      strip 后为空 → 落 _FALLBACK_TEXT（双兜底）。
     """
-    for _ in range(max_hops):
+    for hop_idx in range(max_hops):
         # step A — auto 跳：抠工具名。
         # ✅ Task 7.5 probe 已实证「假设 7」成立：service.infer 在 auto 跳返回 FunctionGemma
         #   content 串（finish_reason=stop，不撞 service 护栏），happy path 即此分支。
@@ -106,37 +131,55 @@ async def run_tool_loop(
         except (LookupError, KeyError, json.JSONDecodeError, TypeError) as exc:
             # forced 没拿到干净参数（模型没走 FC / arguments 缺失或非法）→ 当工具失败回喂，模型自纠，不抛穿
             logger.warning("qp forced 跳取参失败 name=%s: %r", name, exc)
+            args = {}  # 取参失败；trace 用空 dict
             result: dict = {"error": f"工具 {name} 调用失败：参数无法解析，请换种方式或直接回答。"}
         else:
             # step C — 执行（executor 包 to_thread，错误不抛穿）
             result = await asyncio.to_thread(_run_executor, name, args, dal)
 
-        # 回喂（单点，纯文本，Task 7.5 probe 实证定案）：
-        # **不**用 OpenAI 风格 assistant{tool_calls}+role=tool——
-        # 那会撞这个 GGUF 的 Jinja 模板 `UndefinedError: 'raise_exception' is undefined`（状态相关、不稳）。
-        # 改纯文本：assistant 喂 auto 步原始 content（模型自吐的 <|tool_call>...，特殊 token 模型认得），
-        # tool 结果用纯文本 user 消息。实测 3 次确定性稳定渲染 + 自然语言收尾、不再无脑调工具。
-        messages.append({"role": "assistant", "content": text})
-        messages.append(
-            {"role": "user", "content": f"工具 {name} 返回：{json.dumps(result, ensure_ascii=False)}"}
-        )
+        # trace 收集（评测诊断用，默认 None 跳过）
+        if trace is not None:
+            trace.append({"tool": name, "args": args, "result": result})
 
-    return _FALLBACK_TEXT  # 兜底：正常 1~2 跳收尾，靠 system 防 run-on（spec §5.2）
+        # 回喂（单点）：native/text 取舍与 A/B 数字见函数 docstring。
+        if native_toolfeed:
+            call_id = f"call_{hop_idx}"
+            messages.append({
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
+                }],
+            })
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": json.dumps(result, ensure_ascii=False),
+            })
+        else:
+            messages.append({"role": "assistant", "content": text})
+            messages.append(
+                {"role": "user", "content": f"工具 {name} 返回：{json.dumps(result, ensure_ascii=False)}"}
+            )
+
+    # D1：跑满不丢已查数据——追加无工具收尾跳，已回喂的工具结果都在 messages 里。
+    messages.append({"role": "user", "content": _CLOSING_PROMPT})
+    text = await service.infer(messages, task_type=_QP_TASK, priority=1, timeout=timeout)
+    if _scrape_tool_name(text) is None and text.strip():
+        return text
+    stripped = _TOOL_CALL_BLOCK_RE.sub("", text).strip()
+    return stripped or _FALLBACK_TEXT
 
 
-def _build_scene_catalog(dal: "DAL") -> str:
-    """场次目录注入（spec §7.1）：编号 + scene_code + slugline + 顺序号，注入 user/context。"""
+def build_scene_catalog(dal: "DAL") -> str:
+    """场次目录注入:只列场次编号(供场次引用解析),地点/时间等事实一律走工具查。"""
     scenes = dal.list_scenes_readonly()
     if not scenes:
         return "（当前项目还没有任何场次记录。）"
-    lines = ["当前项目场次目录（顺序号. 编号 ｜ 内外景 地点 时间）："]
-    for pos, s in enumerate(scenes, start=1):
-        slug = " ".join(
-            v for v in (s.get("int_ext"), s.get("location"), s.get("time_of_day")) if v
-        )
-        lines.append(f"{pos}. {s['scene_code']} ｜ {slug or '（无 slugline）'}")
-    lines.append(f"（共 {len(scenes)} 场）")
-    return "\n".join(lines)
+    # 单行长度 tradeoff 有意接受:200 场≈1.8KB 可控;scene_code 命名变长或千场级再加截断
+    codes = "、".join(s["scene_code"] for s in scenes)
+    return f"当前项目已有场次（编号）：{codes}（共 {len(scenes)} 场）。地点/时间/角色等信息用工具查询。"
 
 
 async def run_qp_query(
@@ -145,12 +188,24 @@ async def run_qp_query(
     dal: "DAL",
     service: "LLMService",
     timeout: float = 30.0,
+    trace: list[dict] | None = None,
+    native_toolfeed: bool = True,
 ) -> str:
-    """QP 入口：拼场次目录 + 极简 system → 跑两步走循环 → 返回自然语言答案。"""
+    """QP 入口：拼场次目录 + 极简 system → 跑两步走循环 → 返回自然语言答案。
+
+    trace：评测诊断用，传入非 None 的列表则每跳 append {"tool", "args", "result"}，
+           透传给 run_tool_loop，默认 None 不收集。
+
+    native_toolfeed：透传给 run_tool_loop；默认 True（native role=tool 回喂，
+    A/B 裁决 native 0.900×2 vs text 0.833×2），False 为兼容回退（纯文本回喂）。
+    """
     # 场次目录是同步 SQLite I/O，包 to_thread 不阻塞事件循环（与 step C executor 的 to_thread 一致）。
-    catalog = await asyncio.to_thread(_build_scene_catalog, dal)
+    catalog = await asyncio.to_thread(build_scene_catalog, dal)
     messages = [
         {"role": "system", "content": _QP_SYSTEM},
         {"role": "user", "content": f"{catalog}\n\n用户提问：{text}"},
     ]
-    return await run_tool_loop(messages, service=service, dal=dal, timeout=timeout)
+    return await run_tool_loop(
+        messages, service=service, dal=dal, timeout=timeout, trace=trace,
+        native_toolfeed=native_toolfeed,
+    )

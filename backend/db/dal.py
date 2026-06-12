@@ -435,26 +435,72 @@ class DAL:
             ).fetchall()
         return [r["c"] for r in rows]
 
+    def get_script_lines(self, scene_id: int, limit: int = 40) -> list[dict]:
+        """最新版剧本行(含舞台指示 character=NULL),line_no 升序,limit 截断(只读连接)。"""
+        with self._readonly_conn() as conn:
+            rows = conn.execute(
+                "SELECT line_no, character, text FROM script_lines "
+                "WHERE script_id = (SELECT script_id FROM scripts WHERE scene_id = ? "
+                "ORDER BY version DESC LIMIT 1) "
+                "ORDER BY line_no LIMIT ?;",
+                (scene_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def search_script_lines(self, query: str, scene_id: int | None = None) -> list[dict]:
-        """FTS5 MATCH 检索台词（BM25 排序，只读连接）。返回 line_no/character/text dict 列表。"""
+        """检索台词（只读连接）。返回 line_no/character/text/scene_code dict 列表。
+
+        ≥3 字走 FTS5 MATCH（BM25 排序）；<3 字走 LIKE 回退——trigram 分词最小
+        匹配长度是 3，短查询（如「合同」）FTS 必 0 命中（实证），LIKE 通配符
+        转义后按 line_no 排序。
+        不过滤历史剧本版本（LIKE/FTS 两路径一致；list_characters 只取最新版，
+        行为有意不同步，多剧本场景需重审）。短查询 LIKE 全表扫描在单剧本千行
+        量级可接受，多剧本场景待评估。
+        """
+        q = query.strip()
+        if len(q) < 3:
+            # LIKE 回退：先转义转义符自身，再转义 % 和 _，防通配符注入全表命中
+            pattern = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            like_base = (
+                "SELECT sl.line_no AS line_no, sl.character AS character, "
+                "sl.text AS text, sc.scene_code AS scene_code "
+                "FROM script_lines sl "
+                "JOIN scripts s ON s.script_id = sl.script_id "
+                "JOIN scenes sc ON sc.scene_id = s.scene_id "
+                "WHERE sl.text LIKE ? ESCAPE '\\' "
+            )
+            with self._readonly_conn() as conn:
+                if scene_id is not None:
+                    rows = conn.execute(
+                        like_base + "AND s.scene_id = ? ORDER BY sl.line_no;",
+                        (pattern, scene_id),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        like_base + "ORDER BY sl.line_no;",
+                        (pattern,),
+                    ).fetchall()
+            return [dict(r) for r in rows]
         base = (
-            "SELECT sl.line_no AS line_no, sl.character AS character, sl.text AS text "
+            "SELECT sl.line_no AS line_no, sl.character AS character, "
+            "sl.text AS text, sc.scene_code AS scene_code "
             "FROM script_lines_fts fts "
             "JOIN script_lines sl ON sl.line_id = fts.rowid "
+            "JOIN scripts s ON s.script_id = sl.script_id "
+            "JOIN scenes sc ON sc.scene_id = s.scene_id "
         )
         with self._readonly_conn() as conn:
             if scene_id is not None:
                 rows = conn.execute(
                     base
-                    + "JOIN scripts s ON s.script_id = sl.script_id "
-                    "WHERE fts.text MATCH ? AND s.scene_id = ? "
+                    + "WHERE fts.text MATCH ? AND s.scene_id = ? "
                     "ORDER BY bm25(script_lines_fts);",
-                    (query, scene_id),
+                    (q, scene_id),
                 ).fetchall()
             else:
                 rows = conn.execute(
                     base + "WHERE fts.text MATCH ? ORDER BY bm25(script_lines_fts);",
-                    (query,),
+                    (q,),
                 ).fetchall()
         return [dict(r) for r in rows]
 
@@ -830,6 +876,49 @@ class DAL:
                 "SELECT * FROM takes WHERE deleted_at IS NULL ORDER BY take_number ASC;"
             ).fetchall()
         return [_row_to_take(r) for r in rows]
+
+    def get_take_by_coords(
+        self, scene_id: int, shot: str, take_number: int
+    ) -> list["Take"]:
+        """按 (scene_id, shot, take_number) 查活跃 take（排除软删），按 take_suffix 升序。
+
+        返回 list：UNIQUE 四元组含 take_suffix，同坐标可对多行（''/'+'/'++'）。
+        NP 解析据「不唯一」（len>1）走 clarify，「不存在」（[]）走 clarify，「唯一」直接 apply。
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM takes "
+            "WHERE scene_id = ? AND shot = ? AND take_number = ? AND deleted_at IS NULL "
+            "ORDER BY take_suffix ASC;",
+            (scene_id, shot, take_number),
+        ).fetchall()
+        return [_row_to_take(r) for r in rows]
+
+    def list_shots(self, scene_id: int) -> list[str]:
+        """某场 distinct shot（live，排软删），确认卡镜 chip 值域。
+
+        同一 shot 有多条 take 时 DISTINCT 去重（suffix 冲突时同号多行）。
+        """
+        with self._readonly_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT shot FROM takes "
+                "WHERE scene_id = ? AND deleted_at IS NULL ORDER BY shot;",
+                (scene_id,),
+            ).fetchall()
+        return [r["shot"] for r in rows]
+
+    def list_take_numbers(self, scene_id: int, shot: str) -> list[int]:
+        """某场某镜 take_number 升序列表（live，排软删），确认卡次 chip 值域。
+
+        同坐标多 suffix 时 take_number 会重复，用 DISTINCT 去重。
+        """
+        with self._readonly_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT take_number FROM takes "
+                "WHERE scene_id = ? AND shot = ? AND deleted_at IS NULL "
+                "ORDER BY take_number;",
+                (scene_id, shot),
+            ).fetchall()
+        return [int(r["take_number"]) for r in rows]
 
     # ── take_events ──────────────────────────────────────────────────────────
 

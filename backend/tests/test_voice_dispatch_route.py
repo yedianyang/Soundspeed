@@ -36,6 +36,14 @@ class _StubService:
 
 def _make_client(dal: DAL, monkeypatch) -> TestClient:
     monkeypatch.setenv("ADMIN_TOKEN", _TOKEN)
+    # D4 后 _dispatch_with_status 内有 await asyncio.to_thread(build_scene_catalog, ...)：
+    # 非 with TestClient 的 portal 在请求结束即关，真实函数（开只读 SQLite 连接）的线程
+    # 完成回调赶不上关闭窗口 → fire-and-forget task 来不及跑完。mock 成即时返回消竞态。
+    # patch 使用方命名空间 takes.*（from-import 绑定）。
+    monkeypatch.setattr(
+        "backend.api.routes.takes.build_scene_catalog",
+        lambda dal: "当前项目已有场次（编号）：Scene_1（共 1 场）。地点/时间/角色等信息用工具查询。",
+    )
     orch = create_orchestrator(dal)
     app = create_app(orch, llm_service=_StubService())
     return TestClient(app)
@@ -288,6 +296,45 @@ def test_voice_dispatch_emits_busy_then_idle(dal: DAL, monkeypatch) -> None:
         f"第一个 LLM_STATUS 应为 busy 态，实际 {states[0]!r}"
     )
     assert states[-1] == "idle", f"最后一个 LLM_STATUS 应为 idle，实际 {states[-1]!r}"
+
+
+# ── 测试 D4：run_voice_dispatch 收到非空 scene_context（场次目录注入） ─────────────
+
+def test_voice_dispatch_receives_scene_context(dal: DAL, monkeypatch) -> None:
+    """D4：POST 语音后 run_voice_dispatch 收到的 scene_context 非空且含场次目录内容。
+
+    原实现 scene_context="" 硬编码空串，此测试应红；实现后变绿。
+    mock build_scene_catalog 本身（patch 使用方命名空间 takes.*，from-import 绑定）：
+    让 to_thread 内即时返回，规避 fire-and-forget task 在 TestClient 下的线程调度时序。
+    task 异步执行，此处依赖 TestClient 单线程事件循环在 post 返回前推进 task；
+    如遇偶发空 received_kw，应改用 _wait_dispatch_tasks。
+    """
+    _setup_scene_and_take(dal)
+    client = _make_client(dal, monkeypatch)
+
+    received_kw: dict = {}
+
+    async def _fake_dispatch(audio, *, conn_id, scene_context=None, **kw):
+        received_kw["scene_context"] = scene_context
+        return {"kind": "query"}
+
+    monkeypatch.setattr("backend.api.routes.takes.run_voice_dispatch", _fake_dispatch)
+    monkeypatch.setattr(
+        "backend.api.routes.takes.build_scene_catalog",
+        lambda dal: "当前项目已有场次（编号）：Scene_1（共 1 场）。地点/时间/角色等信息用工具查询。",
+    )
+
+    r = client.post(
+        "/api/v1/notes/voice",
+        data={"conn_id": "c-d4", "client_id": "cid-d4"},
+        files={"file": ("test.wav", io.BytesIO(_WAV_BYTES), "audio/wav")},
+        headers=AUTH,
+    )
+    assert r.status_code == 202, r.text
+    sc = received_kw.get("scene_context", "")
+    assert sc != "", "scene_context 不应为空串（D4：必须注入场次目录）"
+    # mock 的 catalog 含「已有场次」
+    assert "已有场次" in sc, f"scene_context 应含已有场次，实际：{sc!r}"
 
 
 def test_voice_dispatch_emits_idle_on_error(dal: DAL, monkeypatch) -> None:

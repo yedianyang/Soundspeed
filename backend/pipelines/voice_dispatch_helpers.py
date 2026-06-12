@@ -29,10 +29,10 @@ QP_TOOL_NAMES: tuple[str, ...] = tuple(
 
 @functools.lru_cache(maxsize=1)
 def extract_tool_declarations_text() -> str:
-    """从 GGUF chat_template 提取 6 工具的原生 <|tool>...<tool|> 声明块。
+    """从 GGUF chat_template 提取 8 工具(7 QP + note) 的原生 <|tool>...<tool|> 声明块。
 
     vocab_only=True 加载（不上 Metal，秒级），仅读 tokenizer/metadata。
-    渲染 6 工具声明到 dummy messages，正则提取所有 <|tool>...<tool|> 块拼接返回。
+    渲染 8 工具声明(7 QP + note) 到 dummy messages，正则提取所有 <|tool>...<tool|> 块拼接返回。
     详见 probe_c3_text_decl.py extract_tool_declarations_text()。
 
     lru_cache(maxsize=1)：GGUF chat_template 运行时不变，结果安全缓存。
@@ -85,8 +85,9 @@ def extract_tool_declarations_text() -> str:
 def build_hop_a_system(scene_context: str = "") -> str:
     """组装 hop A 的 system prompt：任务说明 + 工具声明（原生格式）+ 场次目录。
 
-    scene_context: 场次目录文本（从 _build_scene_catalog(dal) 取，如
-    "Scene 1: 大堂 / Scene 2: 走廊"），注入后模型可用具体场次 ID 填参数。
+    scene_context: 场次目录文本（从 build_scene_catalog(dal) 取，如
+    "当前项目已有场次（编号）：Scene_1、Scene_2（共 2 场）。地点/时间/角色等信息用工具查询。"），
+    注入后模型可用具体场次 ID 填参数。
     对齐 probe_qp_voice_e2e.py system_content 组装格式。
     """
     tool_decl_text = extract_tool_declarations_text()

@@ -1,0 +1,10 @@
+{"id": "multi-hop-chars", "category": "multi_hop", "question": "现在拍第15场,下一场第16场有几个演员?都是谁?", "must_contain_all": [["4", "四"], ["顾朗"], ["沈舟"], ["林晚"], ["陈默"]], "must_not_contain": ["没有这", "查不到"]}
+{"id": "mic-advice", "category": "multi_hop", "question": "第16场需要准备几路无线麦克风?给个建议。", "must_contain_all": [["4", "四"]], "must_not_contain": [], "note": "靠 character_count=4 + 室内推理;prompt 松绑(Task 9)前预期挂"}
+{"id": "agg-location", "category": "aggregate", "question": "江城家一共有多少场戏?", "must_contain_all": [["12", "十二"]], "must_not_contain": ["没有", "查不到"]}
+{"id": "agg-time", "category": "aggregate", "question": "江城家的戏里,日戏和夜戏各有几场?", "must_contain_all": [["4", "四"], ["日"], ["夜"]], "must_not_contain": ["没有", "查不到"], "note": "OR-group 精度上限:4 仅需命中一次,日夜各4场无法独立核对"}
+{"id": "single-count", "category": "single_tool", "question": "第15场拍了几条?", "must_contain_all": [["3", "三"]], "must_not_contain": ["4条", "四条", "4 条"], "note": "4 总-1 软删=3;答 4 = 漏软删过滤"}
+{"id": "single-info", "category": "single_tool", "question": "第7场是日戏还是夜戏?在哪里拍?", "must_contain_all": [["夜"], ["江城家"]], "must_not_contain": []}
+{"id": "single-chars", "category": "single_tool", "question": "第16场都有哪些角色?", "must_contain_all": [["顾朗"], ["沈舟"], ["林晚"], ["陈默"]], "must_not_contain": []}
+{"id": "search-line", "category": "single_tool", "question": "哪场戏的台词提到了合同?", "must_contain_all": [["16", "十六"]], "must_not_contain": [], "note": "需 search_script_lines 返回带场次(Task 8 修);修前预期挂"}
+{"id": "negative-scene", "category": "negative", "question": "第99场拍了多少条?", "must_contain_all": [["没有", "找不到", "不存在"]], "must_not_contain": []}
+{"id": "content-16", "category": "multi_hop", "question": "第16场拍的是什么内容?", "must_contain_all": [["咖啡馆"], ["对峙", "紧张", "谈判"]], "must_not_contain": [], "note": "需 get_scene_script(Task 12);加工具前预期挂"}

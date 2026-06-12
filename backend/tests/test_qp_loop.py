@@ -10,7 +10,13 @@ import json
 
 import pytest
 
-from backend.pipelines.qp_query import _build_scene_catalog, _run_executor, _scrape_tool_name, run_tool_loop
+from backend.pipelines.qp_query import (
+    _FALLBACK_TEXT,
+    build_scene_catalog,
+    _run_executor,
+    _scrape_tool_name,
+    run_tool_loop,
+)
 
 
 def test_scrape_tool_name_functiongemma() -> None:
@@ -59,6 +65,9 @@ class _StubDAL:
     def count_takes(self, scene_id, status=None):
         return 3
 
+    def get_scene_info(self, scene_id):
+        return {"scene_id": 1, "scene_code": "1"}
+
     def list_scenes_readonly(self):
         return []
 
@@ -77,24 +86,25 @@ async def test_loop_single_hop_then_answer() -> None:
     answer = await run_tool_loop(messages, service=svc, dal=_StubDAL())
     assert answer == "第一场一共拍了 3 条。"
     assert svc.infer_tool_calls == 1
-    # 工具结果被回喂进 messages（纯文本格式，Task 7.5 实证：assistant 原始 content + user「工具…返回…」）
-    assert any(m["role"] == "user" and m["content"].startswith("工具 ") for m in messages)
+    # 工具结果被回喂进 messages（默认 native 格式：assistant{tool_calls} + role=tool）
+    assert any(m["role"] == "tool" for m in messages)
 
 
 @pytest.mark.asyncio
 async def test_loop_terminates_at_max_hops() -> None:
-    # 每跳都调工具、永不收尾 → 走到 5 跳兜底
+    # 每跳都调工具、永不收尾 → 跑满 5 跳后追加收尾跳，收尾跳仍返回工具调用 → 落 _FALLBACK_TEXT
+    # （更新自旧契约：D1 修复后，跑满不再直接返回兜底，而是多一次无工具收尾 infer）
     looping = "<|tool_call>call:count_takes{scene_ref:<|\"|>1<|\"|>}<tool_call|>"
     svc = _ScriptedService(
-        auto_replies=[looping] * 5,
+        auto_replies=[looping] * 5 + [looping],  # 收尾跳也返工具调用 → strip 后 fallback
         forced_args=[{"scene_ref": "1"}] * 5,
     )
     answer = await run_tool_loop(
         [{"role": "user", "content": "x"}], service=svc, dal=_StubDAL()
     )
-    assert "超过上限" in answer or "轮数" in answer
-    assert svc.infer_tool_calls == 5  # 恰好 5 跳
-    assert svc.infer_calls == 5       # off-by-one 护栏：infer 调用次数也是 5
+    assert answer == _FALLBACK_TEXT
+    assert svc.infer_tool_calls == 5   # 恰好 5 跳（收尾跳不走 forced）
+    assert svc.infer_calls == 6        # 5 跳 + 1 收尾跳
 
 
 @pytest.mark.asyncio
@@ -110,8 +120,8 @@ async def test_loop_feeds_executor_error_back() -> None:
     messages = [{"role": "user", "content": "第999场拍了多少"}]
     answer = await run_tool_loop(messages, service=svc, dal=_StubDAL())
     assert "999" in answer
-    # error 串被回喂（纯文本 user 消息「工具 count_takes 返回：{...error...}」）
-    fed = [m for m in messages if m["role"] == "user" and m["content"].startswith("工具 ")][0]
+    # error 串被回喂（默认 native 格式：role=tool 帧 content 含 error）
+    fed = [m for m in messages if m["role"] == "tool"][0]
     assert "error" in fed["content"]
 
 
@@ -129,8 +139,8 @@ async def test_loop_forced_parse_failure_feeds_error() -> None:
     answer = await run_tool_loop(messages, service=svc, dal=_StubDAL())
     # 循环不崩，模型能收尾
     assert isinstance(answer, str) and answer
-    # error 被回喂为 role=user「工具…返回…」消息
-    fed = [m for m in messages if m["role"] == "user" and m["content"].startswith("工具 ")]
+    # error 被回喂为 role=tool 帧（默认 native 格式）
+    fed = [m for m in messages if m["role"] == "tool"]
     assert fed, "取参失败的 error 应该被回喂进 messages"
     assert "error" in fed[0]["content"]
 
@@ -156,11 +166,12 @@ def test_run_executor_unknown_tool() -> None:
 
 def test_build_scene_catalog_empty() -> None:
     # list_scenes_readonly 返空 → 含「还没有任何场次」
-    catalog = _build_scene_catalog(_StubDAL())
+    catalog = build_scene_catalog(_StubDAL())
     assert "还没有任何场次" in catalog
 
 
 def test_build_scene_catalog_with_scenes() -> None:
+    # catalog 瘦身后只列场次编号+总数,slugline(地点/内外景/时间)一律不进 prompt,逼模型走工具查事实
     class _DALWithScenes:
         def list_scenes_readonly(self):
             return [
@@ -168,7 +179,134 @@ def test_build_scene_catalog_with_scenes() -> None:
                 {"scene_code": "Scene_2", "int_ext": None, "location": "天台", "time_of_day": "夜"},
             ]
 
-    catalog = _build_scene_catalog(_DALWithScenes())
+    catalog = build_scene_catalog(_DALWithScenes())
     assert "Scene_1" in catalog
     assert "Scene_2" in catalog
-    assert "客厅" in catalog
+    assert "共 2 场" in catalog
+    # 不泄漏 slugline 内容
+    assert "客厅" not in catalog
+    assert "天台" not in catalog
+    assert "室内" not in catalog
+
+
+@pytest.mark.asyncio
+async def test_loop_trace_collects_tool_hops() -> None:
+    svc = _ScriptedService(
+        auto_replies=[
+            "<|tool_call>call:count_takes{scene_ref:<|\"|>1<|\"|>}<tool_call|>",
+            "第一场一共拍了 3 条。",
+        ],
+        forced_args=[{"scene_ref": "1"}],
+    )
+    trace: list[dict] = []
+    answer = await run_tool_loop(
+        [{"role": "user", "content": "第一场拍了多少条"}],
+        service=svc, dal=_StubDAL(), trace=trace,
+    )
+    assert answer == "第一场一共拍了 3 条。"
+    assert len(trace) == 1
+    assert trace[0]["tool"] == "count_takes"
+    assert trace[0]["args"] == {"scene_ref": "1"}
+    assert trace[0]["result"]["条数"] == 3
+
+
+@pytest.mark.asyncio
+async def test_loop_trace_accumulates_multi_hop() -> None:
+    svc = _ScriptedService(
+        auto_replies=[
+            "<|tool_call>call:count_takes{scene_ref:<|\"|>1<|\"|>}<tool_call|>",
+            "<|tool_call>call:get_scene_info{scene_ref:<|\"|>1<|\"|>}<tool_call|>",
+            "查完了。",
+        ],
+        forced_args=[{"scene_ref": "1"}, {"scene_ref": "1"}],
+    )
+    trace: list[dict] = []
+    answer = await run_tool_loop(
+        [{"role": "user", "content": "第一场情况"}],
+        service=svc, dal=_StubDAL(), trace=trace,
+    )
+    assert answer == "查完了。"
+    assert [t["tool"] for t in trace] == ["count_takes", "get_scene_info"]
+
+
+# ── D1 收尾跳测试 ──────────────────────────────────────────────────────────────
+
+_TC = "<|tool_call>call:count_takes{scene_ref:<|\"|>1<|\"|>}<tool_call|>"
+
+
+@pytest.mark.asyncio
+async def test_loop_exhausted_forces_closing_answer() -> None:
+    # 5 跳全是工具调用 → 第 6 次 infer 是无工具收尾跳，其文本作为最终答案
+    svc = _ScriptedService(
+        auto_replies=[_TC] * 5 + ["已查到第一场共 3 条。"],
+        forced_args=[{"scene_ref": "1"}] * 5,
+    )
+    answer = await run_tool_loop(
+        [{"role": "user", "content": "第一场拍了多少条"}], service=svc, dal=_StubDAL(),
+    )
+    assert answer == "已查到第一场共 3 条。"
+    assert svc.infer_calls == 6  # 5 跳 + 1 收尾
+
+
+@pytest.mark.asyncio
+async def test_loop_exhausted_closing_still_tool_call_falls_back() -> None:
+    # 收尾跳还想调工具且 strip 后为空 → 才落 _FALLBACK_TEXT
+    svc = _ScriptedService(
+        auto_replies=[_TC] * 5 + [_TC],
+        forced_args=[{"scene_ref": "1"}] * 5,
+    )
+    answer = await run_tool_loop(
+        [{"role": "user", "content": "第一场拍了多少条"}], service=svc, dal=_StubDAL(),
+    )
+    assert answer == _FALLBACK_TEXT
+
+
+@pytest.mark.asyncio
+async def test_loop_exhausted_closing_prefix_plus_tool_call_returns_prefix() -> None:
+    # 收尾跳返回「前缀文本 + tool_call 块」→ strip 后返回前缀，不走 fallback
+    prefix_tc = "已查到第一场共 3 条。" + _TC
+    svc = _ScriptedService(
+        auto_replies=[_TC] * 5 + [prefix_tc],
+        forced_args=[{"scene_ref": "1"}] * 5,
+    )
+    answer = await run_tool_loop(
+        [{"role": "user", "content": "第一场拍了多少条"}], service=svc, dal=_StubDAL(),
+    )
+    assert answer == "已查到第一场共 3 条。"
+    assert svc.infer_calls == 6
+
+
+# ── B2 native role=tool 回喂测试（A/B 裁决后 native 转正为默认） ──────────────
+
+@pytest.mark.asyncio
+async def test_loop_native_toolfeed_message_shape() -> None:
+    # 默认（不传 flag）= native 回喂:assistant{tool_calls} + role=tool 两帧
+    svc = _ScriptedService(
+        auto_replies=[_TC, "第一场一共拍了 3 条。"],
+        forced_args=[{"scene_ref": "1"}],
+    )
+    messages = [{"role": "user", "content": "第一场拍了多少条"}]
+    answer = await run_tool_loop(messages, service=svc, dal=_StubDAL())
+    assert answer == "第一场一共拍了 3 条。"
+    # 回喂两帧:assistant{tool_calls} + role=tool,不是纯文本
+    assistant_frame = messages[1]
+    tool_frame = messages[2]
+    assert assistant_frame["role"] == "assistant"
+    assert assistant_frame["tool_calls"][0]["function"]["name"] == "count_takes"
+    assert json.loads(assistant_frame["tool_calls"][0]["function"]["arguments"]) == {"scene_ref": "1"}
+    assert tool_frame["role"] == "tool"
+    assert tool_frame["tool_call_id"] == assistant_frame["tool_calls"][0]["id"]
+    assert "条数" in tool_frame["content"]
+
+
+@pytest.mark.asyncio
+async def test_loop_text_toolfeed_fallback_shape() -> None:
+    # 兼容回退模式（native_toolfeed=False）:assistant 纯 content + user「工具…返回…」
+    svc = _ScriptedService(
+        auto_replies=[_TC, "第一场一共拍了 3 条。"],
+        forced_args=[{"scene_ref": "1"}],
+    )
+    messages = [{"role": "user", "content": "第一场拍了多少条"}]
+    await run_tool_loop(messages, service=svc, dal=_StubDAL(), native_toolfeed=False)
+    assert messages[1]["role"] == "assistant" and "tool_calls" not in messages[1]
+    assert messages[2]["role"] == "user" and messages[2]["content"].startswith("工具 count_takes 返回：")

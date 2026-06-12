@@ -194,23 +194,6 @@ class LlmStatusPayload:
     task_type: str | None
     take_id: int | None
 
-# Note 事件（4.x NP Pipeline）
-NOTE_PROCESSED = "note.processed"
-
-
-@dataclass(frozen=True)
-class NoteProcessedPayload:
-    """note.processed 的 payload：NP Pipeline 归置完成后发布。"""
-
-    event_id: int
-    take_id: int
-    category: str
-    content: str
-    ts: float
-    # 前端乐观 pending 的去重键：原样回传，content 被 LLM 改写、ts 不同源也能精确移除对应 pending。
-    client_id: str | None = None
-
-
 # Note 失败兜底（4.I）
 NOTE_FAILED = "note.failed"
 
@@ -232,6 +215,60 @@ class NoteFailedPayload:
     ts: float
     # 前端乐观 pending 的去重键：定位要标失败的那条 pending；缺失时前端不误标，仅记日志。
     client_id: str | None = None
+
+
+# NP 重设计回灌契约（替代 note.processed）。topic 扁平（非 conn-scoped）：复用 client_id 去重，
+# 与 note.processed 一致；conn-scoped 需 conn_id 穿到 _finalize_np 的语音-调度器路径（设计 §9 禁碰），
+# 见 plan DEVIATION 1。
+NOTE_APPLIED = "note.applied"
+
+
+@dataclass(frozen=True)
+class NoteAppliedPayload:
+    """note.applied 的 payload：NP 多目标 apply 完成后发布。
+
+    changes: 本次改动的列表（每条 mark / note）；纯 mark 也走这里（否则前端 pending 挂死）。
+    client_id: 前端乐观 pending 去重键，原样回传供精确移除并落一条带 changes 的 receipt。
+    """
+
+    client_id: str | None
+    changes: list[dict]
+    ts: float
+
+
+NOTE_CLARIFY = "note.clarify"
+
+
+@dataclass(frozen=True)
+class NoteClarifyPayload:
+    """note.clarify 的 payload：确定性解析失败（解不出 / 不唯一 / 不存在），广播候选不写库。
+
+    clarify 不是失败（不经 note.failed except 分支）；前端移除 pending + 推一条 clarify item，
+    用户经输入框重发一句更清楚的当新输入重跑（新 client_id）。
+    """
+
+    client_id: str | None
+    message: str
+    candidates: list[dict]
+    ts: float
+
+
+NOTE_CONFIRM = "note.confirm"
+
+
+@dataclass(frozen=True)
+class NoteConfirmPayload:
+    """语音 NP 自一致性分歧 → 待人确认（不落库）。
+
+    options 是确认卡 chip 下拉值域（v1：按 extraction 的场解析；切场不刷新，
+    确认后 resolve_targets 兜底不存在组合）。extraction=第一跑的 NPExtraction asdict。
+    """
+
+    client_id: str | None
+    extraction: dict          # NPExtraction asdict（7 字段）
+    disagreement: list[str]   # 两跑不一致的字段名（前端高亮）
+    options: dict             # {"scenes": [str], "shots": [str], "take_numbers": [int]}
+    ts: float
 
 
 @dataclass(frozen=True)

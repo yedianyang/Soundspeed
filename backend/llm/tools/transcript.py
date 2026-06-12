@@ -1,4 +1,4 @@
-"""QP 工具家（FC spec §3.3 预留）：5 个 build_*_tool() schema + build_qp_tools()。
+"""QP 工具家（FC spec §3.3 预留）：7 个 build_*_tool() schema + build_qp_tools()。
 
 executor（Task 5）也住本模块，与 schema 共置。本模块只 import 中性叶子，
 DAL 仅 TYPE_CHECKING——避开 config→tools→pipeline→config 循环（D-QP-09）。
@@ -56,7 +56,7 @@ def build_get_scene_info_tool() -> dict:
         "type": "function",
         "function": {
             "name": "get_scene_info",
-            "description": "返回某场次的地点/内外景/时间/拍摄日期/角色数。问「第N场在哪拍」用它。",
+            "description": "返回某场次的地点/内外景/时间/拍摄日期/角色数。问「第N场在哪拍/几个角色」用它。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -81,7 +81,7 @@ def build_list_characters_tool() -> dict:
         "type": "function",
         "function": {
             "name": "list_characters",
-            "description": "返回某场次剧本里出现的角色清单。问「这场有几个角色/都有谁」用它。",
+            "description": "返回某场次剧本里的角色名单。问「这场都有谁」用它。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -106,7 +106,7 @@ def build_search_script_lines_tool() -> dict:
         "type": "function",
         "function": {
             "name": "search_script_lines",
-            "description": "按关键词全文检索剧本台词，返回匹配行。问「哪句台词提到X / 某句台词在第几行」用它。",
+            "description": "按关键词全文检索剧本台词，返回匹配行及所在场次。问「哪句/哪场台词提到X」用它。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -136,7 +136,7 @@ def build_query_database_tool() -> dict:
         "function": {
             "name": "query_database",
             "description": (
-                "万能笔：当上面四个工具都覆盖不了时，写一条只读 SQL 直接查数据库。"
+                "万能笔：当上面这些工具都覆盖不了时，写一条只读 SQL 直接查数据库。"
                 "只允许 SELECT。主要表：scenes(scene_id,scene_code,location,int_ext,time_of_day,shoot_date)、"
                 "takes(take_id,scene_id,shot,take_number,status,deleted_at)、"
                 "script_lines(line_no,character,text,script_id)、scripts(script_id,scene_id)。"
@@ -156,22 +156,76 @@ def build_query_database_tool() -> dict:
     }
 
 
+_SCENE_SCRIPT_LIMIT = 40  # 40 行≈1200-1900 token(JSON 后),8192 n_ctx 下留足 system+历史+输出余量
+
+
+def build_get_scene_script_tool() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_scene_script",
+            "description": "返回某场次的剧本内容(舞台指示+台词)。问「第N场拍什么内容/讲什么」用它。",
+            "parameters": {
+                "type": "object",
+                "properties": {"scene_ref": {"type": "string", "description": _SCENE_REF_DESC}},
+                "required": ["scene_ref"],
+            },
+        },
+    }
+
+
+def build_list_scenes_tool() -> dict:
+    """构造 list_scenes OpenAI 风格 tool dict。
+
+    Returns:
+        type="function"，name="list_scenes" 的工具字典。
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "list_scenes",
+            "description": "按地点/时间/内外景筛选并统计场次。问「有多少场/几场戏/哪些场」必须用它，不要自己数场次目录；不填条件=全剧。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "可选地点关键词，如 '江城家'；不填则不限"},
+                    "time_of_day": {"type": "string", "enum": ["日", "夜", "晨", "黄昏"], "description": "可选时间过滤；不填则不限"},
+                    "int_ext": {"type": "string", "enum": ["内", "外"], "description": "可选内外景过滤；不填则不限"},
+                },
+                "required": [],
+            },
+        },
+    }
+
+
 def build_qp_tools() -> list[dict]:
-    """返回 QP 全部 5 个工具 schema（顺序固定，供 config.query_session 与测试用）。"""
+    """返回 QP 全部 7 个工具 schema（顺序固定，供 config.query_session 与测试用）。"""
     return [
         build_count_takes_tool(),
         build_get_scene_info_tool(),
         build_list_characters_tool(),
         build_search_script_lines_tool(),
+        build_list_scenes_tool(),
+        build_get_scene_script_tool(),
         build_query_database_tool(),
     ]
 
 
 # ---------------------------------------------------------------------------
 # executor（spec §5.3：executor(args, dal) -> dict；DAL 读全走只读连接，D-QP-12）
+#
+# D5 回喂本地化：4B 模型读不懂裸 DB 列名/英文枚举码，会答「说没有」。executor
+# 把回喂结果译成中文键 + 中文值（status 码→中文、NULL→「未注明」、
+# character=NULL→「(舞台指示)」），模型只转述，不翻译不计算。
+# error 形状（{"error": ...}）全部不变。
 # ---------------------------------------------------------------------------
 
 _SCENE_NOT_FOUND = "找不到场次 {ref!r}，数据库里没有这一场（不要用相近场次顶替）。"
+
+_SCRIPT_NOT_FOUND = "场次 {ref!r} 存在，但还没有录入剧本。"
+
+# take status 枚举码 → 中文（schema CHECK pass/ng/keep/tbd；enum 之外的值原样回显）
+_STATUS_ZH = {"pass": "过", "ng": "NG", "keep": "保留", "tbd": "待定"}  # ng 保留英文:片场通用词,对 4B 模型比「不过/废」更无歧义
 
 
 def count_takes_executor(args: dict, dal: "DAL") -> dict:
@@ -180,9 +234,9 @@ def count_takes_executor(args: dict, dal: "DAL") -> dict:
     scene_id = dal.resolve_scene_id(ref)
     if scene_id is None:
         return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
-    result: dict = {"scene_ref": ref, "count": dal.count_takes(scene_id, status=status)}
+    result: dict = {"场次": ref, "条数": dal.count_takes(scene_id, status=status)}
     if status is not None:
-        result["status"] = status
+        result["状态"] = _STATUS_ZH.get(status, status)
     return result
 
 
@@ -194,7 +248,14 @@ def get_scene_info_executor(args: dict, dal: "DAL") -> dict:
     info = dal.get_scene_info(scene_id)
     if info is None:
         return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
-    return info
+    return {
+        "场次": info["scene_code"],
+        "地点": info["location"] or "未注明",
+        "内外景": info["int_ext"] or "未注明",
+        "时间": info["time_of_day"] or "未注明",
+        "拍摄日期": info["shoot_date"] or "未注明",
+        "角色数": info["character_count"],
+    }
 
 
 def list_characters_executor(args: dict, dal: "DAL") -> dict:
@@ -203,7 +264,7 @@ def list_characters_executor(args: dict, dal: "DAL") -> dict:
     if scene_id is None:
         return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
     chars = dal.list_characters(scene_id)
-    return {"scene_ref": ref, "characters": chars, "count": len(chars)}
+    return {"场次": ref, "角色": chars, "人数": len(chars)}
 
 
 def search_script_lines_executor(args: dict, dal: "DAL") -> dict:
@@ -220,11 +281,81 @@ def search_script_lines_executor(args: dict, dal: "DAL") -> dict:
         matches = dal.search_script_lines(query, scene_id=scene_id)
     except Exception as exc:  # FTS 语法错误等，包成 error 让模型自纠
         return {"error": f"检索失败：{exc}"}
-    return {"query": query, "matches": matches, "count": len(matches)}
+    return {
+        "关键词": query,
+        "匹配数": len(matches),
+        "匹配": [
+            {
+                "场次": m["scene_code"],
+                "行号": m["line_no"],
+                "角色": m["character"] or "(舞台指示)",
+                "台词": m["text"],
+            }
+            for m in matches
+        ],
+    }
 
 
 def query_database_executor(args: dict, dal: "DAL") -> dict:
     sql = str(args.get("sql") or "")
     if not sql.strip():
         return {"error": "sql 为空"}
-    return dal.query_readonly(sql)
+    res = dal.query_readonly(sql)
+    if "error" in res:
+        return res
+    # rows 已是 dict 列表（dal.query_readonly），裸 "columns" 键不回喂
+    return {"行数": res["row_count"], "结果": res["rows"], "截断": res["truncated"]}
+
+
+def get_scene_script_executor(args: dict, dal: "DAL") -> dict:
+    ref = str(args.get("scene_ref") or "")
+    scene_id = dal.resolve_scene_id(ref)
+    if scene_id is None:
+        return {"error": _SCENE_NOT_FOUND.format(ref=ref)}
+    lines = dal.get_script_lines(scene_id, limit=_SCENE_SCRIPT_LIMIT + 1)  # +1 探测截断
+    if not lines:
+        return {"error": _SCRIPT_NOT_FOUND.format(ref=ref)}
+    truncated = len(lines) > _SCENE_SCRIPT_LIMIT
+    lines = lines[:_SCENE_SCRIPT_LIMIT]
+    out = {
+        "场次": ref,
+        "行数": len(lines),
+        "剧本": [
+            {"角色": ln["character"] or "(舞台指示)", "内容": ln["text"]} for ln in lines
+        ],
+    }
+    if truncated:
+        out["提示"] = f"(已截断,仅前{_SCENE_SCRIPT_LIMIT}行)"
+    return out
+
+
+def list_scenes_executor(args: dict, dal: "DAL") -> dict:
+    """过滤用子串匹配（「内」命中「室内」），聚合算在这里——模型只转述不计算。"""
+    loc = str(args.get("location") or "").strip()
+    tod = str(args.get("time_of_day") or "").strip()
+    int_ext = str(args.get("int_ext") or "").strip()
+
+    def _hit(s: dict) -> bool:
+        if loc and loc not in (s["location"] or ""):
+            return False
+        if tod and tod not in (s["time_of_day"] or ""):
+            return False
+        if int_ext and int_ext not in (s["int_ext"] or ""):
+            return False
+        return True
+
+    hits = [s for s in dal.list_scenes_readonly() if _hit(s)]
+    # by_tod 键序=场次创建序首现顺序(list_scenes_readonly ORDER BY 稳定);enum 由 grammar 约束,executor 不重复校验
+    by_tod: dict[str, int] = {}
+    for s in hits:
+        key = s["time_of_day"] or "未注明"
+        by_tod[key] = by_tod.get(key, 0) + 1
+    cond = "、".join(v for v in (loc, tod, int_ext) if v) or "全剧"
+    parts = "、".join(f"{k}{v}场" for k, v in by_tod.items())
+    return {
+        "筛选": cond,
+        "总场数": len(hits),
+        "按时间": by_tod,
+        "场次": [s["scene_code"] for s in hits],
+        "摘要": f"{cond}共{len(hits)}场" + (f"({parts})" if parts else ""),
+    }
