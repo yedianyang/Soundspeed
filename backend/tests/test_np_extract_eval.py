@@ -16,6 +16,7 @@ import pytest
 # 导入顺序坑（test_np_function_calling.py:24 注释）：pipelines 在 config/service 前，避免
 # config↔pipelines 循环初始化。本 harness 直连 client，不经 pipeline，但保持习惯无害。
 from backend.llm.tools.note_extract import EXTRACT_NP_TOOL_NAME, build_extract_np_tool
+from backend.pipelines.np_extract import build_extract_messages
 
 pytestmark = [
     pytest.mark.np_eval,
@@ -29,18 +30,10 @@ FIXTURE = Path(__file__).parent / "fixtures" / "np_extract.jsonl"
 RUNS_PER_CASE = 3
 ACCURACY_FLOOR = 0.80  # 6 字段基线 21/24≈0.875；加第 7 字段 + temp>0 方差，留头距设 0.80
 
-# spike 复跑系统 prompt（probe_extract_flat.py:81，21/24）。note_category 句子补在末尾。
-# 上下文行内嵌（当前第1场/第1进/活跃第3条/上一条第2条）—— 与 fixture expected 一致。
-SYSTEM_PROMPT = (
-    "你是场记助手。把录音师这句话提取成固定结构，每个字段都要填（用哨兵值表示'没有'）。"
-    "映射：第N进/第N镜=shot_ordinal，第N条/第N次=take_ordinal，第N场=scene_ordinal；"
-    "当前场/镜填0；这条=deictic current，上一条/刚才那条=deictic prev，用了编号=deictic none；"
-    "过/通过=mark pass，保/留=keep，废/NG/不行=ng，没打标意图=mark none；"
-    "note_text 永远填这句话里要记下来的实际描述（包括技术问题本身那句，如'收音有点小'），"
-    "只有完全没有可记内容时才填空串；note_category 只是给这段 note 贴标签，不替代 note_text："
-    "技术问题(收音小/灯光暗/穿帮/对焦虚/杂音)=issue，否则=note。"
-    "当前：第1场 / 第1进 / 当前活跃第3条；上一条=第2条。"
-)
+# 上下文行：fixture expected 以此为前提（当前第1场/第1进/活跃第3条；上一条=第2条）。
+# prompt 体不再本地硬编码——经 build_extract_messages 取生产 _build_extract_system_prompt()，
+# 生产 prompt 退化 → 本门控红（消除 harness/生产双源漂移）。
+CONTEXT_LINE = "当前：第1场 / 第1进 / 当前活跃第3条；上一条=第2条。"
 
 
 def _load_cases() -> list[dict]:
@@ -80,10 +73,7 @@ def gemma_client():
 
 def _run_once(client, utterance: str) -> dict:
     resp = client.create_chat_completion(
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": utterance},
-        ],
+        messages=build_extract_messages(utterance, CONTEXT_LINE),
         tools=[build_extract_np_tool()],
         tool_choice={"type": "function", "function": {"name": EXTRACT_NP_TOOL_NAME}},
         temperature=0.2,
