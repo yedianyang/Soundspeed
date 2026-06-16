@@ -49,17 +49,6 @@ interface OcrScene {
   lines: OcrLine[]
 }
 
-const MOCK_OCR: OcrScene = {
-  location: "室内",
-  time: "夜",
-  setting: "拍摄现场",
-  lines: [
-    { type: "action", text: "【OCR 识别结果，请核对】" },
-    { type: "dialogue", speaker: "角色A", text: "这是从照片识别出的台词。" },
-    { type: "dialogue", speaker: "角色B", text: "需要人工校对后确认。" },
-  ],
-}
-
 // 归一化台词行（真库行与 OCR 行共用一种渲染样式）。speaker=null → 动作描述。
 interface NormLine {
   speaker: string | null
