@@ -304,6 +304,13 @@ function ToolCallBlock({ t }: { t: ToolCallEntry }) {
         </div>
       )}
 
+      {/* 纯文本路径：模型输出文本（raw_content）直显主行，不藏进折叠框 */}
+      {isTextPath && t.raw_content != null && (
+        <pre className="mt-1 whitespace-pre-wrap break-all text-foreground/90">
+          {t.raw_content}
+        </pre>
+      )}
+
       {/* 元数据：model · token 用量（有才显示） */}
       {(t.model || tokens) && (
         <div className="mt-1 text-[10px] text-muted-foreground/70">
@@ -319,14 +326,14 @@ function ToolCallBlock({ t }: { t: ToolCallEntry }) {
         </div>
       )}
 
-      {/* 原始输出 + 思考（默认折叠，两个字段都为 null 则不渲染） */}
+      {/* 原始输出 + 思考（默认展开，两个字段都为 null 则不渲染） */}
       {hasRawSection && (
-        <details className="mt-1">
+        <details open className="mt-1">
           <summary className="cursor-pointer select-none list-none text-[10px] text-muted-foreground/50 hover:text-muted-foreground/80">
             原始输出 + 思考
           </summary>
           <div className="mt-1 space-y-1">
-            {t.raw_content != null && (
+            {!isTextPath && t.raw_content != null && (
               <div>
                 <span className="text-[10px] text-muted-foreground/60">content / 思考</span>
                 <pre className="whitespace-pre-wrap break-all text-[10px] text-foreground/70">
