@@ -10,7 +10,9 @@
 CLAUDE.md
 AGENTS.md
 KIMI_SETUP.md
-.claude/
+.claude/worktrees/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
 .kimi/
 .reasonix/
 .playwright-mcp/
