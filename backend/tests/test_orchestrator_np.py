@@ -25,7 +25,6 @@ from backend.core.events import (
     NoteClarifyPayload,
     NoteConfirmPayload,
     NoteFailedPayload,
-    TakeChangedPayload,
     TakeStartPayload,
 )
 from backend.core.orchestrator import create_orchestrator

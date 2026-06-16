@@ -254,7 +254,6 @@ def test_voice_dispatch_emits_busy_then_idle(dal: DAL, monkeypatch) -> None:
     走真实 takes.py _dispatch_with_status wrapper + _done callback。
     删掉 takes.py 中 _emit_np_status_preamble 调用或 _done 接线，此测试即变红。
     """
-    import time
     from backend.core.events import LLM_STATUS
 
     _setup_scene_and_take(dal)

@@ -91,7 +91,7 @@ describe("buildExportFilename", () => {
   it("纯 ASCII 且恒以 .csv 结尾", () => {
     const name = buildExportFilename("today", new Date(2026, 11, 31))
     expect(name.endsWith(".csv")).toBe(true)
-    // eslint-disable-next-line no-control-regex
+     
     expect(/^[\x20-\x7e]+$/.test(name)).toBe(true)
   })
 })

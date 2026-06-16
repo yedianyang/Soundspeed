@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 
-import pytest
 
 from backend.pipelines.np_extract import NPExtraction
 from backend.pipelines.np_resolve import (
