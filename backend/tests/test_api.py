@@ -215,7 +215,7 @@ def test_diff_keeps_old_line_missing_from_new(tmp_dal: DAL, monkeypatch) -> None
     assert [r["status"] for r in body["rows"]] == ["equal", "kept", "equal"]
     # merged_raw_text 由 merged 重建（character：text 换行拼），与落库 lines 一致
     assert body["merged_raw_text"] == "夏雨：你来了。\n顾朗：嗯。\n夏雨：走吧。"
-    assert [(l["character"], l["text"]) for l in body["merged"]] == [
+    assert [(line["character"], line["text"]) for line in body["merged"]] == [
         ("夏雨", "你来了。"),
         ("顾朗", "嗯。"),  # 被漏掉的旧行保留
         ("夏雨", "走吧。"),
@@ -249,7 +249,7 @@ def test_diff_marks_added_and_changed(tmp_dal: DAL, monkeypatch) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert [r["status"] for r in body["rows"]] == ["equal", "added", "equal", "changed", "equal"]
-    assert [(l["character"], l["text"]) for l in body["merged"]] == [
+    assert [(line["character"], line["text"]) for line in body["merged"]] == [
         ("夏雨", "你来了。"),
         ("林夏", "我也在。"),
         ("顾朗", "嗯。"),

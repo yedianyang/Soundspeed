@@ -38,7 +38,9 @@ export default function EnrollRecorderDialog({ open, onOpenChange, speaker, onEn
   const recordingRef = useRef(false) // 卸载时判断是否需要 cancel 释放后端设备
   const mountedRef = useRef(true)
   const speakerRef = useRef<SpeakerDTO | null>(speaker)
-  speakerRef.current = speaker
+  useEffect(() => {
+    speakerRef.current = speaker
+  })
 
   const clearTimer = () => {
     if (timerRef.current) {

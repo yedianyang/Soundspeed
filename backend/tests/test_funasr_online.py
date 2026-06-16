@@ -72,7 +72,8 @@ def test_cache_same_dict_within_turn_new_after_start_turn():
     m = _FakeModel(["a", "b", "c"])
     r = FunAsrOnlineRunner(model=m)
     r.start_turn()
-    r.feed(_pcm(BLOCK_SAMPLES)); r.feed(_pcm(BLOCK_SAMPLES))
+    r.feed(_pcm(BLOCK_SAMPLES))
+    r.feed(_pcm(BLOCK_SAMPLES))
     assert m.calls[0]["cache_id"] == m.calls[1]["cache_id"]  # turn 内同一 dict 维持状态
     r.start_turn()
     r.feed(_pcm(BLOCK_SAMPLES))

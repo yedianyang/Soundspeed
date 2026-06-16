@@ -494,8 +494,8 @@ def _merge_script_lines(
       delete  → 保留旧（旧有新无 → kept；防 OCR 漏字/漏行/只识别半场把内容删没）
     """
     sm = difflib.SequenceMatcher(
-        a=[_script_line_key(l) for l in old],
-        b=[_script_line_key(l) for l in new],
+        a=[_script_line_key(line) for line in old],
+        b=[_script_line_key(line) for line in new],
         autojunk=False,
     )
     rows: list[ScriptDiffRow] = []
@@ -550,7 +550,7 @@ async def diff_scene_script(
     new_lines = list(body.lines)
     latest = dal.get_latest_script(scene_id)
     if latest is None:
-        rows = [ScriptDiffRow(status="added", old=None, new=l) for l in new_lines]
+        rows = [ScriptDiffRow(status="added", old=None, new=line) for line in new_lines]
         merged = new_lines
     else:
         old_lines = [
@@ -559,7 +559,7 @@ async def diff_scene_script(
         ]
         rows, merged = _merge_script_lines(old_lines, new_lines)
 
-    merged_raw_text = _build_raw_text([(l.character, l.text) for l in merged])
+    merged_raw_text = _build_raw_text([(line.character, line.text) for line in merged])
     return ScriptDiffOut(
         has_old=latest is not None,
         rows=rows,

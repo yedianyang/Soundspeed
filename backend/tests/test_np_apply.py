@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from backend.pipelines.np_apply import Change, apply_targets
+from backend.pipelines.np_apply import apply_targets
 from backend.pipelines.np_extract import NPExtraction
 
 

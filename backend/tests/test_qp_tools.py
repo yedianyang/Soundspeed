@@ -230,7 +230,6 @@ def test_list_scenes_tool_schema() -> None:
 
 
 def test_list_scenes_executor_filter_and_aggregate(tmp_dal) -> None:
-    from backend.llm.tools.transcript import list_scenes_executor
     from backend.tests.qp_eval_seed import seed_qp_eval_db
     seed_qp_eval_db(tmp_dal)
     out = list_scenes_executor({"location": "江城家"}, tmp_dal)

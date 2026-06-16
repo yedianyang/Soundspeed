@@ -4,7 +4,6 @@
 跑法:GEMMA_MODEL_PATH=<gguf> .venv/bin/python -m pytest backend/tests/test_qp_voice_eval.py -q -s -m qp_voice_eval
 (mmproj 经 HF cache 自动解析;语音单次含音频编码,显著慢于文本)
 """
-import asyncio
 import json
 import os
 from pathlib import Path

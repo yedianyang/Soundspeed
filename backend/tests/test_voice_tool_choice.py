@@ -1,7 +1,5 @@
 """infer_voice_tool 新增 tool_choice 形参 → 透传到 _submit。"""
 import asyncio
-import pytest
-from unittest.mock import AsyncMock, patch
 
 from backend.llm.service import LLMService
 
