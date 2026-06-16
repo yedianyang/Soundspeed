@@ -276,6 +276,8 @@ function ToolCallBlock({ t }: { t: ToolCallEntry }) {
   const tokens = tokensSummary(t)
   const isTextPath = t.tool_name === ""
   const hasRawSection = t.raw_content != null || t.raw_response != null
+  // 原始输出折叠态受控（默认展开，沿用原 <details open> 语义），三角随开合切换。
+  const [rawOpen, setRawOpen] = useState(true)
   return (
     <div className="border-b border-border/40 py-2 last:border-b-0">
       {/* 第一行：时间 · task_type · tool_name（高亮加粗），右侧 finish_reason */}
@@ -328,8 +330,13 @@ function ToolCallBlock({ t }: { t: ToolCallEntry }) {
 
       {/* 原始输出 + 思考（默认展开，两个字段都为 null 则不渲染） */}
       {hasRawSection && (
-        <details open className="mt-1">
+        <details
+          open={rawOpen}
+          onToggle={(e) => setRawOpen((e.currentTarget as HTMLDetailsElement).open)}
+          className="mt-1"
+        >
           <summary className="cursor-pointer select-none list-none text-[10px] text-muted-foreground/50 hover:text-muted-foreground/80">
+            <span className="mr-1">{rawOpen ? "▾" : "▸"}</span>
             原始输出 + 思考
           </summary>
           <div className="mt-1 space-y-1">
