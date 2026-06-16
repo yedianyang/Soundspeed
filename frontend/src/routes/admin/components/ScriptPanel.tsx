@@ -17,6 +17,7 @@ import {
   useUploadScript,
 } from "@/lib/api"
 import type { SceneDTO } from "@/types/api"
+import { shouldShowParseResult } from "./script-panel-banner"
 import SceneUpdateDialog from "@/components/admin/SceneUpdateDialog"
 import {
   Dialog,
@@ -77,6 +78,8 @@ export function ScriptPanel() {
   const queryClient = useQueryClient()
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [dismissedId, setDismissedId] = useState<number | null>(null)
+  // 本会话解析过的 upload_id：结果横幅只为它显示，避免冷启动复活持久化的旧 parsed 记录。
+  const [sessionUploadId, setSessionUploadId] = useState<number | null>(null)
 
   // 常驻轮询上传记录；最新一条驱动 UI（上传/解析中/完成）。组件重新挂载会重新拉，
   // 故切走再回来能自动恢复进度——后台解析本就不受前端影响。
@@ -166,6 +169,7 @@ export function ScriptPanel() {
     if (!latestUpload) return
     setUploadError(null)
     setDismissedId(null)
+    setSessionUploadId(latestUpload.upload_id)
     try {
       await parse.mutateAsync({
         uploadId: latestUpload.upload_id,
@@ -342,10 +346,10 @@ export function ScriptPanel() {
         </div>
       )}
 
-      {/* 解析完成结果（parsed 成功 / error 失败）；dismiss 后不再显示同一条 */}
+      {/* 解析完成结果（parsed 成功 / error 失败）；仅本会话解析过、且未 dismiss 才显示。
+          冷启动只有持久化的旧 parsed 记录、sessionUploadId 为 null → 不复活这条横幅。 */}
       {latestUpload &&
-        (latestUpload.status === "parsed" || latestUpload.status === "error") &&
-        dismissedId !== latestUpload.upload_id && (
+        shouldShowParseResult(latestUpload, sessionUploadId, dismissedId) && (
           <div
             className={cn(
               "flex items-start gap-2 rounded-lg px-3 py-2 text-xs",
