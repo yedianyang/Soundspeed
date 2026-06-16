@@ -5,7 +5,6 @@
   "permissions": {
     "deny": [
       "Bash(rm -rf:*)",
-      "Bash(curl:*)",
       "Bash(wget:*)",
       "Bash(sudo:*)",
       "Read(./.env)",
