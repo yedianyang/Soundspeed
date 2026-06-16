@@ -278,17 +278,26 @@ function tokensSummary(t: ToolCallEntry): string | null {
   return parts.length ? parts.join(" / ") : null
 }
 
-// 单条 tool call 渲染成结构化小块（v2 payload）。框 h-72 够高，多行无妨。
+// 单条模型调用渲染成结构化小块（v3 payload）。框 h-72 够高，多行无妨。
+// tool_name === "" 表示纯文本路径条目（arguments 同为 ""）。
 function ToolCallBlock({ t }: { t: ToolCallEntry }) {
   const tokens = tokensSummary(t)
+  const isTextPath = t.tool_name === ""
+  const hasRawSection = t.raw_content != null || t.raw_response != null
   return (
     <div className="border-b border-border/40 py-2 last:border-b-0">
       {/* 第一行：时间 · task_type · tool_name（高亮加粗），右侧 finish_reason */}
       <div className="flex items-baseline gap-1">
         <span className="text-muted-foreground/60">[{fmtTs(t.ts)}]</span>
         <span className="text-muted-foreground">{t.task_type}</span>
-        <span className="text-muted-foreground/40">·</span>
-        <span className="font-bold text-primary">{t.tool_name}</span>
+        {isTextPath ? (
+          <span className="text-muted-foreground/60">(text)</span>
+        ) : (
+          <>
+            <span className="text-muted-foreground/40">·</span>
+            <span className="font-bold text-primary">{t.tool_name}</span>
+          </>
+        )}
         {t.finish_reason && (
           <span className="ml-auto text-[10px] text-muted-foreground/60">
             {t.finish_reason}
@@ -296,10 +305,12 @@ function ToolCallBlock({ t }: { t: ToolCallEntry }) {
         )}
       </div>
 
-      {/* arguments：JSON 美化多行 */}
-      <pre className="mt-1 whitespace-pre-wrap break-all text-foreground/90">
-        {prettyArgs(t.arguments)}
-      </pre>
+      {/* arguments：JSON 美化多行（纯文本路径无 arguments，跳过） */}
+      {!isTextPath && t.arguments !== "" && (
+        <pre className="mt-1 whitespace-pre-wrap break-all text-foreground/90">
+          {prettyArgs(t.arguments)}
+        </pre>
+      )}
 
       {/* 元数据：model · token 用量（有才显示） */}
       {(t.model || tokens) && (
@@ -314,6 +325,33 @@ function ToolCallBlock({ t }: { t: ToolCallEntry }) {
           tools: {t.available_tools.join(", ")}
           {t.tool_choice && <span> · choice: {t.tool_choice}</span>}
         </div>
+      )}
+
+      {/* 原始输出 + 思考（默认折叠，两个字段都为 null 则不渲染） */}
+      {hasRawSection && (
+        <details className="mt-1">
+          <summary className="cursor-pointer select-none list-none text-[10px] text-muted-foreground/50 hover:text-muted-foreground/80">
+            原始输出 + 思考
+          </summary>
+          <div className="mt-1 space-y-1">
+            {t.raw_content != null && (
+              <div>
+                <span className="text-[10px] text-muted-foreground/60">content / 思考</span>
+                <pre className="whitespace-pre-wrap break-all text-[10px] text-foreground/70">
+                  {t.raw_content}
+                </pre>
+              </div>
+            )}
+            {t.raw_response != null && (
+              <div>
+                <span className="text-[10px] text-muted-foreground/60">raw_response</span>
+                <pre className="whitespace-pre-wrap break-all text-[10px] text-foreground/70">
+                  {prettyArgs(t.raw_response)}
+                </pre>
+              </div>
+            )}
+          </div>
+        </details>
       )}
     </div>
   )
@@ -340,7 +378,7 @@ function ToolCallLog() {
       >
         {toolCalls.length === 0 ? (
           <div className="flex h-full items-center justify-center text-center text-muted-foreground/60">
-            暂无 tool call —— 跑一次「一键跑完整 take」后这里实时显示 Gemma 的工具调用
+            暂无模型调用 —— 跑一次「一键跑完整 take」后这里实时显示 Gemma 的调用轨迹
           </div>
         ) : (
           toolCalls.map((t, i) => <ToolCallBlock key={i} t={t} />)

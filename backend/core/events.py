@@ -7,6 +7,8 @@ Payload 使用 frozen=True 的 dataclass，防止 handler 间互相篡改。
 """
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass
 
 # ── 事件类型常量 ──────────────────────────────────────────────────────────────
@@ -347,14 +349,17 @@ TOOL_CALL = "tool.call"
 
 @dataclass(frozen=True)
 class ToolCallPayload:
-    """tool.call 的 payload v2：Gemma agent 每次 function-calling 请求侧事件 + 元数据。
+    """tool.call 的 payload v3：Gemma agent 推理完成事件 + 元数据。
 
-    只含请求侧（工具名+参数）与推理元数据，不含工具执行返回结果，不含 messages/memory。
+    覆盖两条路径：
+      - 工具路径（tool_name 非空）：infer_tool 返回 tool_calls[0]，front end 展示工具调用。
+      - content 路径（tool_name==""，arguments==""）：infer 返回纯文本，以空哨兵标记。
 
     tool_id：tool_calls[0]["id"]（llama-cpp 可能缺失，给 None）。
     tool_type：tool_calls[0]["type"]，通常 "function"（可能缺失，给 None）。
-    tool_name：tool_calls[0]["function"]["name"]。
-    arguments：tool_calls[0]["function"]["arguments"]，原样透传 JSON 字符串，前端负责美化。
+    tool_name：tool_calls[0]["function"]["name"]；content 路径为 ""（哨兵）。
+    arguments：tool_calls[0]["function"]["arguments"]，原样透传 JSON 字符串，前端负责美化；
+               content 路径为 ""（哨兵）。
     finish_reason：result_dict["choices"][0].get("finish_reason")（可能缺失，给 None）。
     model：result_dict.get("model")（llama-cpp 不保证带，给 None）。
     prompt_tokens：result_dict["usage"]["prompt_tokens"]（usage 整块可能缺失，给 None）。
@@ -364,6 +369,10 @@ class ToolCallPayload:
     tool_choice：gen_kwargs["tool_choice"] 规整后的字符串：dict {function:{name}} → 那个 name；
                  "auto"/"none"/"required" 原样；缺失给 None。
     ts：time.time() epoch 秒（float）。
+    raw_content：result_dict["choices"][0]["message"]["content"]，模型写的文本（含思考前导）；
+                 缺失或 None 时给 None。
+    raw_response：json.dumps(result_dict, ensure_ascii=False, default=str)，完整原始响应 JSON 字符串；
+                  序列化失败给 None。
     """
 
     task_type: str
@@ -379,41 +388,80 @@ class ToolCallPayload:
     total_tokens: int | None = None
     available_tools: tuple[str, ...] = ()
     tool_choice: str | None = None
+    raw_content: str | None = None
+    raw_response: str | None = None
 
 
-def broadcast_tool_call(
-    cm,
+def build_tool_call_payload(
     task_type: str,
-    tool_name: str,
-    arguments: str,
-    *,
-    ts: float,
-    tool_id: str | None = None,
-    tool_type: str | None = None,
-    finish_reason: str | None = None,
-    model: str | None = None,
-    prompt_tokens: int | None = None,
-    completion_tokens: int | None = None,
-    total_tokens: int | None = None,
-    available_tools: tuple[str, ...] = (),
-    tool_choice: str | None = None,
-) -> None:
-    """广播 tool.call（全局，不带 conn_id）。cm 鸭子类型，避免 events.py 反向依赖连接层。"""
-    cm.broadcast(
-        TOOL_CALL,
-        ToolCallPayload(
-            task_type=task_type,
-            tool_name=tool_name,
-            arguments=arguments,
-            ts=ts,
-            tool_id=tool_id,
-            tool_type=tool_type,
-            finish_reason=finish_reason,
-            model=model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            available_tools=available_tools,
-            tool_choice=tool_choice,
-        ),
+    tc: dict | None,
+    gen_kwargs: dict,
+    result_dict: dict,
+    ts: float | None = None,
+) -> ToolCallPayload:
+    """构造 ToolCallPayload（单一来源）。
+
+    同时覆盖工具路径（tc 非 None）与 content 路径（tc=None，哨兵 tool_name==""）。
+
+    tc：tool_calls[0] 完整 dict；content 路径传 None。
+    gen_kwargs：_InferPayload.gen_kwargs，含 tools/tool_choice 等。
+    result_dict：llama-cpp 返回的完整响应 dict。
+    ts：epoch 秒，传 None 时自动取 time.time()。
+    """
+    if ts is None:
+        ts = time.time()
+
+    tc = tc or {}
+    fn: dict = tc.get("function") or {}
+
+    choices = result_dict.get("choices") or []
+    choice0 = choices[0] if choices else {}
+    message0: dict = choice0.get("message") or {}
+
+    finish_reason: str | None = choice0.get("finish_reason")
+    model: str | None = result_dict.get("model")
+
+    usage: dict = result_dict.get("usage") or {}
+    prompt_tokens: int | None = usage.get("prompt_tokens")
+    completion_tokens: int | None = usage.get("completion_tokens")
+    total_tokens: int | None = usage.get("total_tokens")
+
+    raw_tools = gen_kwargs.get("tools") or []
+    available_tools: tuple[str, ...] = tuple(
+        t["function"]["name"]
+        for t in raw_tools
+        if isinstance(t, dict) and isinstance(t.get("function"), dict) and t["function"].get("name")
+    )
+
+    raw_tc = gen_kwargs.get("tool_choice")
+    if isinstance(raw_tc, dict):
+        tool_choice: str | None = (raw_tc.get("function") or {}).get("name")
+    elif isinstance(raw_tc, str):
+        tool_choice = raw_tc
+    else:
+        tool_choice = None
+
+    raw_content: str | None = message0.get("content")
+
+    try:
+        raw_response: str | None = json.dumps(result_dict, ensure_ascii=False, default=str)
+    except Exception:
+        raw_response = None
+
+    return ToolCallPayload(
+        task_type=task_type,
+        tool_name=fn.get("name") or "",
+        arguments=fn.get("arguments") or "",
+        ts=ts,
+        tool_id=tc.get("id"),
+        tool_type=tc.get("type"),
+        finish_reason=finish_reason,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        available_tools=available_tools,
+        tool_choice=tool_choice,
+        raw_content=raw_content,
+        raw_response=raw_response,
     )

@@ -26,8 +26,11 @@ import type {
 export type ConnectionState = "connecting" | "open" | "closed" | "no-token"
 
 // tool.call 全局 WS 事件：后端 agent 的工具调用轨迹（开发者 tab 实时日志框消费）。
-// 冻结契约 v2：topic === "tool.call"，payload 即此形状（ts 是 epoch 秒 float，
+// 冻结契约 v3：topic === "tool.call"，payload 即此形状（ts 是 epoch 秒 float，
 // arguments 是原样 JSON 字符串、前端负责美化，nullable 字段后端可能给 null）。
+// v3 新增：raw_content（模型写的文本/思考，工具路径多为 null，纯文本路径有值）、
+// raw_response（完整原始响应 result_dict 的 JSON 字符串）。
+// 纯文本路径哨兵：tool_name === ""（arguments 同时为 ""），不含 kind 字段。
 export interface ToolCallEntry {
   task_type: string
   tool_id: string | null
@@ -42,6 +45,8 @@ export interface ToolCallEntry {
   available_tools: string[]
   tool_choice: string | null
   ts: number
+  raw_content: string | null
+  raw_response: string | null
 }
 
 // tool-call 实时日志有界缓冲：只留最近 N 条，超出从头丢（避免长跑 session 无限堆积）。
