@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react"
+import { JsonTree } from "@/components/admin/JsonTree"
 import { useQueryClient } from "@tanstack/react-query"
 import {
   Dialog,
@@ -260,15 +261,6 @@ function fmtTs(ts: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
-// arguments 是原样 JSON 字符串：能 parse 就 2 空格缩进美化，失败 fallback 原串。
-function prettyArgs(raw: string): string {
-  try {
-    return JSON.stringify(JSON.parse(raw), null, 2)
-  } catch {
-    return raw
-  }
-}
-
 // token 用量摘要：prompt/completion/total 各有才显示（null 跳过）。全 null → 返回 null（不渲染该行）。
 function tokensSummary(t: ToolCallEntry): string | null {
   const parts: string[] = []
@@ -305,11 +297,11 @@ function ToolCallBlock({ t }: { t: ToolCallEntry }) {
         )}
       </div>
 
-      {/* arguments：JSON 美化多行（纯文本路径无 arguments，跳过） */}
+      {/* arguments：JSON 树形折叠（纯文本路径无 arguments，跳过） */}
       {!isTextPath && t.arguments !== "" && (
-        <pre className="mt-1 whitespace-pre-wrap break-all text-foreground/90">
-          {prettyArgs(t.arguments)}
-        </pre>
+        <div className="mt-1">
+          <JsonTree raw={t.arguments} />
+        </div>
       )}
 
       {/* 元数据：model · token 用量（有才显示） */}
@@ -345,9 +337,7 @@ function ToolCallBlock({ t }: { t: ToolCallEntry }) {
             {t.raw_response != null && (
               <div>
                 <span className="text-[10px] text-muted-foreground/60">raw_response</span>
-                <pre className="whitespace-pre-wrap break-all text-[10px] text-foreground/70">
-                  {prettyArgs(t.raw_response)}
-                </pre>
+                <JsonTree raw={t.raw_response} />
               </div>
             )}
           </div>
