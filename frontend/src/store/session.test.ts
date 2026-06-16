@@ -106,6 +106,8 @@ function toolCall(over: Partial<ToolCallEntry>): ToolCallEntry {
     available_tools: [],
     tool_choice: null,
     ts: 0,
+    raw_content: null,
+    raw_response: null,
     ...over,
   }
 }
@@ -592,5 +594,18 @@ describe("appendToolCall", () => {
     expect(tc).toHaveLength(150)
     expect(tc[0].ts).toBe(1) // ts=0 那条被丢
     expect(tc[tc.length - 1].ts).toBe(150)
+  })
+
+  it("raw_content / raw_response 字段原样保留（v3 契约）", () => {
+    useSessionStore.getState().appendToolCall(
+      toolCall({
+        tool_name: "mark",
+        raw_content: "思考",
+        raw_response: '{"choices":[]}',
+      }),
+    )
+    const entry = useSessionStore.getState().toolCalls[0]
+    expect(entry.raw_content).toBe("思考")
+    expect(entry.raw_response).toBe('{"choices":[]}')
   })
 })

@@ -1143,3 +1143,63 @@ async def test_infer_tool_choice_defaults_to_config() -> None:
     # 不传 override → 用 config 的 "auto"（默认行为不变，回归保护）
     assert client.last_kwargs.get("tool_choice") == TASK_CONFIG["query_session"]["tool_choice"]
     await svc.aclose()
+
+
+# ---------------------------------------------------------------------------
+# content 路径 tap 测试（纯文本推理触发 _tool_call_tap）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_content_path_triggers_tool_call_tap() -> None:
+    """infer（content 路径）完成后 _tool_call_tap 被调用一次，tc 参数为 None。"""
+    _reset_service()
+    svc = get_service()
+    # StubClient 返回 {"choices":[{"message":{"content":"ok"}}]}
+    svc._client = StubClient(response="ok")
+
+    calls: list[tuple] = []
+    svc.set_tool_call_tap(lambda *a: calls.append(a))
+
+    result = await svc.infer(
+        messages=[{"role": "user", "content": "hi"}],
+        task_type="query_session",
+    )
+    assert result == "ok"
+
+    # tap 被调用一次
+    assert len(calls) == 1
+    task_type_arg, tc_arg, gen_kwargs_arg, result_dict_arg = calls[0]
+
+    # task_type 透传
+    assert task_type_arg == "query_session"
+    # content 路径 tc 为 None（哨兵）
+    assert tc_arg is None
+    # result_dict 含 choices
+    assert "choices" in result_dict_arg
+    assert result_dict_arg["choices"][0]["message"]["content"] == "ok"
+
+    await svc.aclose()
+    _reset_service()
+
+
+@pytest.mark.asyncio
+async def test_content_path_tap_does_not_affect_result() -> None:
+    """tap 抛异常不影响 infer 正常返回。"""
+    _reset_service()
+    svc = get_service()
+    svc._client = StubClient(response="safe")
+
+    def _bad_tap(*_args: object) -> None:
+        raise RuntimeError("tap 故意崩溃")
+
+    svc.set_tool_call_tap(_bad_tap)
+
+    result = await svc.infer(
+        messages=[{"role": "user", "content": "test"}],
+        task_type="query_session",
+    )
+    assert result == "safe"
+
+    await svc.aclose()
+    _reset_service()
