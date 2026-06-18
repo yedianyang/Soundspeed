@@ -162,6 +162,7 @@ class LiveAsrSession:
                 audio_sink=self.audio_buffer.append,
                 process_channels=self._process_channels,
                 partial_runner=partial_runner,
+                engine=self._engine,
             )
             self._driver = driver
             self._thread = threading.Thread(

@@ -49,8 +49,12 @@ class StreamDriver:
         audio_sink: Callable[[Any, int], None] | None = None,
         process_channels: tuple[int, ...] | None = None,
         partial_runner: Any = None,
+        engine: str = "whisper",
     ) -> None:
         self._runner = runner
+        # paraformer(funasr) 声学忠实、不吐 whisper 式幻觉 → 信任输出，final 跳过短文本 / 幻觉门
+        # （whisper 才需要门：它在静音 / 噪声段脑补训练集高频文本）。
+        self._trust_asr = engine == "funasr"
         self._publish = publish
         self._vad_config = vad_config
         self._detector_factory = detector_factory
@@ -135,7 +139,7 @@ class StreamDriver:
         text = _normalize_to_simplified(text)  # 繁→简，幻觉过滤前（繁体幻觉转简后能被简体表拦截）
         if not text.strip():
             return False  # 空转录（静音误触/噪声）不推
-        if _is_hallucination(text):
+        if _is_hallucination(text, trust_asr=self._trust_asr):
             logger.debug("丢弃疑似幻觉转录: %r", text)
             return False
         topic = ASR_FINAL_CH1 if seg.ch == 0 else ASR_FINAL_CH2
@@ -237,12 +241,47 @@ _HALLUCINATION_PATTERNS = [
 ]
 
 
-def _is_hallucination(text: str) -> bool:
-    """检测 Whisper 常见幻觉输出。匹配到任一模式即丢弃。"""
-    t = text.strip().lower()
-    # 极短文本（≤2字符）通常是幻觉
-    if len(t) <= 2:
+# 单字短词白名单：转对了也只有一个字，不能被短文本门当幻觉丢。分两组，幻觉风险不同：
+# - 片场动作指令：whisper 也极少误吐，放行无虞。
+# - 应答/确认词：承载「稍等 / 知道了 / 确认」语义（场记说「嗯」常表示稍等）。paraformer 几乎不吐，
+#   VAD 切段（min_speech + threshold）又挡掉多数 whisper 静音幻觉，故统一放行。若 whisper 路径
+#   将来「嗯」幻觉刷屏，可改成仅 funasr 放行 _ANSWER_WORDS（判定门不变，只白名单内容按引擎分）。
+#   纯迟疑填充（呃/额/唉）有意不收：对场记无信息价值，又是 whisper 高发幻觉，收进来只放大噪声。
+_COMMAND_WORDS = {
+    "停", "走", "好", "过", "卡", "开", "收", "准", "行", "来", "上", "下", "对",
+    "cut", "action", "ok", "go",
+}
+_ANSWER_WORDS = {"嗯", "哦", "噢", "欸", "诶", "是"}
+_SHORT_WHITELIST = _COMMAND_WORDS | _ANSWER_WORDS
+
+# 句末/句中标点（全角 + 半角），判长度 / 匹配白名单前先剥掉。
+_PUNCT_CHARS = "。，！？、；：·…—～「」『』（）《》,.!?;:~ \t\r\n\"'"
+
+
+def _strip_punct(text: str) -> str:
+    """剥掉首尾标点与空白（全角半角），让「停。」「好的！」按「停」「好的」判定。"""
+    return text.strip().strip(_PUNCT_CHARS)
+
+
+def _is_hallucination(text: str, *, trust_asr: bool = False) -> bool:
+    """检测幻觉 / 噪声转录（final 路径）。
+
+    先剥标点、空文本一律丢（不是有效转录）。其后按引擎信任度分流：
+
+    trust_asr=True（paraformer：声学忠实、上游 silero VAD 已把关语音性、不吐 whisper 式幻觉）
+    → 非空即放行，不设长度门 / 白名单 / 模式表，避免误伤白名单覆盖不到的真实短词（「三」「快」…）。
+
+    trust_asr=False（whisper：会在静音 / 噪声段脑补训练集高频文本）→ 跑全套门：单字（len<=1）
+    仅放行短词白名单，双字及以上走 _HALLUCINATION_PATTERNS 模式表。
+    （whisper 旧版 len<=2 一刀切把「停 / 好 / 是的 / 知道」这类真短词全丢，是短词漏检的主凶。）
+    """
+    t = _strip_punct(text).lower()
+    if not t:
         return True
+    if trust_asr:
+        return False  # 信任 ASR：非空转录一律放行
+    if len(t) <= 1:
+        return t not in _SHORT_WHITELIST  # 孤立单字：仅放行白名单
     return any(pat in t for pat in _HALLUCINATION_PATTERNS)
 
 

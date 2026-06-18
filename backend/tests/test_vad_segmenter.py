@@ -187,3 +187,12 @@ def test_two_channels_independent():
     assert len(segs0) == 1
     assert segs0[0].ch == 0
     assert segs1 == []
+
+
+def test_default_min_speech_is_180ms():
+    """VadConfig 默认 min_speech 应为 180ms。
+
+    回归：默认曾是 250ms（4000 样本），把「好」「停」这类 ~200ms 单字短语音整段丢在 VAD，
+    ASR 根本看不到。entrypoint 用裸 VadConfig()，此默认即生产值。
+    """
+    assert VadConfig().min_speech_ms == 180

@@ -27,7 +27,7 @@ class VadConfig:
     frame_samples: int = 512        # silero v5 @ 16k 硬要求，不要改
     threshold: float = 0.5          # speech_prob 阈值
     min_silence_ms: int = 300       # 静音多久算 turn 收尾（实时手感主旋钮；原 600ms，减少感知延迟）
-    min_speech_ms: int = 250        # 短于此的语音段丢弃（同时也是抗幻觉最短门限）
+    min_speech_ms: int = 180        # 短于此的语音段丢弃（抗幻觉最短门限）；原 250ms 把单字短词整段砍掉
     pre_roll_ms: int = 150          # 段首回补，防吃掉起音
     post_roll_ms: int = 150         # 段尾延伸，防切掉收音
     max_segment_ms: int = 30000     # 超长强切

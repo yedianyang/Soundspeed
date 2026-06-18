@@ -297,3 +297,35 @@ def test_run_safe_wraps_buffered_only_when_partials_active():
     plain = _RecordingDriver()
     s._run_safe(plain, wrap_buffered=False)
     assert plain.source is raw  # whisper 默认路径永不包 BufferedAudioSource(红线 R3)
+
+
+def test_start_passes_engine_to_driver(monkeypatch):
+    """start() 把当前引擎透传给 StreamDriver。
+
+    funasr 引擎下 driver 必须收到 engine='funasr'，否则退回默认 whisper、trust_asr 恒 False，
+    paraformer 信任去门在生产路径直接失效（engine-aware 信任开关的命门）。
+    """
+    import backend.asr.live_session as ls
+
+    session = _session(funasr_factory=_FakeRunner, funasr_partials=False)
+    session.set_engine("funasr")
+
+    captured: dict = {}
+
+    def _fake_driver(*args, **kwargs):
+        captured.update(kwargs)
+
+        class _D:
+            def run(self, *a):
+                pass
+
+            def stop(self):
+                pass
+
+        return _D()
+
+    monkeypatch.setattr(ls, "StreamDriver", _fake_driver)
+    monkeypatch.setattr(session, "_run_safe", lambda *a, **k: None)
+    session.start()
+
+    assert captured.get("engine") == "funasr"

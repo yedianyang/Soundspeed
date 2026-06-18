@@ -71,7 +71,7 @@ def _chunk(seq: int, start_frame: int, channels: list[np.ndarray]) -> AudioChunk
     return AudioChunk(seq=seq, channels=channels, n_frames=len(channels[0]), start_frame=start_frame)
 
 
-def _drive(chunks, runner=None, detector_factory=None, vad_config=None, process_channels=None):
+def _drive(chunks, runner=None, detector_factory=None, vad_config=None, process_channels=None, engine="whisper"):
     runner = runner or _FakeRunner()
     published: list[tuple[str, object]] = []
     driver = StreamDriver(
@@ -80,6 +80,7 @@ def _drive(chunks, runner=None, detector_factory=None, vad_config=None, process_
         vad_config=vad_config or _vad_cfg(),
         detector_factory=detector_factory or (lambda: _AmplitudeVad()),
         process_channels=process_channels,
+        engine=engine,
     )
     driver.run(_FakeSource(chunks))
     return published, runner
@@ -298,4 +299,93 @@ def test_normalize_filters_trad_hallucination():
     audio = np.concatenate([_silence(4000), _speech(8000), _silence(8000)])
     runner = _FakeRunner(text="謝謝觀看")
     published, _ = _drive([_chunk(0, 0, [audio])], runner=runner)
+    assert _asr_events(published) == []
+
+
+# ── 短文本幻觉门（final 路径）────────────────────────────────────────────────────
+
+
+def test_single_char_command_words_pass():
+    """片场单字指令（停/走/好/卡/对…）转对了也是单字，不该被短文本门当幻觉丢。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    for w in ("停", "走", "好", "过", "卡", "对", "行"):
+        assert _is_hallucination(w) is False, f"指令词 {w!r} 不该被丢"
+
+
+def test_single_char_answer_words_pass():
+    """单字应答/确认词（嗯/哦/是…）承载场记语义（嗯=稍等），应放行。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    for w in ("嗯", "哦", "噢", "欸", "诶", "是"):
+        assert _is_hallucination(w) is False, f"应答词 {w!r} 不该被丢"
+
+
+def test_short_word_with_punct_stripped_then_judged():
+    """判定前先剥首尾标点：「停。」「好的！」按「停」「好的」判，不被标点撑过长度门。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    assert _is_hallucination("停。") is False
+    assert _is_hallucination("好的！") is False
+    assert _is_hallucination("嗯，") is False
+
+
+def test_two_char_words_pass_length_gate():
+    """双字及以上一律过长度门，只受幻觉模式表约束：是的/知道/明白/可以 全放行。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    for w in ("是的", "知道", "明白", "可以", "好的", "过来"):
+        assert _is_hallucination(w) is False, f"双字词 {w!r} 不该被丢"
+
+
+def test_isolated_non_whitelist_single_char_dropped():
+    """不在白名单的孤立单字（噪声常吐）仍当幻觉丢；纯迟疑填充（呃/额）有意不收进白名单。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    for w in ("啦", "呀", "呃", "额", "x"):
+        assert _is_hallucination(w) is True, f"非白名单孤立单字 {w!r} 应被丢"
+
+
+def test_hallucination_patterns_still_filtered():
+    """长幻觉模式（谢谢观看 / thanks for watching）仍拦；正常台词放行。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    assert _is_hallucination("谢谢观看") is True
+    assert _is_hallucination("thanks for watching") is True
+    assert _is_hallucination("这是一句正常的台词") is False
+
+
+# ── 引擎感知信任（paraformer 去门）─────────────────────────────────────────────
+
+
+def test_trust_asr_passes_any_nonempty():
+    """信任模式（paraformer 声学忠实、VAD 已把关）：非空文本一律放行，白名单外单字也放。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    assert _is_hallucination("啦", trust_asr=True) is False
+    assert _is_hallucination("三", trust_asr=True) is False
+    assert _is_hallucination("谢谢观看", trust_asr=True) is False  # 信任：连模式表也不拦
+
+
+def test_trust_asr_still_drops_empty():
+    """信任模式仍丢空 / 纯标点（剥标点后为空不是有效转录）。"""
+    from backend.asr.stream_driver import _is_hallucination  # noqa: PLC0415
+
+    assert _is_hallucination("。。", trust_asr=True) is True
+    assert _is_hallucination("   ", trust_asr=True) is True
+
+
+def test_funasr_engine_trusts_short_word_outside_whitelist():
+    """engine=funasr：信任 ASR，白名单外的单字也 publish（paraformer 不吐 whisper 式幻觉）。"""
+    audio = np.concatenate([_silence(4000), _speech(8000), _silence(8000)])
+    runner = _FakeRunner(text="啦")  # 单字，不在白名单
+    published, _ = _drive([_chunk(0, 0, [audio])], runner=runner, engine="funasr")
+    assert len(_asr_events(published)) == 1
+
+
+def test_whisper_engine_still_filters_short_word():
+    """engine=whisper（默认）：保留幻觉门，白名单外单字仍当幻觉丢。"""
+    audio = np.concatenate([_silence(4000), _speech(8000), _silence(8000)])
+    runner = _FakeRunner(text="啦")
+    published, _ = _drive([_chunk(0, 0, [audio])], runner=runner, engine="whisper")
     assert _asr_events(published) == []
