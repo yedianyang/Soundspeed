@@ -13,7 +13,11 @@ from typing import Any
 
 import numpy as np
 
-from backend.asr.funasr_runner import FunAsrNotInstalled, normalize_funasr_text
+from backend.asr.funasr_runner import (
+    FunAsrNotInstalled,
+    normalize_funasr_text,
+    select_funasr_device,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +45,10 @@ class FunAsrOnlineRunner:
                 from funasr import AutoModel  # 懒 import:未装 funasr 不阻塞模块加载
             except ImportError as e:
                 raise FunAsrNotInstalled("FunASR 未安装") from e
-            logger.info("加载 FunASR 流式模型 %s(首次从 modelscope 下载 ~860MB)", _MODEL_NAME)
-            self._model = AutoModel(model=_MODEL_NAME, disable_update=True)
+            device = select_funasr_device()
+            logger.info("加载 FunASR 流式模型 %s on %s(首次从 modelscope 下载 ~860MB)",
+                        _MODEL_NAME, device)
+            self._model = AutoModel(model=_MODEL_NAME, disable_update=True, device=device)
         return self._model
 
     def warmup(self) -> None:

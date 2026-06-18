@@ -1,4 +1,7 @@
-"""FunAsrOnlineRunner:600ms 凑块/余量留存/cache per-turn/增量累计/end_turn 不冲尾。"""
+"""FunAsrOnlineRunner:600ms 凑块/余量留存/cache per-turn/增量累计/end_turn 不冲尾/设备探测。"""
+import sys
+import types
+
 import numpy as np
 import pytest
 
@@ -126,3 +129,24 @@ def test_warmup_uses_throwaway_cache_and_is_final():
     assert m.calls[-1]["cache_id"] != m.calls[0]["cache_id"]  # 独立 cache
     r.feed(_pcm(BLOCK_SAMPLES))  # warmup 后 turn 仍可继续
     assert m.calls[-1]["cache_id"] == m.calls[0]["cache_id"]  # turn cache 未被替换
+
+
+def test_ensure_model_passes_selected_device_to_automodel(monkeypatch):
+    """流式 AutoModel 同样吃探测设备:CPU 上 RTF≈2.4 追不上实时,MPS≈0.36 才稳。"""
+    captured: dict = {}
+
+    class _RecordingAutoModel:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def generate(self, **kwargs):
+            return [{"text": ""}]
+
+    fake_funasr = types.ModuleType("funasr")
+    fake_funasr.AutoModel = _RecordingAutoModel
+    monkeypatch.setitem(sys.modules, "funasr", fake_funasr)
+    monkeypatch.setattr("backend.asr.funasr_online.select_funasr_device", lambda: "mps")
+
+    FunAsrOnlineRunner().warmup()  # 载入 + 600ms 零样本预热,均走 _RecordingAutoModel
+    assert captured.get("device") == "mps"
+    assert captured.get("model") == "paraformer-zh-streaming"

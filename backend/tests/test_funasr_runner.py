@@ -1,5 +1,6 @@
-"""FunAsrRunner 契约测试:空格归一、int16→float32、懒 import、未安装报错。"""
+"""FunAsrRunner 契约测试:空格归一、int16→float32、懒 import、未安装报错、设备探测。"""
 import sys
+import types
 
 import numpy as np
 import pytest
@@ -8,6 +9,7 @@ from backend.asr.funasr_runner import (
     FunAsrNotInstalled,
     FunAsrRunner,
     normalize_funasr_text,
+    select_funasr_device,
 )
 
 
@@ -82,3 +84,47 @@ def test_missing_funasr_raises_not_installed(monkeypatch):
     runner = FunAsrRunner()
     with pytest.raises(FunAsrNotInstalled):
         runner.warmup()
+
+
+# ── select_funasr_device:Apple Silicon 上用 MPS(实测 ~10x CPU 且输出逐字一致),否则 CPU ──
+
+def _fake_torch(mps_available: bool):
+    return types.SimpleNamespace(
+        backends=types.SimpleNamespace(
+            mps=types.SimpleNamespace(is_available=lambda: mps_available)
+        )
+    )
+
+
+def test_select_device_mps_when_available(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(True))
+    assert select_funasr_device() == "mps"
+
+
+def test_select_device_cpu_when_mps_unavailable(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(False))
+    assert select_funasr_device() == "cpu"
+
+
+def test_select_device_cpu_when_torch_missing(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", None)  # import torch → ImportError
+    assert select_funasr_device() == "cpu"
+
+
+# ── _ensure_model:把探测到的设备透传给 AutoModel(CPU 慢→MPS 快的命门) ──
+
+def test_ensure_model_passes_selected_device_to_automodel(monkeypatch):
+    captured: dict = {}
+
+    class _RecordingAutoModel:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_funasr = types.ModuleType("funasr")
+    fake_funasr.AutoModel = _RecordingAutoModel
+    monkeypatch.setitem(sys.modules, "funasr", fake_funasr)
+    monkeypatch.setattr("backend.asr.funasr_runner.select_funasr_device", lambda: "mps")
+
+    FunAsrRunner().warmup()
+    assert captured.get("device") == "mps"
+    assert captured.get("model") == "paraformer-zh"

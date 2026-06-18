@@ -28,6 +28,22 @@ class FunAsrNotInstalled(RuntimeError):
     """funasr 包不可用(未随 uv sync 安装)。"""
 
 
+def select_funasr_device() -> str:
+    """FunASR 推理设备:Apple Silicon 上用 MPS,否则 CPU。
+
+    FunASR AutoModel 默认 device="cuda",Mac 上回退 CPU(不会自动用 MPS),paraformer
+    落 CPU 慢约 10x(实测 1.5s/段 → MPS 0.15s/段,输出逐字一致;流式更甚 RTF 2.4→0.36)。
+    torch 是 funasr 的依赖,import 放函数体内,保持本模块顶层无 torch 依赖。
+    """
+    try:
+        import torch
+        if torch.backends.mps.is_available():
+            return "mps"
+    except Exception:  # noqa: BLE001 - 无 torch / 无 MPS 一律回退 CPU
+        pass
+    return "cpu"
+
+
 def normalize_funasr_text(text: str) -> str:
     """去除 CJK 字符间空格(paraformer 按字分词),保留英文词间空格。"""
     return _CJK_GAP.sub("", text).strip()
@@ -58,9 +74,11 @@ class FunAsrRunner:
                 from funasr import AutoModel  # 懒 import:未装 funasr 不阻塞模块加载
             except ImportError as e:
                 raise FunAsrNotInstalled("FunASR 未安装") from e
-            logger.info("加载 FunASR 模型 %s(首次从 modelscope 下载 ~1GB)", _MODEL_NAME)
+            device = select_funasr_device()
+            logger.info("加载 FunASR 模型 %s on %s(首次从 modelscope 下载 ~1GB)",
+                        _MODEL_NAME, device)
             # 不挂 vad/punc/spk:上游 silero 已切段
-            self._model = AutoModel(model=_MODEL_NAME, disable_update=True)
+            self._model = AutoModel(model=_MODEL_NAME, disable_update=True, device=device)
         return self._model
 
     def warmup(self) -> None:
