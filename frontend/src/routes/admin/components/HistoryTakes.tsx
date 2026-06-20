@@ -461,8 +461,8 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
     [takesMap],
   )
 
-  // 隐藏时(移动端 swipe 未露出本面板)早退,省掉每次 store 更新的 sort/渲染白跑。
-  // 落在所有 hook 之后避免违反 rules-of-hooks;数据桥接在 AdminHome 不受影响。
+  // 隐藏时（移动端 swipe 未露出本面板）早退，省掉每次 store 更新时本面板的三态派生与渲染白跑（sort 在上面 useMemo 内，早退省不掉）。
+  // 落在所有 hook 之后避免违反 rules-of-hooks；数据桥接在 AdminHome 不受影响。
   if (!active) return null
 
   const view = historyListState(isLoading, isError, Math.max(takes.length, data?.length ?? 0))
@@ -473,13 +473,13 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
     const is401 = error instanceof ApiError && error.status === 401
     return (
       <p className="py-8 text-sm text-destructive/80 text-center">
-        {is401 ? "未登录或鉴权失败,请在设置里填写 token" : "加载失败,请稍后重试"}
+        {is401 ? "未登录或鉴权失败，请在设置里填写 token" : "加载失败，请稍后重试"}
       </p>
     )
   }
   if (view === "empty") {
     return (
-      <p className="py-8 text-sm text-muted-foreground/60 text-center">暂无 take,开始录制后出现</p>
+      <p className="py-8 text-sm text-muted-foreground/60 text-center">暂无 take，开始录制后出现</p>
     )
   }
 
