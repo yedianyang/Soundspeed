@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { TakeDTO } from "@/types/api"
-import { sortTakes, historyListState, buildHistoryRows, latestSceneId } from "./history-takes-helpers"
+import { sortTakes, historyListState, buildHistoryRows, latestSceneId, formatTakeTimestamp } from "./history-takes-helpers"
 
 function take(p: Partial<TakeDTO>): TakeDTO {
   return { scene_id: 0, shot: null, take_number: 1, status: "tbd", start_ts: 0, ...p } as TakeDTO
@@ -132,5 +132,17 @@ describe("buildHistoryRows", () => {
     expect(sceneRows.map((r) => r.kind === "scene" && r.sceneId)).toEqual([1, 2])
     const keys = rows.map((r) => r.key)
     expect(new Set(keys).size).toBe(keys.length)
+  })
+})
+
+describe("formatTakeTimestamp", () => {
+  it("start_ts<=0 占位返回 —", () => {
+    expect(formatTakeTimestamp(0)).toBe("—")
+    expect(formatTakeTimestamp(-1)).toBe("—")
+  })
+  it("正常 Unix 秒格式化成 MM-DD HH:mm(2 位补零,本地时区)", () => {
+    const d = new Date(2026, 5, 20, 14, 32, 0) // 本地 06-20 14:32(月份 0-based)
+    const ts = Math.floor(d.getTime() / 1000)
+    expect(formatTakeTimestamp(ts)).toBe("06-20 14:32")
   })
 })

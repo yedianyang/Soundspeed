@@ -84,3 +84,11 @@ export function historyListState(
   if (isLoading) return "loading"
   return "empty"
 }
+
+/** Unix 秒 → 本地 "MM-DD HH:mm";占位(<=0)返回 "—"。 */
+export function formatTakeTimestamp(startTs: number): string {
+  if (startTs <= 0) return "—"
+  const d = new Date(startTs * 1000)
+  const p = (n: number) => String(n).padStart(2, "0")
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
