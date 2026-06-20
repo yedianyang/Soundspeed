@@ -473,9 +473,12 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
   const didInitExpand = useRef(false)
   useEffect(() => {
     if (didInitExpand.current || filtered.length === 0) return
-    didInitExpand.current = true
     const latest = latestSceneId(filtered)
-    if (latest !== null) setExpandedScenes(new Set([latest]))
+    if (latest !== null) {
+      // 仅在真有可展开的场时才置 init-flag;全占位首批(latest=null)不消耗 init,留待真数据到达重试。
+      didInitExpand.current = true
+      setExpandedScenes(new Set([latest]))
+    }
   }, [filtered])
   const toggleScene = (sceneId: number) =>
     setExpandedScenes((prev) => {
