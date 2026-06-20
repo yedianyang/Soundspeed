@@ -590,11 +590,11 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
         // 折叠态正文也带 note 预览（take.notes 聚合，零额外请求）。
         const collapsedNotes = parseNoteLines(take.notes)
         return (
-          <div key={row.key} className="relative">
-            <span className={cn("absolute inset-y-0 left-0 w-1 rounded-l-4xl", STATUS_DOT[take.status])} aria-hidden />
-          <Card
-            className={cn(mutedCard, "w-full text-left hover:bg-muted transition-colors")}
-          >
+          <div key={row.key} className="flex items-stretch overflow-hidden rounded-4xl">
+            <div className={cn("w-1 shrink-0", STATUS_DOT[take.status])} aria-hidden />
+            <Card
+              className={cn(mutedCard, "flex-1 min-w-0 rounded-none text-left hover:bg-muted transition-colors")}
+            >
             <CardContent className="p-4 space-y-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5 flex-wrap">
@@ -610,21 +610,23 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
                     onChange={(s) => handleChangeStatus(take, s)}
                   />
                 </div>
-                <span className="text-[10px] text-muted-foreground/50 tabular-nums shrink-0">
-                  {formatTakeTimestamp(take.start_ts)}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="size-6 rounded-full"
-                  onClick={() => toggleExpand(take.take_id)}
-                >
-                  {isExpanded ? (
-                    <ChevronUp className="size-3.5" />
-                  ) : (
-                    <ChevronRight className="size-3.5" />
-                  )}
-                </Button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-[10px] text-muted-foreground/50 tabular-nums">
+                    {formatTakeTimestamp(take.start_ts)}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="size-6 rounded-full"
+                    onClick={() => toggleExpand(take.take_id)}
+                  >
+                    {isExpanded ? (
+                      <ChevronUp className="size-3.5" />
+                    ) : (
+                      <ChevronRight className="size-3.5" />
+                    )}
+                  </Button>
+                </div>
               </div>
 
               {isExpanded ? (
