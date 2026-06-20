@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type { UseMutationResult } from "@tanstack/react-query"
 import { useQueryClient } from "@tanstack/react-query"
 import { Check, ChevronRight, ChevronUp } from "lucide-react"
@@ -37,7 +37,7 @@ import { useSessionStore } from "@/store/session"
 import { ScriptDiffView } from "./ScriptDiffView"
 import { SpokenSegment } from "./SpokenSegment"
 import { MergedTranscriptView } from "./MergedTranscriptView"
-import { sortTakes, historyListState } from "./history-takes-helpers"
+import { buildHistoryRows, latestSceneId, historyListState } from "./history-takes-helpers"
 
 type PatchTakeMutation = UseMutationResult<
   TakeDTO,
@@ -456,16 +456,32 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
 
   const { isLoading, isError, error, data } = useTakes()
 
-  const takes: TakeDTO[] = useMemo(
-    () => sortTakes(Array.from(takesMap.values())),
-    [takesMap],
-  )
+  const rawTakes = useMemo(() => Array.from(takesMap.values()), [takesMap])
+
+  // 折叠态:expandedScenes 空集=全折叠;init-once 展开最近一场,之后用户控制、新场默认折叠。
+  const [expandedScenes, setExpandedScenes] = useState<Set<number>>(new Set())
+  const didInitExpand = useRef(false)
+  useEffect(() => {
+    if (didInitExpand.current || rawTakes.length === 0) return
+    didInitExpand.current = true
+    const latest = latestSceneId(rawTakes)
+    if (latest !== null) setExpandedScenes(new Set([latest]))
+  }, [rawTakes])
+  const toggleScene = (sceneId: number) =>
+    setExpandedScenes((prev) => {
+      const next = new Set(prev)
+      if (next.has(sceneId)) next.delete(sceneId)
+      else next.add(sceneId)
+      return next
+    })
+
+  const rows = useMemo(() => buildHistoryRows(rawTakes, expandedScenes), [rawTakes, expandedScenes])
 
   // 隐藏时（移动端 swipe 未露出本面板）早退，省掉每次 store 更新时本面板的三态派生与渲染白跑（sort 在上面 useMemo 内，早退省不掉）。
   // 落在所有 hook 之后避免违反 rules-of-hooks；数据桥接在 AdminHome 不受影响。
   if (!active) return null
 
-  const view = historyListState(isLoading, isError, Math.max(takes.length, data?.length ?? 0))
+  const view = historyListState(isLoading, isError, Math.max(rawTakes.length, data?.length ?? 0))
   if (view === "loading") {
     return <p className="py-8 text-sm text-muted-foreground/60 text-center">加载中…</p>
   }
@@ -500,14 +516,50 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
   // view === "list":渲染列表
   return (
     <div className="py-4 space-y-2.5">
-      {takes.map((take) => {
+      {rows.map((row) => {
+        if (row.kind === "scene") {
+          const current = scenes.find((s) => s.scene_id === row.sceneId)
+          const label = current ? current.scene_code : `#${row.sceneId}`
+          return (
+            <button
+              key={row.key}
+              onClick={() => toggleScene(row.sceneId)}
+              className="w-full flex items-center justify-between rounded-2xl bg-muted/40 px-4 py-2 text-left"
+            >
+              <span className="flex items-center gap-2 font-medium">
+                {row.collapsed ? <ChevronRight className="size-4" /> : <ChevronUp className="size-4" />}
+                <span className="font-mono">{label}</span>
+                <span className="text-xs text-muted-foreground">{row.takeCount} 条</span>
+              </span>
+              <span className="flex items-center gap-1.5">
+                {(["keep", "ng", "pass", "tbd"] as const).map((st) =>
+                  row.counts[st] > 0 ? (
+                    <span key={st} className="flex items-center gap-0.5 text-[10px] text-muted-foreground">
+                      <span className={cn("size-1.5 rounded-full", STATUS_DOT[st])} />
+                      {row.counts[st]}
+                    </span>
+                  ) : null,
+                )}
+              </span>
+            </button>
+          )
+        }
+        if (row.kind === "shot") {
+          return (
+            <div key={row.key} className="px-4 pt-1 text-xs text-muted-foreground/70">
+              Shot {row.shot}
+            </div>
+          )
+        }
+        // row.kind === "take":原 takes.map 回调体原样搬来,只把 take 改成 row.take,key 用 row.key。
+        const take = row.take
         const isExpanded = expanded.has(take.take_id)
         const summary = take.script_diff?.script_diff_summary
         // 折叠态正文也带 note 预览（take.notes 聚合，零额外请求）。
         const collapsedNotes = parseNoteLines(take.notes)
         return (
           <Card
-            key={take.take_id}
+            key={row.key}
             className={cn(mutedCard, "w-full text-left hover:bg-muted transition-colors")}
           >
             <CardContent className="p-4 space-y-2">
