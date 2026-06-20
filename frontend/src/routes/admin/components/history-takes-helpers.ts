@@ -1,4 +1,4 @@
-import type { TakeDTO } from "@/types/api"
+import type { TakeDTO, TakeStatus } from "@/types/api"
 
 /** 历史 take 列表排序:scene_id → shot(localeCompare)→ take_number。返回新数组,不原地改。 */
 export function sortTakes(takes: TakeDTO[]): TakeDTO[] {
@@ -8,6 +8,55 @@ export function sortTakes(takes: TakeDTO[]): TakeDTO[] {
       (a.shot ?? "").localeCompare(b.shot ?? "") ||
       a.take_number - b.take_number,
   )
+}
+
+export type StatusCounts = Record<TakeStatus, number>
+
+export type HistoryRow =
+  | { kind: "scene"; key: string; sceneId: number; takeCount: number; counts: StatusCounts; collapsed: boolean }
+  | { kind: "shot"; key: string; sceneId: number; shot: string }
+  | { kind: "take"; key: string; take: TakeDTO }
+
+function countStatuses(takes: TakeDTO[]): StatusCounts {
+  const counts: StatusCounts = { keep: 0, ng: 0, pass: 0, tbd: 0 }
+  for (const t of takes) counts[t.status] = (counts[t.status] ?? 0) + 1
+  return counts
+}
+
+/** 扁平异构行(scene 头 / shot 头 / take 卡)。空 expandedScenes = 全折叠;collapsed = !expandedScenes.has(sceneId)。 */
+export function buildHistoryRows(takes: TakeDTO[], expandedScenes: Set<number>): HistoryRow[] {
+  const sorted = sortTakes(takes)
+  const rows: HistoryRow[] = []
+  let i = 0
+  while (i < sorted.length) {
+    const sceneId = sorted[i].scene_id
+    const sceneTakes: TakeDTO[] = []
+    while (i < sorted.length && sorted[i].scene_id === sceneId) {
+      sceneTakes.push(sorted[i])
+      i++
+    }
+    const collapsed = !expandedScenes.has(sceneId)
+    rows.push({
+      kind: "scene",
+      key: `scene-${sceneId}`,
+      sceneId,
+      takeCount: sceneTakes.length,
+      counts: countStatuses(sceneTakes),
+      collapsed,
+    })
+    if (collapsed) continue
+    const hasNamedShot = sceneTakes.some((t) => t.shot != null && t.shot !== "")
+    let lastShot: string | null = null
+    for (const take of sceneTakes) {
+      const shot = take.shot && take.shot !== "" ? take.shot : null
+      if (hasNamedShot && shot !== null && shot !== lastShot) {
+        rows.push({ kind: "shot", key: `shot-${sceneId}-${shot}`, sceneId, shot })
+        lastShot = shot
+      }
+      rows.push({ kind: "take", key: `take-${take.take_id}`, take })
+    }
+  }
+  return rows
 }
 
 export type HistoryListState = "loading" | "error" | "empty" | "list"
