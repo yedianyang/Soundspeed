@@ -37,7 +37,7 @@ import { useSessionStore } from "@/store/session"
 import { ScriptDiffView } from "./ScriptDiffView"
 import { SpokenSegment } from "./SpokenSegment"
 import { MergedTranscriptView } from "./MergedTranscriptView"
-import { buildHistoryRows, latestSceneId, historyListState } from "./history-takes-helpers"
+import { buildHistoryRows, latestSceneId, historyListState, formatTakeTimestamp } from "./history-takes-helpers"
 
 type PatchTakeMutation = UseMutationResult<
   TakeDTO,
@@ -552,14 +552,16 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
           )
         }
         // row.kind === "take":原 takes.map 回调体原样搬来,只把 take 改成 row.take,key 用 row.key。
+        if (row.kind !== "take") return null
         const take = row.take
         const isExpanded = expanded.has(take.take_id)
         const summary = take.script_diff?.script_diff_summary
         // 折叠态正文也带 note 预览（take.notes 聚合，零额外请求）。
         const collapsedNotes = parseNoteLines(take.notes)
         return (
+          <div key={row.key} className="relative">
+            <span className={cn("absolute inset-y-0 left-0 w-1 rounded-l-4xl", STATUS_DOT[take.status])} aria-hidden />
           <Card
-            key={row.key}
             className={cn(mutedCard, "w-full text-left hover:bg-muted transition-colors")}
           >
             <CardContent className="p-4 space-y-2">
@@ -577,6 +579,9 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
                     onChange={(s) => handleChangeStatus(take, s)}
                   />
                 </div>
+                <span className="text-[10px] text-muted-foreground/50 tabular-nums shrink-0">
+                  {formatTakeTimestamp(take.start_ts)}
+                </span>
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -617,6 +622,7 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
               )}
             </CardContent>
           </Card>
+          </div>
         )
       })}
     </div>
