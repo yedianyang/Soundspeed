@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { TakeDTO } from "@/types/api"
-import { sortTakes, historyListState, buildHistoryRows, latestSceneId, formatTakeTimestamp } from "./history-takes-helpers"
+import { sortTakes, historyListState, buildHistoryRows, latestSceneId, formatTakeTimestamp, filterTakesByStatus } from "./history-takes-helpers"
 
 function take(p: Partial<TakeDTO>): TakeDTO {
   return { scene_id: 0, shot: null, take_number: 1, status: "tbd", start_ts: 0, ...p } as TakeDTO
@@ -144,5 +144,19 @@ describe("formatTakeTimestamp", () => {
     const d = new Date(2026, 5, 20, 14, 32, 0) // 本地 06-20 14:32(月份 0-based)
     const ts = Math.floor(d.getTime() / 1000)
     expect(formatTakeTimestamp(ts)).toBe("06-20 14:32")
+  })
+})
+
+describe("filterTakesByStatus", () => {
+  const ts = [
+    take({ take_id: 1, status: "keep" }),
+    take({ take_id: 2, status: "ng" }),
+    take({ take_id: 3, status: "tbd" }),
+  ]
+  it("空集 = 不筛,返回全部", () => {
+    expect(filterTakesByStatus(ts, new Set()).map((t) => t.take_id)).toEqual([1, 2, 3])
+  })
+  it("只留选中状态", () => {
+    expect(filterTakesByStatus(ts, new Set(["keep", "tbd"] as const)).map((t) => t.take_id)).toEqual([1, 3])
   })
 })

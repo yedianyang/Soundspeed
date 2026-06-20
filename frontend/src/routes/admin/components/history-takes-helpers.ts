@@ -92,3 +92,9 @@ export function formatTakeTimestamp(startTs: number): string {
   const p = (n: number) => String(n).padStart(2, "0")
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
+
+/** active 空集=不筛返回全部;否则只留 status 命中的。返回新数组。 */
+export function filterTakesByStatus(takes: TakeDTO[], active: Set<TakeStatus>): TakeDTO[] {
+  if (active.size === 0) return [...takes]
+  return takes.filter((t) => active.has(t.status))
+}
