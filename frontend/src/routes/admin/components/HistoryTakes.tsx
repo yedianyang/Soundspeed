@@ -442,7 +442,7 @@ function TakeDetail({
   )
 }
 
-export function HistoryTakes() {
+export function HistoryTakes({ active = true }: { active?: boolean }) {
   // takes 由 AdminHome 的 useTakes + seedTakes 桥接填充（始终挂载），此处只读 store。
   const takesMap = useSessionStore((s) => s.takes)
 
@@ -460,6 +460,10 @@ export function HistoryTakes() {
     () => sortTakes(Array.from(takesMap.values())),
     [takesMap],
   )
+
+  // 隐藏时(移动端 swipe 未露出本面板)早退,省掉每次 store 更新的 sort/渲染白跑。
+  // 落在所有 hook 之后避免违反 rules-of-hooks;数据桥接在 AdminHome 不受影响。
+  if (!active) return null
 
   const view = historyListState(isLoading, isError, Math.max(takes.length, data?.length ?? 0))
   if (view === "loading") {

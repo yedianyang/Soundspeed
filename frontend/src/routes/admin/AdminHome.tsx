@@ -674,7 +674,7 @@ export default function AdminHome() {
                   <ScriptPanel />
                 </div>
                 <div className="w-full h-full flex-shrink-0 overflow-y-auto px-3 pb-3">
-                  <HistoryTakes />
+                  <HistoryTakes active={mobileTab === "history"} />
                 </div>
               </div>
             </div>
