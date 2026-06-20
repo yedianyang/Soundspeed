@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { TakeDTO } from "@/types/api"
-import { sortTakes, historyListState, buildHistoryRows } from "./history-takes-helpers"
+import { sortTakes, historyListState, buildHistoryRows, latestSceneId } from "./history-takes-helpers"
 
 function take(p: Partial<TakeDTO>): TakeDTO {
   return { scene_id: 0, shot: null, take_number: 1, status: "tbd", start_ts: 0, ...p } as TakeDTO
@@ -48,6 +48,26 @@ describe("historyListState", () => {
   })
   it("有数据时后台 loading 不打断列表", () => {
     expect(historyListState(true, false, 5)).toBe("list")
+  })
+})
+
+describe("latestSceneId", () => {
+  it("返回 start_ts 最大那条的 scene_id", () => {
+    expect(latestSceneId([
+      take({ scene_id: 1, start_ts: 100 }),
+      take({ scene_id: 3, start_ts: 500 }),
+      take({ scene_id: 2, start_ts: 300 }),
+    ])).toBe(3)
+  })
+  it("忽略 start_ts<=0 的占位 take", () => {
+    expect(latestSceneId([
+      take({ scene_id: 1, start_ts: 100 }),
+      take({ scene_id: 9, start_ts: 0 }),
+    ])).toBe(1)
+  })
+  it("空或全占位返回 null", () => {
+    expect(latestSceneId([])).toBeNull()
+    expect(latestSceneId([take({ scene_id: 1, start_ts: 0 })])).toBeNull()
   })
 })
 

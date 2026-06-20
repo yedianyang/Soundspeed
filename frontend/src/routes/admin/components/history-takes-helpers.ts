@@ -1,5 +1,14 @@
 import type { TakeDTO, TakeStatus } from "@/types/api"
 
+/** start_ts 最大那条 take 的 scene_id(忽略 start_ts<=0 占位);空/全占位返回 null。 */
+export function latestSceneId(takes: TakeDTO[]): number | null {
+  let best: TakeDTO | null = null
+  for (const t of takes) {
+    if (t.start_ts > 0 && (best === null || t.start_ts > best.start_ts)) best = t
+  }
+  return best ? best.scene_id : null
+}
+
 /** 历史 take 列表排序:scene_id → shot(localeCompare)→ take_number。返回新数组,不原地改。 */
 export function sortTakes(takes: TakeDTO[]): TakeDTO[] {
   return [...takes].sort(
