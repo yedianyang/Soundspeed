@@ -30,12 +30,14 @@ import {
   usePatchTake,
   useScenes,
   useSpeakers,
+  useTakes,
+  ApiError,
 } from "@/lib/api"
 import { useSessionStore } from "@/store/session"
 import { ScriptDiffView } from "./ScriptDiffView"
 import { SpokenSegment } from "./SpokenSegment"
 import { MergedTranscriptView } from "./MergedTranscriptView"
-import { sortTakes } from "./history-takes-helpers"
+import { sortTakes, historyListState } from "./history-takes-helpers"
 
 type PatchTakeMutation = UseMutationResult<
   TakeDTO,
@@ -452,10 +454,30 @@ export function HistoryTakes() {
   // 本会话纠正过的 take（放父组件，避免 TakeDetail 折叠 unmount 丢失提示态）。
   const [correctedTakes, setCorrectedTakes] = useState<Set<number>>(new Set())
 
+  const { isLoading, isError, error, data } = useTakes()
+
   const takes: TakeDTO[] = useMemo(
     () => sortTakes(Array.from(takesMap.values())),
     [takesMap],
   )
+
+  const view = historyListState(isLoading, isError, Math.max(takes.length, data?.length ?? 0))
+  if (view === "loading") {
+    return <p className="py-8 text-sm text-muted-foreground/60 text-center">加载中…</p>
+  }
+  if (view === "error") {
+    const is401 = error instanceof ApiError && error.status === 401
+    return (
+      <p className="py-8 text-sm text-destructive/80 text-center">
+        {is401 ? "未登录或鉴权失败,请在设置里填写 token" : "加载失败,请稍后重试"}
+      </p>
+    )
+  }
+  if (view === "empty") {
+    return (
+      <p className="py-8 text-sm text-muted-foreground/60 text-center">暂无 take,开始录制后出现</p>
+    )
+  }
 
   const handleChangeStatus = (take: TakeDTO, status: TakeStatus) => {
     if (status === take.status) return
@@ -471,14 +493,7 @@ export function HistoryTakes() {
     })
   }
 
-  if (takes.length === 0) {
-    return (
-      <p className="py-8 text-sm text-muted-foreground/60 text-center">
-        暂无 take，开始录制后出现
-      </p>
-    )
-  }
-
+  // view === "list":渲染列表
   return (
     <div className="py-4 space-y-2.5">
       {takes.map((take) => {

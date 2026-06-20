@@ -9,3 +9,20 @@ export function sortTakes(takes: TakeDTO[]): TakeDTO[] {
       a.take_number - b.take_number,
   )
 }
+
+export type HistoryListState = "loading" | "error" | "empty" | "list"
+
+/**
+ * history 列表渲染态。有数据优先:takeCount>0 恒 list(瞬时 loading/error 不打断);
+ * 无数据时 error>loading>empty —— 401 冷启(isError + 空)显 error,不再伪装成「暂无 take」。
+ */
+export function historyListState(
+  isLoading: boolean,
+  isError: boolean,
+  takeCount: number,
+): HistoryListState {
+  if (takeCount > 0) return "list"
+  if (isError) return "error"
+  if (isLoading) return "loading"
+  return "empty"
+}

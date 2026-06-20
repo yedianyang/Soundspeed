@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { TakeDTO } from "@/types/api"
-import { sortTakes } from "./history-takes-helpers"
+import { sortTakes, historyListState } from "./history-takes-helpers"
 
 function take(p: Partial<TakeDTO>): TakeDTO {
   return { scene_id: 0, shot: null, take_number: 1, ...p } as TakeDTO
@@ -27,5 +27,26 @@ describe("sortTakes", () => {
       take({ scene_id: 1, shot: "A", take_number: 1 }),
     ])
     expect(out.map((t) => t.shot)).toEqual([null, "A"])
+  })
+})
+
+describe("historyListState", () => {
+  it("401 冷启(无数据 + isError)→ error,不再伪装成 empty", () => {
+    expect(historyListState(false, true, 0)).toBe("error")
+  })
+  it("加载中无数据 → loading", () => {
+    expect(historyListState(true, false, 0)).toBe("loading")
+  })
+  it("加载完无数据无错 → empty", () => {
+    expect(historyListState(false, false, 0)).toBe("empty")
+  })
+  it("有数据 → list", () => {
+    expect(historyListState(false, false, 5)).toBe("list")
+  })
+  it("有数据时瞬时 error 不打断列表", () => {
+    expect(historyListState(false, true, 5)).toBe("list")
+  })
+  it("有数据时后台 loading 不打断列表", () => {
+    expect(historyListState(true, false, 5)).toBe("list")
   })
 })
