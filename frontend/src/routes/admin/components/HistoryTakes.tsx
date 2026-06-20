@@ -35,6 +35,7 @@ import { useSessionStore } from "@/store/session"
 import { ScriptDiffView } from "./ScriptDiffView"
 import { SpokenSegment } from "./SpokenSegment"
 import { MergedTranscriptView } from "./MergedTranscriptView"
+import { sortTakes } from "./history-takes-helpers"
 
 type PatchTakeMutation = UseMutationResult<
   TakeDTO,
@@ -451,11 +452,9 @@ export function HistoryTakes() {
   // 本会话纠正过的 take（放父组件，避免 TakeDetail 折叠 unmount 丢失提示态）。
   const [correctedTakes, setCorrectedTakes] = useState<Set<number>>(new Set())
 
-  const takes: TakeDTO[] = Array.from(takesMap.values()).sort(
-    (a, b) =>
-      a.scene_id - b.scene_id ||
-      (a.shot ?? "").localeCompare(b.shot ?? "") ||
-      a.take_number - b.take_number
+  const takes: TakeDTO[] = useMemo(
+    () => sortTakes(Array.from(takesMap.values())),
+    [takesMap],
   )
 
   const handleChangeStatus = (take: TakeDTO, status: TakeStatus) => {
