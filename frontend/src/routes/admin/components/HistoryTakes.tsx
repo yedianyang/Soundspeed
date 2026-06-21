@@ -559,7 +559,7 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
             >
               <span className="flex items-center gap-2 font-medium">
                 {row.collapsed ? <ChevronRight className="size-4" /> : <ChevronUp className="size-4" />}
-                <span className="font-mono">{label}</span>
+                <span className="font-mono">Scene {label}</span>
                 <span className="text-xs text-muted-foreground">{row.takeCount} 条</span>
               </span>
               <span className="flex items-center gap-1.5">
@@ -591,7 +591,7 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
         const collapsedNotes = parseNoteLines(take.notes)
         return (
           <div key={row.key} className="flex items-stretch overflow-hidden rounded-4xl">
-            <div className={cn("w-1 shrink-0", STATUS_DOT[take.status])} aria-hidden />
+            <div className={cn("w-1.5 shrink-0", STATUS_DOT[take.status])} aria-hidden />
             <Card
               className={cn(mutedCard, "flex-1 min-w-0 rounded-none text-left hover:bg-muted transition-colors")}
             >
