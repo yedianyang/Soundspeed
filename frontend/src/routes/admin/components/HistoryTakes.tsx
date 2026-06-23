@@ -547,6 +547,9 @@ export function HistoryTakes({ active = true }: { active?: boolean }) {
           )
         })}
       </div>
+      {rows.length === 0 && (
+        <p className="py-8 text-sm text-muted-foreground/60 text-center">该筛选下没有 take</p>
+      )}
       {rows.map((row) => {
         if (row.kind === "scene") {
           const current = scenes.find((s) => s.scene_id === row.sceneId)
